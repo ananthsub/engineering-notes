@@ -34,11 +34,23 @@ There is no source `index.html` to update.
 
 The repository includes three Cursor skills:
 
-- `pr-html-concise-public` creates a two-minute, one-page PR explanation.
-- `pr-html-public` creates a full PR deep dive.
+- `pr-html-concise-public` creates a two-minute explanation of one question in a PR or stack.
+- `pr-html-public` creates a full deep dive for one PR, a dependent stack, or related PR groups.
 - `upload-public-html` checks, publishes, and verifies static pages.
 
 Both review skills can ask the user to choose a topic, follow a specific code path, or turn a follow-up question into another page. They enforce the public-content policy before handing the result to the upload skill.
+
+Examples:
+
+```text
+/pr-html-concise-public 2713 How do task_source, agent_map, and num_repeats compose?
+
+/pr-html-public 2710 2713 2717 2724 2732
+
+/pr-html-public 2710 2713 2717 2724 2732 related to 2640 2641 2661
+```
+
+For multiple PRs, the deep-dive skill verifies dependency order and keeps related work separate from the stack. It pins each PR to its own head SHA so later force-pushes cannot silently change the explanation.
 
 Install them as personal skills so they are available while working in other repositories:
 

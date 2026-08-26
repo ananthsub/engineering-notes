@@ -1,7 +1,7 @@
 ---
 name: pr-html-concise-public
-description: One-page HTML explainer for a PR/MR — leads with a diagram, shows the evidence it works, in plain words. Uploads to my public github pages site.
-argument-hint: "<pr-number> [the one thing to explain]"
+description: One-page HTML explainer for one question in a PR, stack layer, or related PR group — leads with a diagram, shows the evidence it works, in plain words. Uploads to my public GitHub Pages site.
+argument-hint: "<pr-number-or-url>... [the one thing to explain]"
 user-invocable: true
 ---
 
@@ -12,6 +12,8 @@ Make one page that tells a reader everything they need to know about one PR, or 
 Default repository: `NVIDIA-NeMo/Gym`. Use the repository named by the user when provided.
 
 Use `pr-html-public` when the question needs a full deep dive. Use this concise skill by default for one mechanism, one bug, one design choice, or one review finding.
+
+Several PRs may provide context for one concise question. Pin every cited PR separately, but keep one question, one worked example, and the same page limits. Switch to `pr-html-public` when the reader needs the whole stack order, more than one layer's mechanism, or a comparison between related PR groups.
 
 ## Public-only gate
 
@@ -40,12 +42,21 @@ The page answers one question.
 
 If the user supplied a specific question, restate it in plain words. Ask one focused clarification only when the scope or intended reader would change the page.
 
-If the user supplied only a PR number:
+If the user supplied only one or more PR numbers:
 
-1. Read the title, description, files, diff, comments, and public evidence.
+1. Read the title, description, files, diff, comments, and public evidence for each PR.
 2. Identify three to five concrete questions that would each make a useful page.
 3. Use `AskQuestion` to let the user choose one. Put the strongest recommendation first.
 4. Include an “Other” path so the user can name a different question.
+
+For multiple PRs, include choices such as:
+
+- what one layer adds to the stack;
+- how one contract changes across two layers;
+- why one related PR overlaps with or differs from another;
+- which PR owns the final behavior.
+
+Do not describe a related group as a stack unless dependency evidence supports it.
 
 Good questions describe behavior:
 
@@ -70,7 +81,7 @@ Use `gh api` when review threads or check details are missing. For a public GitL
 
 Do not use a GitLab MCP tool for code review. Do not expose facts merely because an authenticated tool can read them.
 
-Store the full head SHA. Every code link must be a public permalink pinned to that SHA.
+Store a full head SHA for every cited PR. Every code link must use the SHA of the PR that contains that code.
 
 Read the changed code and its callers. Verify external API behavior against public source or documentation. Do not rely on the PR description when the code disagrees.
 
@@ -92,7 +103,7 @@ Use an `<h1>` that states what the reader will learn in words an engineer would 
 
 ### Provenance
 
-Use one `<p class="sub">` line with the public PR link, related public issue links, and pinned head SHA. Never include a private ticket or source link.
+Use one `<p class="sub">` line with the public PR links, related public issue links, and pinned head SHAs. Never include a private ticket or source link.
 
 ### Lead
 
@@ -152,13 +163,19 @@ If two values collide, choose new inputs. The reader must be able to trace each 
 pr-reviews/<owner>-<repo>/pr-<number>-<2-to-4-word-topic>.html
 ```
 
+When the question spans several PRs, use:
+
+```text
+pr-reviews/<owner>-<repo>/stacks/pr-<bottom>-<top>-<2-to-4-word-topic>-concise.html
+```
+
 Do not report completion until the exact revision is live.
 
 ## Interactive follow-up
 
 When the user asks to dive deeper after seeing the page:
 
-1. Keep the same pinned SHA unless the PR changed and the user wants the latest revision.
-2. Use `AskQuestion` to identify the desired direction: code path, worked example, evidence, edge case, or reviewer consequence.
+1. Keep the same pinned SHAs unless a PR changed and the user wants the latest revision.
+2. Use `AskQuestion` to identify the desired direction: code path, worked example, evidence, edge case, reviewer consequence, one stack layer, or one relationship between PR groups.
 3. Ask whether to replace the page, add a second concise page, or switch to `pr-html-public`.
 4. Preserve the public-content gate for every follow-up.
