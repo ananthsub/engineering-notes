@@ -9,15 +9,15 @@ Published at <https://ananthsub.github.io/engineering-notes/>.
 Drop static files anywhere in the repository. For example:
 
 ```text
-pr-reviews/<project>/pr-<number>.html
-designs/<topic>/index.html
+pr-reviews/<owner>-<repo>/pr-<number>-<topic>.html
+designs/<project>/<topic>/index.html
 ```
 
 Commit and push the files:
 
 ```bash
 git add .
-git commit -m "docs: add <topic> note"
+git commit -s -m "docs: add <topic> note"
 git push
 ```
 
@@ -30,6 +30,30 @@ On every push to `main`, the Pages workflow:
 
 There is no source `index.html` to update.
 
+## Cursor skills
+
+The repository includes three Cursor skills:
+
+- `pr-html-concise-public` creates a two-minute, one-page PR explanation.
+- `pr-html-public` creates a full PR deep dive.
+- `upload-public-html` checks, publishes, and verifies static pages.
+
+Both review skills can ask the user to choose a topic, follow a specific code path, or turn a follow-up question into another page. They enforce the public-content policy before handing the result to the upload skill.
+
+Install them as personal skills so they are available while working in other repositories:
+
+```bash
+./install_cursor_skills.sh
+```
+
+The installer creates symlinks under `~/.cursor/skills`. Pulling updates to this repository updates the installed skills immediately. Reload Cursor after the first installation.
+
+Remove the symlinks with:
+
+```bash
+./uninstall_cursor_skills.sh
+```
+
 ## Public-content warning
 
-The published site is public. Do not commit confidential source code, internal URLs, credentials, customer data, or other sensitive information.
+The repository and published site are public. Do not commit confidential source code, internal URLs, infrastructure details, credentials, customer data, unreleased information, or other sensitive material. Repository history and external archives may retain a file after deletion.
