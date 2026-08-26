@@ -1,0 +1,143 @@
+name: Deploy engineering notes to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The index uses each file's latest commit date.
+          fetch-depth: 0
+
+      - name: Collect static assets
+        run: |
+          mkdir -p public
+          find . \( -name '*.html' -o -name '*.pdf' -o -name '*.png' -o -name '*.jpg' \
+                    -o -name '*.jpeg' -o -name '*.gif' -o -name '*.svg' -o -name '*.css' \
+                    -o -name '*.js' -o -name '*.json' -o -name '*.csv' \) \
+            -not -path './public/*' -not -path './.git/*' -not -path './.github/*' \
+          | while read -r file; do
+              relative_path="${file#./}"
+              mkdir -p "public/$(dirname "$relative_path")"
+              cp "$file" "public/$relative_path"
+            done
+
+      - name: Generate index
+        run: |
+          cat > public/index.html <<'HEADER'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta name="description" content="Visual explanations for PR reviews and engineering design notes.">
+            <title>Ananth's Engineering Notes</title>
+            <style>
+              :root {
+                color-scheme: light dark;
+                font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                background: #f6f7f9;
+                color: #172033;
+              }
+              * { box-sizing: border-box; }
+              body { margin: 0; }
+              main { width: min(900px, calc(100% - 40px)); margin: 0 auto; padding: 72px 0; }
+              header { margin-bottom: 48px; }
+              .eyebrow {
+                margin: 0 0 12px;
+                color: #536079;
+                font-size: 0.8rem;
+                font-weight: 700;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+              }
+              h1 { margin: 0; font-size: clamp(2.5rem, 7vw, 4.75rem); letter-spacing: -0.055em; line-height: 0.98; }
+              .intro { max-width: 620px; margin: 24px 0 0; color: #536079; font-size: 1.15rem; line-height: 1.6; }
+              .table-wrap { overflow-x: auto; border: 1px solid #d8dde7; border-radius: 14px; }
+              table { width: 100%; min-width: 620px; border-collapse: collapse; background: #fff; }
+              th, td { padding: 14px 16px; text-align: left; border-bottom: 1px solid #e6e9ef; }
+              tr:last-child td { border-bottom: 0; }
+              th { color: #536079; font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; }
+              a { color: #1859b7; text-decoration: none; }
+              a:hover { text-decoration: underline; }
+              .path, .date { color: #68748a; }
+              .type { padding: 2px 7px; border: 1px solid #d8dde7; border-radius: 5px; color: #536079; font-size: 0.75rem; text-transform: uppercase; }
+              @media (prefers-color-scheme: dark) {
+                :root { background: #10131a; color: #edf1f7; }
+                .eyebrow, .intro, .path, .date, th { color: #aab4c5; }
+                .table-wrap { border-color: #303746; }
+                table { background: #181d27; }
+                th, td { border-color: #303746; }
+                a { color: #78adff; }
+                .type { border-color: #465064; color: #aab4c5; }
+              }
+            </style>
+          </head>
+          <body>
+            <main>
+              <header>
+                <p class="eyebrow">Ananth Subramanian</p>
+                <h1>Ananth's Engineering Notes</h1>
+                <p class="intro">Visual explanations for pull request reviews and engineering design documents.</p>
+              </header>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Document</th><th>Type</th><th>Last modified</th></tr></thead>
+                  <tbody>
+          HEADER
+
+          find . \( -name '*.html' -o -name '*.pdf' \) \
+            -not -path './public/*' -not -path './.git/*' -not -path './.github/*' -print0 \
+            | xargs -0 -I{} git log -1 --format='%at {}' -- '{}' \
+            | sort -rn \
+            | while read -r timestamp file; do
+                relative_path="${file#./}"
+                name=$(basename "$relative_path")
+                directory=$(dirname "$relative_path")
+                extension="${name##*.}"
+                modified=$(TZ='America/Los_Angeles' date -d "@$timestamp" '+%Y-%m-%d %H:%M %Z')
+                if [ "$directory" = "." ]; then
+                  label="$name"
+                else
+                  label="<span class=\"path\">${directory}/</span>${name}"
+                fi
+                echo "<tr><td><a href=\"$relative_path\">$label</a></td><td><span class=\"type\">$extension</span></td><td class=\"date\">$modified</td></tr>"
+              done >> public/index.html
+
+          cat >> public/index.html <<'FOOTER'
+                  </tbody>
+                </table>
+              </div>
+            </main>
+          </body>
+          </html>
+          FOOTER
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
