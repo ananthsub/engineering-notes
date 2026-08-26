@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How reusable task data enables runtime agent swapping</title>
+  <script>
+    (() => {
+      try {
+        if (localStorage.getItem("engineering-notes-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {}
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface2: #1d2530;
+      --border: #30363d;
+      --text: #e6edf3;
+      --dim: #9aa4af;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --red: #f85149;
+      --purple: #bc8cff;
+      --gray: #6e7681;
+      --code: #111820;
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --surface2: #eef2f6;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --dim: #59636e;
+      --accent: #0969da;
+      --green: #1a7f37;
+      --yellow: #9a6700;
+      --red: #cf222e;
+      --purple: #8250df;
+      --gray: #6e7781;
+      --code: #f0f3f6;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.62 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 980px; margin: 0 auto; padding: 40px 22px 80px; }
+    h1 { max-width: 820px; margin: 0 0 14px; font-size: clamp(2rem, 5vw, 3.4rem); line-height: 1.05; letter-spacing: -0.04em; }
+    h2 { margin: 64px 0 16px; font-size: clamp(1.55rem, 3vw, 2.1rem); line-height: 1.2; }
+    h3 { margin: 28px 0 8px; font-size: 1.12rem; }
+    p { margin: 10px 0 16px; }
+    a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+    code {
+      padding: 0.15em 0.35em;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--code);
+      color: var(--text);
+      font: 0.9em ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    pre {
+      overflow: auto;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--code);
+      font: 0.88rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    .theme {
+      position: fixed;
+      z-index: 10;
+      top: 14px;
+      right: 14px;
+      min-width: 112px;
+      padding: 9px 12px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .eyebrow { color: var(--purple); font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.78rem; }
+    .lede { max-width: 850px; font-size: 1.18rem; color: var(--dim); }
+    .answer {
+      margin: 26px 0;
+      padding: 18px 20px;
+      border-left: 4px solid var(--green);
+      border-radius: 0 9px 9px 0;
+      background: var(--surface);
+      font-size: 1.06rem;
+    }
+    .answer strong { color: var(--green); }
+    .toc {
+      margin: 32px 0;
+      padding: 18px 20px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+    .toc ol { columns: 2; margin: 8px 0 0; padding-left: 22px; }
+    .toc li { break-inside: avoid; margin: 5px 0; }
+    figure {
+      margin: 26px 0;
+      padding: 18px;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    figcaption { margin-top: 14px; color: var(--dim); font-size: 0.92rem; }
+    .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 14px; color: var(--dim); font-size: 0.84rem; }
+    .legend span::before { content: ""; display: inline-block; width: 22px; margin-right: 7px; vertical-align: middle; border-top: 3px solid var(--green); }
+    .legend .related::before { border-top-style: dashed; border-color: var(--purple); }
+    .lanes { min-width: 750px; display: grid; grid-template-columns: 126px 1fr; gap: 14px 18px; align-items: center; }
+    .lane-label { color: var(--dim); font-weight: 750; }
+    .flow { display: flex; align-items: stretch; gap: 8px; }
+    .node {
+      flex: 1;
+      min-width: 112px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-top: 3px solid var(--accent);
+      border-radius: 8px;
+      background: var(--surface2);
+      font-size: 0.82rem;
+    }
+    .node strong { display: block; font-size: 0.95rem; }
+    .node .state { color: var(--dim); }
+    .node.merged { border-top-color: var(--green); }
+    .node.open { border-top-color: var(--yellow); }
+    .node.dirty { border-top-color: var(--red); }
+    .arrow { align-self: center; color: var(--green); font-size: 1.25rem; }
+    .cross-edge {
+      grid-column: 2;
+      padding: 8px 12px;
+      border: 1px dashed var(--purple);
+      border-radius: 8px;
+      color: var(--purple);
+      text-align: center;
+      font-size: 0.86rem;
+    }
+    .before-after { min-width: 690px; display: grid; grid-template-columns: 1fr 54px 1fr; gap: 14px; align-items: stretch; }
+    .panel { padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface2); }
+    .panel.bad { border-top: 4px solid var(--red); }
+    .panel.good { border-top: 4px solid var(--green); }
+    .panel h3 { margin-top: 0; }
+    .big-arrow { display: grid; place-items: center; color: var(--accent); font-size: 2rem; }
+    .trace { min-width: 770px; display: flex; align-items: stretch; gap: 8px; }
+    .trace-step { flex: 1; min-width: 130px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface2); font-size: 0.84rem; }
+    .trace-step b { display: block; margin-bottom: 6px; color: var(--accent); }
+    .trace-arrow { align-self: center; color: var(--accent); }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .card { padding: 17px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+    .card h3 { margin-top: 0; }
+    .tag { display: inline-block; margin: 0 5px 5px 0; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--dim); font-size: 0.76rem; }
+    .risk { margin: 14px 0; padding: 18px; border: 1px solid var(--border); border-left: 5px solid var(--yellow); border-radius: 9px; background: var(--surface); }
+    .risk.blocker { border-left-color: var(--red); }
+    .risk.fixed-base { border-left-color: var(--purple); }
+    .risk h3 { margin-top: 0; }
+    .risk .impact { color: var(--dim); }
+    .status { font-weight: 750; }
+    .status.red { color: var(--red); }
+    .status.yellow { color: var(--yellow); }
+    .status.green { color: var(--green); }
+    .table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 10px; }
+    table { width: 100%; min-width: 720px; border-collapse: collapse; }
+    th, td { padding: 11px 12px; border-bottom: 1px solid var(--border); vertical-align: top; text-align: left; }
+    th { background: var(--surface2); }
+    tr:last-child td { border-bottom: 0; }
+    .callout { padding: 14px 17px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface2); }
+    .small { color: var(--dim); font-size: 0.88rem; }
+    .provenance { margin: 18px 0 0; }
+    .provenance summary { cursor: pointer; color: var(--accent); }
+    .provenance ul { columns: 2; padding-left: 22px; }
+    footer { margin-top: 70px; padding-top: 22px; border-top: 1px solid var(--border); color: var(--dim); }
+    @media (max-width: 700px) {
+      main { padding: 28px 15px 64px; }
+      .theme { position: static; float: right; margin: 0 0 14px 14px; }
+      .toc ol, .provenance ul { columns: 1; }
+      .cards { grid-template-columns: 1fr; }
+      h2 { margin-top: 48px; }
+    }
+  </style>
+</head>
+<body>
+  <button class="theme" type="button" aria-label="Toggle color theme">Light theme</button>
+  <main>
+    <div class="eyebrow">Public code review · snapshot 26 August 2026</div>
+    <h1>How reusable task data enables runtime agent swapping</h1>
+    <p class="lede">A critical review of the data-routing stack in PRs <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2710">#2710</a>–<a href="https://github.com/NVIDIA-NeMo/Gym/pull/2732">#2732</a>, then the separate swappable-agent stack in <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2640">#2640</a>, <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2641">#2641</a>, and <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2661">#2661</a>.</p>
+
+    <div class="answer"><strong>Short answer.</strong> The data stack changes a dataset row from “run this exact agent instance” to “this task came from this task/verifier source.” The run then chooses an agent, stamps that choice into materialized inputs, and keeps it in outputs as provenance. The swappable-agent stack changes a different layer: it loads a selected harness implementation and composes it into the environment’s existing agent instances. The second stack does not strictly require the first today—it preserves old instance names precisely so baked <code>agent_ref</code> rows still route—but the data stack removes that compatibility constraint and makes swapping, re-routing, and fan-out coherent runtime operations.</div>
+
+    <figure aria-labelledby="topology-caption">
+      <div class="legend"><span>verified/declared dependency</span><span class="related">cross-stack contract</span></div>
+      <div class="lanes">
+        <div class="lane-label">Data &amp; routing</div>
+        <div class="flow">
+          <div class="node merged"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2710">#2710</a></strong>map + validate<div class="state">merged · e5fe62b</div></div><div class="arrow">→</div>
+          <div class="node merged"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2713">#2713</a></strong>task source + fan-out<div class="state">merged · 1aa089c</div></div><div class="arrow">→</div>
+          <div class="node merged"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2717">#2717</a></strong>collate producer<div class="state">merged · 5f75693</div></div><div class="arrow">→</div>
+          <div class="node open"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2724">#2724</a></strong>benchmark/scaffold<div class="state">open · 0e751be</div></div><div class="arrow">→</div>
+          <div class="node open"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2732">#2732</a></strong>repository migration<div class="state">open · 9a56b58</div></div>
+        </div>
+        <div></div><div class="cross-edge">Dashed relationship: task_source makes route identity independent of the harness implementation selected at run time.</div>
+        <div class="lane-label">Agent composition</div>
+        <div class="flow">
+          <div class="node open"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2640">#2640</a></strong>compose harness<div class="state">open · 48dd5c5</div></div><div class="arrow">→</div>
+          <div class="node dirty"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2641">#2641</a></strong>CLI selector<div class="state">open/conflicting · cb7ee33</div></div><div class="arrow">→</div>
+          <div class="node open"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2661">#2661</a></strong>compatibility guard<div class="state">open · 8fd8465</div></div>
+        </div>
+      </div>
+      <figcaption id="topology-caption">Two stacks, not one. Solid arrows are supported by current base branches or explicit stack declarations. The cross-stack edge is a behavioral dependency, not a Git branch dependency. GitHub marked #2641 conflicting at analysis time.</figcaption>
+    </figure>
+
+    <details class="provenance">
+      <summary>Pinned public revisions used for this review</summary>
+      <ul>
+        <li>#2710: <code>e5fe62bb5d28b813495f355df54c0c4fe28bbb1c</code></li>
+        <li>#2713: <code>1aa089c092a51b666163bad68591b1c824eedf97</code></li>
+        <li>#2717: <code>5f75693c0bb61bd8b99319f30e78d5bfa568c132</code></li>
+        <li>#2724: <code>0e751be1be1dd46f17ba5e64a8ebc982ac1bfb88</code></li>
+        <li>#2732: <code>9a56b58f1ae038f527a094431ba52487d1f7c72f</code></li>
+        <li>#2640: <code>48dd5c55d1e4bfddadf4f473ae966c1b9cbb99f9</code></li>
+        <li>#2641: <code>cb7ee33e5112dbb2ca7ab36985a29021dbdabe2a</code></li>
+        <li>#2661: <code>8fd846556fd546dfeb051495592c809f95e3e9d5</code></li>
+      </ul>
+    </details>
+
+    <nav class="toc" aria-label="Page contents">
+      <strong>Read in this order</strong>
+      <ol>
+        <li><a href="#data-first">The data stack first</a></li>
+        <li><a href="#runtime-route">The runtime routing contract</a></li>
+        <li><a href="#dependency">Why this matters for swapping</a></li>
+        <li><a href="#swappable">How agent composition works</a></li>
+        <li><a href="#seams">Where the stacks meet</a></li>
+        <li><a href="#risks">Critical findings</a></li>
+        <li><a href="#evidence">Evidence and review order</a></li>
+      </ol>
+    </nav>
+
+    <section id="data-first">
+      <h2>1. The data stack first: identity moves out of the row</h2>
+      <p>The central change is ownership. A source or collated row should describe a task. It should not permanently choose the process that executes the task. PR #2717 makes the resources-server or self-contained-agent declaration the data owner, and collate writes that owner as <code>task_source</code>. It explicitly removes incoming <code>agent_ref</code> while preparing the row (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/5f75693c0bb61bd8b99319f30e78d5bfa568c132/nemo_gym/train_data_utils.py#L734-L780">pinned producer code</a>).</p>
+
+      <figure aria-labelledby="before-after-caption">
+        <div class="before-after">
+          <div class="panel bad">
+            <h3>Before: physical route in reusable data</h3>
+            <pre>{"question":"2+2?",
+"agent_ref":{"name":"math_simple_agent"}}</pre>
+            <p>Rename or swap the harness and the row is stale. Comparing two harnesses requires duplicate rows or regenerated data.</p>
+          </div>
+          <div class="big-arrow">→</div>
+          <div class="panel good">
+            <h3>After: stable task origin</h3>
+            <pre>{"question":"2+2?",
+"task_source":"math_resources"}</pre>
+            <p>The run resolves the current agent. Materialized inputs and outputs regain <code>agent_ref</code> as a record of what actually happened.</p>
+          </div>
+        </div>
+        <figcaption id="before-after-caption">The row’s stable fact is where the task came from. The selected agent is a run decision and later becomes provenance.</figcaption>
+      </figure>
+
+      <div class="cards">
+        <article class="card">
+          <span class="tag">#2710</span><span class="tag">merged</span>
+          <h3>Make legacy rows re-routable</h3>
+          <p><code>agent_map</code> overrides a specific baked agent or all rows through <code>_default</code>. <code>agent_name</code> becomes shorthand for the default mapping (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/e5fe62bb5d28b813495f355df54c0c4fe28bbb1c/nemo_gym/rollout_collection.py#L549-L561">code</a>). Agent names are validated before requests begin, avoiding partial dispatch.</p>
+        </article>
+        <article class="card">
+          <span class="tag">#2713</span><span class="tag">merged</span>
+          <h3>Resolve task sources and expand runs</h3>
+          <p>The resolver inverts configured agent→resources-server edges and requires exactly one candidate (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/1aa089c092a51b666163bad68591b1c824eedf97/nemo_gym/rollout_collection.py#L1347-L1434">code</a>). <code>fan_out</code> creates per-agent copies during run preprocessing, not in the stored dataset.</p>
+        </article>
+        <article class="card">
+          <span class="tag">#2717</span><span class="tag">merged</span>
+          <h3>Produce clean collated data</h3>
+          <p>Datasets may live on a resources server. Collate stamps <code>task_source</code>, strips legacy routing, and allocates distinct prepared paths for repeated declarations (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/5f75693c0bb61bd8b99319f30e78d5bfa568c132/nemo_gym/train_data_utils.py#L718-L783">code</a>). Reverify also routes directly from the task source (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/5f75693c0bb61bd8b99319f30e78d5bfa568c132/nemo_gym/rollout_reverification.py#L214-L237">code</a>).</p>
+        </article>
+        <article class="card">
+          <span class="tag">#2724</span><span class="tag">open</span>
+          <h3>Teach benchmarks and scaffolding</h3>
+          <p>Benchmark discovery accepts resources-server-owned datasets and chooses an agent by explicit pin, legacy declaration, or unique reverse edge (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/0e751be1be1dd46f17ba5e64a8ebc982ac1bfb88/nemo_gym/benchmarks.py#L44-L109">code</a>). New scaffolds emit the decoupled layout.</p>
+        </article>
+        <article class="card">
+          <span class="tag">#2732</span><span class="tag">open</span>
+          <h3>Migrate repository data and configs</h3>
+          <p>The mechanical layer removes row-level <code>agent_ref</code>, moves declarations to their resources servers, introduces fan-out for duplicate-agent comparisons, and removes aliases that existed only to satisfy stale stamps. It is the adoption layer, not a new runtime mechanism.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="runtime-route">
+      <h2>2. The runtime routing contract</h2>
+      <p>PR #2713 applies routing before dispatch. For a row that carries both fields, an <code>agent_ref.name</code> map entry wins over a <code>task_source</code> entry. Then <code>_default</code> applies. Without a map, a legacy <code>agent_ref</code> remains authoritative; otherwise <code>task_source</code> is resolved. Fan-out targets are final, and repetition can key on either the resolved target or the original routing basis (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/1aa089c092a51b666163bad68591b1c824eedf97/nemo_gym/rollout_collection.py#L739-L830">preprocessing code</a>).</p>
+
+      <figure aria-labelledby="trace-caption">
+        <div class="trace">
+          <div class="trace-step"><b>1 · reusable row</b><code>task_source: algebra</code><br>No agent chosen.</div><div class="trace-arrow">→</div>
+          <div class="trace-step"><b>2 · run knobs</b><code>fan_out: algebra → [baseline, alternate]</code></div><div class="trace-arrow">→</div>
+          <div class="trace-step"><b>3 · run copies</b>Two rows, stamped <code>agent_ref: baseline</code> and <code>alternate</code>.</div><div class="trace-arrow">→</div>
+          <div class="trace-step"><b>4 · validation</b>Both names must be real agent instances before any POST.</div><div class="trace-arrow">→</div>
+          <div class="trace-step"><b>5 · provenance</b>Materialized inputs and outputs retain the computed route.</div>
+        </div>
+        <figcaption id="trace-caption">Worked example: the dataset remains one row. Run preprocessing creates route-specific copies and assigns rollout indices. Dispatch posts to <code>row["agent_ref"]["name"]</code> only after resolution and validation (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/1aa089c092a51b666163bad68591b1c824eedf97/nemo_gym/rollout_collection.py#L1466-L1505">dispatch path</a>).</figcaption>
+      </figure>
+
+      <div class="callout"><strong>Important boundary.</strong> Direct callers of <code>run_examples</code> get task-source resolution and validation, but not <code>agent_map</code>, <code>fan_out</code>, or <code>num_repeats</code>. They must call <code>preprocess_examples</code> first (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/1aa089c092a51b666163bad68591b1c824eedf97/nemo_gym/rollout_collection.py#L652-L689">API contract</a>). This matters for trainer integrations that bypass the CLI pipeline.</div>
+    </section>
+
+    <section id="dependency">
+      <h2>3. Why this matters for swapping—and what is not a hard dependency</h2>
+      <p>It is tempting to say agent swapping is impossible while rows contain <code>agent_ref</code>. The code is more nuanced. PR #2640 deliberately retains each environment’s top-level agent instance name when it replaces the inner implementation. Its own comment says why: changing the instance name would break prepared data whose route is baked in (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/48dd5c55d1e4bfddadf4f473ae966c1b9cbb99f9/nemo_gym/global_config.py#L573-L582">composition code</a>).</p>
+      <p>So the composition stack can swap a harness under legacy data. But it can only do so by maintaining an alias-like shell:</p>
+      <pre>row agent_ref = "math_simple_agent"
+top-level instance remains "math_simple_agent"
+inner implementation changes simple_agent → hermes_agent</pre>
+      <p>The data stack removes that hidden requirement. Once a row says <code>task_source: math_resources</code>, routing can be recomputed from the current graph. The selected harness no longer needs to masquerade behind a historical row stamp. This is what makes one dataset reusable across a renamed agent, a different harness, or a multi-agent comparison.</p>
+    </section>
+
+    <section id="swappable">
+      <h2>4. How the swappable-agent stack builds on the foundation</h2>
+      <figure aria-labelledby="composition-caption">
+        <div class="before-after">
+          <div class="panel">
+            <h3>Selected standalone harness</h3>
+            <pre>hermes_agent:
+  resources_server:
+    name: ???</pre>
+            <p>The missing resources-server name marks this as the composition source.</p>
+          </div>
+          <div class="big-arrow">+</div>
+          <div class="panel good">
+            <h3>Environment target</h3>
+            <pre>math_simple_agent:
+  resources_server:
+    name: math_resources</pre>
+            <p>Composition copies the selected implementation, carries over environment bindings, and keeps this top-level instance name.</p>
+          </div>
+        </div>
+        <figcaption id="composition-caption">PR #2640 finds exactly one unbound source, deep-copies it into every target, and carries over only <code>resources_server</code>, <code>model_server</code>, and <code>datasets</code> (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/48dd5c55d1e4bfddadf4f473ae966c1b9cbb99f9/nemo_gym/global_config.py#L142-L144">carry-over set</a>, <a href="https://github.com/NVIDIA-NeMo/Gym/blob/48dd5c55d1e4bfddadf4f473ae966c1b9cbb99f9/nemo_gym/global_config.py#L550-L589">algorithm</a>).</figcaption>
+      </figure>
+
+      <div class="cards">
+        <article class="card">
+          <span class="tag">#2640</span>
+          <h3>Configuration transform</h3>
+          <p>Composition runs after includes, command-line overrides, and inheritance are merged, but before missing-value validation (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/48dd5c55d1e4bfddadf4f473ae966c1b9cbb99f9/nemo_gym/global_config.py#L758-L784">parse order</a>). It replaces every target agent instance, not one chosen target.</p>
+        </article>
+        <article class="card">
+          <span class="tag">#2641</span>
+          <h3>One flag, two namespaces</h3>
+          <p>In serve mode, <code>--agent</code> names an agent config asset and appends its path. Under <code>--no-serve</code>, it names a running top-level instance and becomes <code>+agent_name</code> (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/cb7ee33e5112dbb2ca7ab36985a29021dbdabe2a/nemo_gym/cli/main.py#L413-L429">translation</a>).</p>
+        </article>
+        <article class="card">
+          <span class="tag">#2661</span>
+          <h3>Verifier-side allowlist</h3>
+          <p>A resources server may declare <code>requires_agent</code>. The guard compares the selected implementation type with that list before composition (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/8fd846556fd546dfeb051495592c809f95e3e9d5/nemo_gym/global_config.py#L599-L653">guard</a>). Missing or unreadable declarations are permissive.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="seams">
+      <h2>5. Where the stacks meet</h2>
+      <div class="callout"><strong>Three identities share the word “agent.”</strong> <code>task_source</code> is the stable task/verifier owner. A runtime agent instance is a top-level config key used by dispatch, <code>agent_map</code>, fan-out, and no-serve routing. An agent implementation is the inner <code>responses_api_agents</code> key used by composition and <code>requires_agent</code>. A serve-mode asset name is not automatically a valid runtime-map target: composition removes the unbound template instance and installs its implementation under the preserved environment instance names.</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Decision</th><th>Owned by data/routing stack</th><th>Owned by composition stack</th></tr></thead>
+          <tbody>
+            <tr><td>What the task is</td><td><code>task_source</code> and task payload</td><td>Not changed</td></tr>
+            <tr><td>Which top-level endpoint receives the row</td><td><code>agent_map</code>, <code>fan_out</code>, or unique task-source resolution</td><td>Preserves endpoint names today</td></tr>
+            <tr><td>Which harness implementation runs inside that endpoint</td><td>Not changed</td><td>Unbound-agent composition</td></tr>
+            <tr><td>Whether the verifier claims support</td><td>Resources-server ownership identifies the verifier</td><td><code>requires_agent</code> checks selected implementation type</td></tr>
+            <tr><td>What output records</td><td>Computed <code>agent_ref</code> plus retained <code>task_source</code></td><td>The composed implementation is not separately identified in the row schema</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The clean mental model is “route, then implementation.” The current CLI blurs the boundary: serve-mode <code>--agent</code> chooses an implementation asset, while no-serve <code>--agent</code> invokes the data stack’s route-all behavior. Serve composition also replaces every target instance. A fan-out list can still name several preserved runtime instances, but all of those instances receive the same selected harness implementation, with only carried-over bindings such as model and resources server distinguishing them. That is the most important cross-stack UX decision to settle.</p>
+    </section>
+
+    <section id="risks">
+      <h2>6. Critical findings and concrete review requests</h2>
+
+      <article class="risk blocker">
+        <h3><span class="status red">1 · Merged defect:</span> reverify aggregation loses the resources-server dimension</h3>
+        <p>PR #2717 correctly groups reverified results by <code>(agent, resources server)</code>, but each returned entry contains only <code>agent_ref</code>. Export keys are then built only from the agent name. If one agent handles task sources from two resources servers, the second group overwrites the first in <code>metrics_to_log</code>, and the JSON entries cannot identify which server produced either result (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/5f75693c0bb61bd8b99319f30e78d5bfa568c132/nemo_gym/rollout_reverification.py#L590-L658">pinned code</a>). This exact concern was raised in the public review and remains present at the merged head.</p>
+        <p class="impact"><strong>Consequence:</strong> exported metrics can silently report only one verifier group. <strong>Request:</strong> include the resources-server name in each aggregate entry and in exporter/console keys; add a two-task-source, one-agent regression test.</p>
+      </article>
+
+      <article class="risk blocker">
+        <h3><span class="status red">2 · Merged defect:</span> reverify preflight can check a different verifier set than row routing uses</h3>
+        <p>Row-level <code>/verify</code> routing treats a resources-server <code>task_source</code> as authoritative. The preflight <code>reverify_mode</code> guard instead builds its server set from agent configuration edges (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/5f75693c0bb61bd8b99319f30e78d5bfa568c132/nemo_gym/rollout_reverification.py#L214-L246">row resolver</a>, <a href="https://github.com/NVIDIA-NeMo/Gym/blob/5f75693c0bb61bd8b99319f30e78d5bfa568c132/nemo_gym/rollout_reverification.py#L544-L568">preflight</a>). A row remapped by <code>task_source</code> can therefore reach a verifier that was never checked.</p>
+        <p class="impact"><strong>Consequence:</strong> an unsupported verifier can run without requiring <code>--force</code> and without the unsafe output prefix. <strong>Request:</strong> derive preflight servers from the actual rows with the same resolver used for <code>/verify</code>; add a task-source-remapped unsupported-server test.</p>
+      </article>
+
+      <article class="risk blocker">
+        <h3><span class="status red">3 · Open blocker:</span> composition can discard command-line overrides after they win the merge</h3>
+        <p>PR #2640 merges command-line values at highest priority, then replaces each target’s entire inner agent config with a copy of the source. Only three target keys survive. A CLI override aimed at another target field can therefore win the merge and still be deleted by composition (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/48dd5c55d1e4bfddadf4f473ae966c1b9cbb99f9/nemo_gym/global_config.py#L765-L778">merge then compose</a>, <a href="https://github.com/NVIDIA-NeMo/Gym/blob/48dd5c55d1e4bfddadf4f473ae966c1b9cbb99f9/nemo_gym/global_config.py#L573-L589">replacement</a>). An unresolved public review thread demonstrates this with a target <code>max_turns</code> override.</p>
+        <p class="impact"><strong>Consequence:</strong> the resolved run can differ from the user’s explicit override without an error. <strong>Request:</strong> define override paths after composition, or reject overrides against replaced branches; add an end-to-end parser test for an overridden non-binding field.</p>
+      </article>
+
+      <article class="risk blocker">
+        <h3><span class="status red">4 · Open blocker:</span> <code>--agent</code> changes both meaning and accepted names with <code>--no-serve</code></h3>
+        <p>Serve mode accepts an asset/config name. No-serve mode accepts a running instance name and routes every row to it through PR #2710. A public review gives two concrete regressions: an explicitly selected harness overlay can be replaced by a later base config, and documented instance-style names fail serve-mode asset lookup (<a href="https://github.com/NVIDIA-NeMo/Gym/pull/2641#issuecomment-5430604667">public evidence</a>). GitHub also currently marks #2641 conflicting with its parent.</p>
+        <p class="impact"><strong>Consequence:</strong> adding or removing <code>--no-serve</code> changes the referent namespace and the operation. <strong>Request:</strong> use separate flags for harness composition and row routing, or require an explicit mode/name prefix; cover existing documented commands before merge.</p>
+      </article>
+
+      <article class="risk">
+        <h3><span class="status yellow">5 · Contract gap:</span> the benchmark <code>agent:</code> pin does not participate in runtime task-source resolution</h3>
+        <p>PR #2724’s benchmark discovery and preparation honor a dataset-level agent pin (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/0e751be1be1dd46f17ba5e64a8ebc982ac1bfb88/nemo_gym/benchmarks.py#L70-L108">discovery</a>). Runtime resolution in #2713 does not inspect dataset declarations; it only inverts agent→resources-server edges and errors on two candidates (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/1aa089c092a51b666163bad68591b1c824eedf97/nemo_gym/rollout_collection.py#L1386-L1428">runtime resolver</a>).</p>
+        <p class="impact"><strong>Consequence:</strong> the advertised disambiguator can make listing/preparation succeed while a newly collated task-source row still fails at run time. <strong>Request:</strong> either propagate the pin into run routing or state that <code>agent_map</code> is the runtime disambiguator; add a full prepare→collate→run test with two agents on one resources server.</p>
+      </article>
+
+      <article class="risk">
+        <h3><span class="status yellow">6 · Reproducibility gap:</span> the migration’s strongest proofs are not committed</h3>
+        <p>The narrow row transformation is independently inspectable: the 83 changed JSONLs contain 736 rows, with exactly 736 top-level <code>agent_ref</code> removals and no other row-content or row-count changes. The broader claims are different. PR #2732 reports repository-wide parse sweeps, routing replay, trainer compatibility, and six live rollout patterns, but the one-shot verification tool is not committed and no public run artifacts are linked. Reviewers cannot rerun those exact invariants from the head.</p>
+        <p class="impact"><strong>Consequence:</strong> future rebases cannot independently prove that the large mechanical diff still changes only declared fields. <strong>Request:</strong> commit a deterministic verification script or attach machine-readable public outputs keyed to the head SHA.</p>
+      </article>
+
+      <article class="risk">
+        <h3><span class="status yellow">7 · Adoption gap:</span> direct rollout callers do not receive run-level routing behavior automatically</h3>
+        <p>The public API deliberately separates <code>preprocess_examples</code> from <code>run_examples</code>. Existing direct integrations that call only the latter can run task-source rows, but cannot exercise map, fan-out, or repeat semantics. PR #2732 lists downstream adoption as follow-up work rather than part of this stack.</p>
+        <p class="impact"><strong>Consequence:</strong> “swappable from the same data” is true for the CLI path before it is true for every trainer path. <strong>Request:</strong> gate migration claims for each integration on a committed test that invokes preprocessing and dispatch together.</p>
+      </article>
+
+      <article class="risk">
+        <h3><span class="status yellow">8 · Guard scope:</span> compatibility is serve-composition-only, opt-in, and implementation-type-wide</h3>
+        <p>PR #2661 explicitly allows a swap when <code>requires_agent</code> is absent, empty, or unreadable. It compares the selected inner implementation name, not an agent asset flavor or complete configuration (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/8fd846556fd546dfeb051495592c809f95e3e9d5/nemo_gym/global_config.py#L599-L635">code</a>). The guard runs during serve-mode composition. No-serve <code>--agent</code>, <code>agent_map</code>, and fan-out only validate that a target is an existing runtime agent instance; they do not consult <code>requires_agent</code>.</p>
+        <p class="impact"><strong>Consequence:</strong> the guard proves only that an annotated verifier allows that broad implementation type on one entry path; it does not establish compatibility for runtime re-routing or arbitrary custom configurations. <strong>Request:</strong> call it a serve-time allowlist assertion, define whether map/fan-out should enforce the same contract, and decide whether first-party resources servers must all declare it.</p>
+      </article>
+    </section>
+
+    <section id="evidence">
+      <h2>7. Evidence, current state, and recommended review order</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Layer</th><th>Public evidence</th><th>What it does not prove</th></tr></thead>
+          <tbody>
+            <tr><td>#2710</td><td>Behavior-focused precedence and validation tests; <a href="https://github.com/NVIDIA-NeMo/Gym/actions/runs/33013484045">full public CI passed</a> before merge.</td><td>No live multi-agent run is linked.</td></tr>
+            <tr><td>#2713</td><td>Tests cover source resolution, map/fan-out/repeat interaction, profile grouping; <a href="https://github.com/NVIDIA-NeMo/Gym/actions/runs/33014082160">full public CI passed</a>.</td><td>Direct downstream integrations are not exercised.</td></tr>
+            <tr><td>#2717</td><td>Collate/reverify tests are committed and review-discovered path collisions were fixed. The PR’s <a href="https://github.com/NVIDIA-NeMo/Gym/actions/runs/33014554012">final workflow</a> skipped unit tests, while later cumulative #2724/#2732 runs executed the full suite.</td><td>The surviving aggregate-export collision is not covered.</td></tr>
+            <tr><td>#2724</td><td>Benchmark resolution and scaffold tests; <a href="https://github.com/NVIDIA-NeMo/Gym/actions/runs/33014766004">current public CI is green</a>.</td><td>No ambiguous pinned benchmark full-run test.</td></tr>
+            <tr><td>#2732</td><td><a href="https://github.com/NVIDIA-NeMo/Gym/actions/runs/33014767823">Current public CI is green</a>. The 83 changed JSONLs independently verify as 736 pure top-level routing-stamp removals. The PR also reports broader sweeps and six live patterns.</td><td>The custom routing/parse sweeps and live evidence are not independently rerunnable from linked artifacts.</td></tr>
+            <tr><td>#2640–#2661</td><td>Parser, selector, multi-target, and allowlist tests; substantive suites passed for <a href="https://github.com/NVIDIA-NeMo/Gym/actions/runs/32703945506">#2640</a>, <a href="https://github.com/NVIDIA-NeMo/Gym/actions/runs/32703945217">#2641</a>, and the replacement run for <a href="https://github.com/NVIDIA-NeMo/Gym/actions/runs/32703945202">#2661</a>.</td><td>Heads predate the merged data stack; #2641 is currently conflicting; #2661 retains cancelled stale matrix jobs alongside the passing replacement; the two stacks lack a combined end-to-end test.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Recommended review and landing sequence</h3>
+      <ol>
+        <li>Fix the two merged reverify defects: aggregate identity and preflight/row-routing server-set mismatch.</li>
+        <li>Settle #2724’s single runtime disambiguation contract: dataset pin, <code>agent_map</code>, or one clearly documented precedence chain.</li>
+        <li>Rebase #2640→#2641→#2661 onto the merged task-source foundation. Re-run the complete stack checks; #2641 is not currently mergeable.</li>
+        <li>Resolve command-line override precedence in #2640 and split or clarify the two meanings of <code>--agent</code> in #2641.</li>
+        <li>Add one cumulative test: one task-source dataset, two available harnesses, serve-mode composition, no-serve routing, fan-out, reverify, and aggregate output identity.</li>
+        <li>Only then land #2732’s repository-wide migration, with a rerunnable migration verifier pinned to the final combined behavior.</li>
+      </ol>
+
+      <div class="answer"><strong>Practical consequence.</strong> The architecture is moving in the right direction: reusable data identifies tasks; the run chooses routes; outputs record provenance; composition chooses implementations. The remaining risk is not the core separation. It is that three adjacent selectors—benchmark agent pins, routing maps, and harness composition—currently use overlapping names and incomplete precedence rules. Reviewers should settle those seams before treating the migration as the final state.</div>
+    </section>
+
+    <footer>
+      <p>All claims and links on this page come from public GitHub pull requests, source revisions, review threads, and checks. Open pull requests may change after this pinned snapshot.</p>
+    </footer>
+  </main>
+  <script>
+    (() => {
+      const button = document.querySelector(".theme");
+      const render = () => {
+        button.textContent = document.documentElement.dataset.theme === "light" ? "Dark theme" : "Light theme";
+      };
+      button.addEventListener("click", () => {
+        const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+        if (next === "light") document.documentElement.dataset.theme = "light";
+        else delete document.documentElement.dataset.theme;
+        try { localStorage.setItem("engineering-notes-theme", next); } catch {}
+        render();
+      });
+      render();
+    })();
+  </script>
+</body>
+</html>
