@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How prompt cohort identity survives retries from NeMo-RL to GenRM</title>
+  <script>
+    (() => {
+      try {
+        if (localStorage.getItem("engineering-notes-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {}
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1c2128;
+      --border: #30363d;
+      --text: #e6edf3;
+      --dim: #9aa4ae;
+      --accent: #58a6ff;
+      --diagram-ok: #5bc0eb;
+      --diagram-problem: #ffb000;
+      --diagram-alt: #d98bc3;
+      --diagram-neutral: #c7ced8;
+      --code-bg: #090c10;
+      --shadow: rgba(0, 0, 0, .28);
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --surface-2: #eef1f4;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --dim: #59636e;
+      --accent: #0969da;
+      --diagram-ok: #005a8d;
+      --diagram-problem: #9a4d00;
+      --diagram-alt: #7a3e6d;
+      --diagram-neutral: #4b5563;
+      --code-bg: #f0f3f6;
+      --shadow: rgba(31, 35, 40, .12);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.65 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+    a:hover { text-decoration-thickness: 2px; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 34px 22px 72px; }
+    .theme-toggle {
+      position: fixed; z-index: 10; top: 14px; right: 14px;
+      min-height: 42px; padding: 9px 13px;
+      border: 1px solid var(--border); border-radius: 999px;
+      color: var(--text); background: var(--surface);
+      box-shadow: 0 4px 18px var(--shadow); cursor: pointer;
+    }
+    h1 { max-width: 850px; margin: 6px 0 10px; font-size: clamp(2rem, 5vw, 3.35rem); line-height: 1.08; letter-spacing: -.035em; }
+    h2 { margin: 54px 0 12px; font-size: clamp(1.45rem, 3vw, 2rem); line-height: 1.2; }
+    h3 { margin: 0 0 8px; font-size: 1.05rem; }
+    p { margin: 10px 0; }
+    .eyebrow { color: var(--diagram-ok); font-weight: 750; letter-spacing: .08em; text-transform: uppercase; font-size: .78rem; }
+    .lede { max-width: 820px; font-size: 1.17rem; line-height: 1.6; }
+    .provenance {
+      display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 18px 0 24px;
+      color: var(--dim); font-size: .91rem;
+    }
+    .answer {
+      border-left: 5px solid var(--diagram-ok); padding: 13px 17px;
+      background: var(--surface); border-radius: 0 10px 10px 0;
+      font-size: 1.08rem;
+    }
+    .figure {
+      margin: 22px 0; padding: 16px;
+      border: 1px solid var(--border); border-radius: 14px;
+      background: var(--surface); box-shadow: 0 8px 28px var(--shadow);
+      overflow-x: auto;
+    }
+    .figure h3 { margin-bottom: 3px; }
+    .caption { color: var(--dim); font-size: .9rem; margin: 3px 0 12px; }
+    svg { display: block; width: 100%; min-width: 760px; height: auto; }
+    svg text { fill: var(--text); font-family: system-ui, sans-serif; }
+    svg .dim { fill: var(--dim); }
+    svg .box { fill: var(--bg); stroke: var(--diagram-neutral); stroke-width: 2; }
+    svg .active { fill: var(--bg); stroke: var(--diagram-ok); stroke-width: 3; }
+    svg .physical { fill: var(--bg); stroke: var(--diagram-alt); stroke-width: 2.5; }
+    svg .warning { fill: var(--bg); stroke: var(--diagram-problem); stroke-width: 2.5; stroke-dasharray: 8 5; }
+    svg .arrow { fill: none; stroke: var(--diagram-neutral); stroke-width: 2.4; marker-end: url(#arrow); }
+    svg .ok-arrow { fill: none; stroke: var(--diagram-ok); stroke-width: 3; marker-end: url(#arrow-ok); }
+    svg .alt-arrow { fill: none; stroke: var(--diagram-alt); stroke-width: 2.5; marker-end: url(#arrow-alt); }
+    svg .dash-arrow { fill: none; stroke: var(--diagram-problem); stroke-width: 2.5; stroke-dasharray: 8 5; marker-end: url(#arrow-warn); }
+    .toc {
+      display: flex; flex-wrap: wrap; gap: 8px; padding: 12px;
+      border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+    }
+    .toc a { padding: 5px 9px; }
+    .grid-2, .grid-3 { display: grid; gap: 14px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      padding: 17px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+    }
+    .card.ok { border-top: 4px solid var(--diagram-ok); }
+    .card.alt { border-top: 4px solid var(--diagram-alt); }
+    .card.warn { border-top: 4px dashed var(--diagram-problem); }
+    .label {
+      display: inline-block; padding: 2px 8px; margin-bottom: 8px;
+      border: 1px solid var(--border); border-radius: 999px; color: var(--dim); font-size: .79rem; font-weight: 700;
+    }
+    code {
+      padding: .12em .35em; border-radius: 5px;
+      color: var(--text); background: var(--code-bg); font-size: .9em;
+    }
+    pre {
+      margin: 12px 0; padding: 14px; overflow-x: auto;
+      border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg);
+      color: var(--text); line-height: 1.55;
+    }
+    pre code { padding: 0; background: none; }
+    .trace { display: grid; gap: 0; margin: 18px 0; }
+    .trace-step {
+      position: relative; margin-left: 17px; padding: 4px 0 20px 28px;
+      border-left: 2px solid var(--diagram-neutral);
+    }
+    .trace-step:last-child { border-left-color: transparent; padding-bottom: 0; }
+    .trace-step::before {
+      content: ""; position: absolute; left: -7px; top: 9px; width: 12px; height: 12px;
+      border: 2px solid var(--diagram-ok); border-radius: 50%; background: var(--bg);
+    }
+    .trace-step strong { display: block; }
+    .source { font-size: .88rem; color: var(--dim); }
+    .ledger { display: grid; gap: 10px; }
+    .ledger-row {
+      display: grid; grid-template-columns: 175px 1fr 1fr; gap: 12px;
+      padding: 13px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface);
+    }
+    .ledger-row > :first-child { font-weight: 750; }
+    .status {
+      display: inline-flex; align-items: center; gap: 7px; color: var(--dim); font-size: .9rem;
+    }
+    .dot { width: 10px; height: 10px; border: 2px solid var(--diagram-problem); border-radius: 50%; }
+    .question { margin: 14px 0; padding: 16px; border-left: 4px dashed var(--diagram-problem); background: var(--surface); }
+    .small { color: var(--dim); font-size: .9rem; }
+    footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--dim); }
+    @media (max-width: 720px) {
+      .wrap { padding: 62px 16px 52px; }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .ledger-row { grid-template-columns: 1fr; gap: 4px; }
+      .theme-toggle { top: 10px; right: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <button class="theme-toggle" type="button" aria-label="Toggle color theme">Use light theme</button>
+  <main class="wrap">
+    <div class="eyebrow">Cross-repository review · prompt cohort retries</div>
+    <h1>How prompt cohort identity survives retries from NeMo-RL to GenRM</h1>
+    <p class="lede">A focused review of <a href="https://github.com/NVIDIA-NeMo/RL/pull/3861">NeMo-RL PR #3861</a> and <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2814">NeMo Gym PR #2814</a>: what stays stable, what changes on retry, and where stale or duplicate responses are stopped.</p>
+    <div class="provenance">
+      <span>RL head: <a href="https://github.com/NVIDIA-NeMo/RL/commit/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a"><code>0c22e3e0dc43…</code></a></span>
+      <span>Gym head: <a href="https://github.com/NVIDIA-NeMo/Gym/commit/7f93814b014cab6826b2f446066b9eba347f114e"><code>7f93814b014c…</code></a></span>
+      <span>Snapshot: 2026-08-27 UTC</span>
+    </div>
+
+    <div class="answer"><strong>Answer:</strong> the protocol is coherent for one live RL retry loop talking to one GenRM worker. NeMo-RL keeps <code>group_id</code> stable, increments <code>group_attempt</code> when it replaces the whole group, keeps <code>rollout_index</code> stable for each sibling, and allocates a fresh Transfer Queue ID for each physical dispatch. Gym keys the comparison cohort by <code>(group_id, group_attempt)</code> and its members by <code>rollout_index</code>. The remaining review gap is proof: the PRs have strong unit tests for each boundary, but no public failure-injection test runs the complete RL → Gym agent → GenRM path.</div>
+
+    <div class="figure">
+      <h3>Figure 1 — Which PR owns each half of the contract?</h3>
+      <p class="caption">The dependency is explicit: the RL PR pins the exact Gym PR head. Solid arrows are runtime flow; the purple arrow is a source dependency.</p>
+      <svg viewBox="0 0 920 390" role="img" aria-labelledby="fig1-title fig1-desc">
+        <title id="fig1-title">Cross-repository retry identity flow</title>
+        <desc id="fig1-desc">NeMo-RL creates stable logical coordinates and fresh Transfer Queue IDs. Gym forwards the coordinates and GenRM isolates attempts and slots. RL pins the Gym PR commit.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-neutral)"/></marker>
+          <marker id="arrow-ok" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-ok)"/></marker>
+          <marker id="arrow-alt" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-alt)"/></marker>
+        </defs>
+        <text x="30" y="30" font-size="14" font-weight="700">LEGEND</text>
+        <line x1="105" y1="25" x2="150" y2="25" class="ok-arrow"/><text x="160" y="30" font-size="13">runtime identity flow</text>
+        <line x1="330" y1="25" x2="375" y2="25" class="alt-arrow"/><text x="385" y="30" font-size="13">exact source pin</text>
+        <rect x="30" y="68" width="385" height="266" rx="14" class="active"/>
+        <text x="52" y="98" font-size="19" font-weight="750">NeMo-RL PR #3861</text>
+        <text x="52" y="120" font-size="13" class="dim">producer · 0c22e3e0dc43… · OPEN</text>
+        <rect x="60" y="148" width="325" height="68" rx="10" class="box"/>
+        <text x="80" y="175" font-size="15" font-weight="700">Logical coordinates</text>
+        <text x="80" y="198" font-size="14">G · attempt 0 · slots 0, 1, 2</text>
+        <rect x="60" y="240" width="325" height="68" rx="10" class="physical"/>
+        <text x="80" y="267" font-size="15" font-weight="700">Physical transaction</text>
+        <text x="80" y="290" font-size="14">fresh TQ ID for every dispatch attempt</text>
+        <rect x="505" y="68" width="385" height="266" rx="14" class="active"/>
+        <text x="527" y="98" font-size="19" font-weight="750">NeMo Gym PR #2814</text>
+        <text x="527" y="120" font-size="13" class="dim">consumer · 7f93814b014c… · OPEN</text>
+        <rect x="535" y="148" width="325" height="68" rx="10" class="box"/>
+        <text x="555" y="175" font-size="15" font-weight="700">Cohort key</text>
+        <text x="555" y="198" font-size="14">(group_id, group_attempt)</text>
+        <rect x="535" y="240" width="325" height="68" rx="10" class="box"/>
+        <text x="555" y="267" font-size="15" font-weight="700">Member key</text>
+        <text x="555" y="290" font-size="14">rollout_index → one response digest</text>
+        <path d="M415 182 C448 182 472 182 505 182" class="ok-arrow"/>
+        <text x="427" y="168" font-size="12">row extras</text>
+        <path d="M210 350 C350 380 575 380 690 342" class="alt-arrow"/>
+        <text x="340" y="373" font-size="13">RL submodule pins Gym 7f93814b…</text>
+        <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/3rdparty/Gym-workspace/Gym#L1">
+          <text x="620" y="365" font-size="12" text-decoration="underline">pinned source</text>
+        </a>
+      </svg>
+    </div>
+
+    <nav class="toc" aria-label="Page sections">
+      <a href="#before-after">Before and after</a>
+      <a href="#path">End-to-end path</a>
+      <a href="#worked-example">Worked retry</a>
+      <a href="#layers">What each PR adds</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#questions">Review questions</a>
+    </nav>
+
+    <section id="before-after">
+      <h2>The old list confused physical arrivals with logical siblings</h2>
+      <div class="grid-2">
+        <article class="card warn">
+          <span class="label">Before</span>
+          <h3>Append each HTTP arrival</h3>
+          <p>A retry could add another physical response for a sibling already represented in the cohort. Arrival order then influenced which response received each reward.</p>
+          <pre><code>cohort = [arrival, arrival, ...]
+ready when len(cohort) == N</code></pre>
+        </article>
+        <article class="card ok">
+          <span class="label">After both PRs</span>
+          <h3>Name the group, attempt, and slot</h3>
+          <p>A replacement attempt gets another cohort. A duplicate slot must carry the same response digest. Rewards are mapped back by slot, not by arrival order.</p>
+          <pre><code>cohort[(G, attempt)][slot] = response
+reward_by_slot[slot] = reward</code></pre>
+        </article>
+      </div>
+      <p class="source">The new Gym storage model is visible in <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L90-L128">the cohort dataclasses</a> and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L679-L695">the attempt-scoped key</a>.</p>
+    </section>
+
+    <section id="path">
+      <h2>One identity tuple crosses six concrete boundaries</h2>
+      <div class="trace">
+        <div class="trace-step">
+          <strong>1. RL creates the logical group once per <code>generate_and_push</code> call.</strong>
+          <span><code>group_id = G</code> and the starting attempt come from the prompt metadata or are initialized once. A separate <code>tq_group_id</code> is reserved inside the retry loop.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollout_manager.py#L1289-L1324">rollout_manager.py L1289–L1324</a></div>
+        </div>
+        <div class="trace-step">
+          <strong>2. RL copies the logical coordinates into the attempt input.</strong>
+          <span>The original sample is not mutated. Each whole-group retry receives the same <code>G</code> and the current attempt number.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollout_manager.py#L1333-L1346">rollout_manager.py L1333–L1346</a></div>
+        </div>
+        <div class="trace-step">
+          <strong>3. RL expands the prompt into stable sibling slots.</strong>
+          <span>All rows share <code>G</code> and the attempt. Their <code>rollout_index</code> values are <code>0..N-1</code>.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollout_manager.py#L866-L885">async manager row builder</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollouts.py#L2260-L2329">batch rollout row builder</a></div>
+        </div>
+        <div class="trace-step">
+          <strong>4. Gym's agent preserves unknown row extras into <code>/verify</code>.</strong>
+          <span>The simple agent run and verify request models allow extra fields. The verify request is built from the run body plus the model response.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/responses_api_agents/simple_agent/app.py#L65-L74">extra-field models</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/responses_api_agents/simple_agent/app.py#L277-L352">run → verify call</a></div>
+        </div>
+        <div class="trace-step">
+          <strong>5. GenRM resolves <code>(G, attempt)</code>, then claims one member per slot.</strong>
+          <span>An identical duplicate joins or reuses the slot. A different response digest for the same slot returns 409. A newer attempt advances the watermark and fails active older attempts.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L288-L386">slot registration and duplicate handling</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L415-L494">watermark and supersession</a></div>
+        </div>
+        <div class="trace-step">
+          <strong>6. Gym maps rewards by slot and echoes trusted dispatch identity.</strong>
+          <span>GenRM sorts slots before comparison and publishes a reward map. The shared rollout boundary overwrites any agent-provided identity with the coordinates from the dispatched row.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L537-L606">ordered evaluation and publication</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/nemo_gym/rollout_collection.py#L1490-L1516">trusted transport echo</a></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="worked-example">
+      <h2>Worked example: three siblings, one partial failure</h2>
+      <p>Use one logical prompt group <code>G-42</code> with three siblings. Attempt 0 reaches GenRM with slots 0 and 2, but the group fails before slot 1 completes. RL replaces the whole group. The replacement keeps <code>G-42</code>, advances the attempt to 1, and uses a fresh Transfer Queue ID.</p>
+      <div class="figure">
+        <h3>Figure 2 — Old and replacement responses cannot form one cohort</h3>
+        <p class="caption">Blue solid boxes are the accepted replacement cohort. Orange dashed boxes are superseded state. Purple boxes are physical Transfer Queue transactions.</p>
+        <svg viewBox="0 0 920 470" role="img" aria-labelledby="fig2-title fig2-desc">
+          <title id="fig2-title">Retry timeline for a three-member prompt cohort</title>
+          <desc id="fig2-desc">Attempt zero partially arrives under group G-42 and TQ-A. Attempt one uses the same logical group, a new attempt number, and TQ-B. GenRM fails attempt zero and accepts all three slots in attempt one.</desc>
+          <defs>
+            <marker id="arrow2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-neutral)"/></marker>
+            <marker id="arrow2ok" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-ok)"/></marker>
+            <marker id="arrow2warn" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-problem)"/></marker>
+          </defs>
+          <text x="32" y="34" font-size="14" font-weight="700">time ↓</text>
+          <line x1="70" y1="48" x2="70" y2="432" class="arrow"/>
+          <rect x="120" y="58" width="170" height="70" rx="10" class="physical"/>
+          <text x="140" y="84" font-size="15" font-weight="700">TQ-A</text>
+          <text x="140" y="108" font-size="13">physical dispatch 0</text>
+          <rect x="350" y="58" width="500" height="102" rx="12" class="warning"/>
+          <text x="370" y="84" font-size="15" font-weight="700">GenRM key: (G-42, 0)</text>
+          <rect x="380" y="105" width="110" height="36" rx="7" class="box"/><text x="416" y="128" font-size="13">slot 0</text>
+          <rect x="510" y="105" width="110" height="36" rx="7" class="warning"/><text x="538" y="128" font-size="13">slot 1 ✕</text>
+          <rect x="640" y="105" width="110" height="36" rx="7" class="box"/><text x="676" y="128" font-size="13">slot 2</text>
+          <path d="M290 94 L350 94" class="arrow"/>
+          <rect x="350" y="188" width="500" height="58" rx="10" class="warning"/>
+          <text x="375" y="213" font-size="14" font-weight="700">newer attempt observed → attempt 0 becomes FAILED</text>
+          <text x="375" y="233" font-size="12" class="dim">waiters receive controlled 503; old bodies are released</text>
+          <path d="M600 160 L600 188" class="dash-arrow"/>
+          <rect x="120" y="280" width="170" height="70" rx="10" class="physical"/>
+          <text x="140" y="306" font-size="15" font-weight="700">TQ-B</text>
+          <text x="140" y="330" font-size="13">fresh physical dispatch 1</text>
+          <rect x="350" y="270" width="500" height="112" rx="12" class="active"/>
+          <text x="370" y="297" font-size="15" font-weight="700">GenRM key: (G-42, 1)</text>
+          <rect x="380" y="320" width="110" height="38" rx="7" class="active"/><text x="416" y="344" font-size="13">slot 0</text>
+          <rect x="510" y="320" width="110" height="38" rx="7" class="active"/><text x="546" y="344" font-size="13">slot 1</text>
+          <rect x="640" y="320" width="110" height="38" rx="7" class="active"/><text x="676" y="344" font-size="13">slot 2</text>
+          <path d="M290 315 L350 315" class="ok-arrow"/>
+          <rect x="350" y="405" width="500" height="42" rx="8" class="active"/>
+          <text x="400" y="431" font-size="14" font-weight="700">reward_by_slot = {0: r0, 1: r1, 2: r2}</text>
+          <path d="M600 382 L600 405" class="ok-arrow"/>
+          <text x="120" y="418" font-size="12" class="dim">stable: G-42, slots 0..2</text>
+          <text x="120" y="438" font-size="12" class="dim">changes: attempt, TQ ID</text>
+        </svg>
+      </div>
+      <p>The critical separation is deliberate: <code>group_attempt</code> protects GenRM's semantic cohort, while <code>tq_group_id</code> protects the physical Transfer Queue transaction. Reusing one identifier for both would either mix old GenRM responses or collide with old queue rows.</p>
+    </section>
+
+    <section id="layers">
+      <h2>Each PR owns a distinct layer</h2>
+      <div class="grid-2">
+        <article class="card alt">
+          <span class="label">Producer layer</span>
+          <h3>RL #3861: create and advance identity</h3>
+          <p><strong>Adds:</strong> constants, row stamping in both Gym rollout paths, one logical ID per prompt group, retry attempt increments, and fresh TQ IDs.</p>
+          <p><strong>Assumes:</strong> Gym preserves arbitrary row extras and understands the three coordinates.</p>
+          <p><strong>Strongest evidence:</strong> the retry test asserts one logical ID, attempts <code>[0,1,2]</code>, and three distinct queue IDs.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/tests/unit/experience/test_rollout_redispatch.py#L153-L193">retry identity test</a></p>
+        </article>
+        <article class="card ok">
+          <span class="label">Consumer layer</span>
+          <h3>Gym #2814: isolate, deduplicate, and map</h3>
+          <p><strong>Adds:</strong> attempt-scoped cohorts, per-slot response digests, stale-attempt watermarks, controlled waiter failure, terminal tombstones, and trusted identity echo.</p>
+          <p><strong>Assumes:</strong> all members of a logical cohort reach one server process.</p>
+          <p><strong>Strongest evidence:</strong> tests cover out-of-order arrival, duplicate slots, replacement attempts, stale attempts, timeout, cancellation, and bounded tombstones.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/tests/test_app.py#L450-L711">identity and replacement tests</a></p>
+        </article>
+      </div>
+
+      <h3 style="margin-top:28px">Final behavior ledger</h3>
+      <div class="ledger">
+        <div class="ledger-row">
+          <div>Logical group</div>
+          <div><strong>Producer:</strong> RL creates or preserves <code>group_id</code>.</div>
+          <div><strong>Consumer:</strong> Gym uses it as the watermark namespace.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Whole-group retry</div>
+          <div><strong>Producer:</strong> increment <code>group_attempt</code>.</div>
+          <div><strong>Consumer:</strong> isolate the replacement and supersede older active attempts.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Sibling identity</div>
+          <div><strong>Producer:</strong> assign stable <code>rollout_index</code> values.</div>
+          <div><strong>Consumer:</strong> admit one response digest per index and map rewards by index.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Physical dispatch</div>
+          <div><strong>Producer:</strong> reserve a new <code>tq_group_id</code> each attempt.</div>
+          <div><strong>Consumer:</strong> never uses the TQ identifier as semantic cohort identity.</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="evidence">
+      <h2>What the public evidence proves — and does not</h2>
+      <div class="grid-3">
+        <article class="card ok">
+          <h3>Demonstrated in unit tests</h3>
+          <p>RL preserves logical identity across its retry loop. Gym rejects conflicting duplicates, caches identical duplicates, separates attempts, rejects stale arrivals, and returns rewards by slot.</p>
+        </article>
+        <article class="card alt">
+          <h3>Demonstrated at boundaries</h3>
+          <p>The simple agent allows extra fields into <code>/verify</code>. Gym's shared collection boundary overwrites returned identity with the dispatched row's identity.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/tests/unit_tests/test_rollout_collection.py#L349-L399">transport boundary test</a></p>
+        </article>
+        <article class="card warn">
+          <h3>Not publicly demonstrated</h3>
+          <p>No test in these PRs injects a partial failure through the actual RL → Gym agent → GenRM path and proves that the final committed prompt uses only one attempt's rewards.</p>
+        </article>
+      </div>
+      <p><span class="status"><span class="dot"></span><strong>Current checks are not green.</strong></span> At this snapshot, <a href="https://github.com/NVIDIA-NeMo/Gym/actions/runs/33025659386/job/98366227967">Gym lint</a> failed because Ruff reformatted one test file. <a href="https://github.com/NVIDIA-NeMo/RL/actions/runs/33025689168/job/98366321720">RL's lock check</a> failed on an OpenAI dependency conflict after the Gym submodule update. These failures do not disprove the identity logic, but they mean the revisions are not merge-ready and provide no green full-suite signal.</p>
+    </section>
+
+    <section id="questions">
+      <h2>Concrete questions for reviewers</h2>
+      <div class="question">
+        <h3>1. Can the pair add one cross-repository failure-injection test?</h3>
+        <p>The unit tests prove individual functions. They do not prove that a partial old cohort, a whole-group retry, the agent's extra-field forwarding, the Gym transport echo, and RL's final commit all compose correctly. A two- or three-sibling test that loses one result after GenRM receives it, then observes attempt 1, would resolve this gap.</p>
+        <p class="source">Relevant seams: <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollout_manager.py#L936-L1019">RL partial-row redispatch</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/responses_api_agents/simple_agent/app.py#L277-L352">Gym agent run path</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L415-L494">GenRM supersession</a></p>
+      </div>
+      <div class="question">
+        <h3>2. Where is the single-worker requirement enforced?</h3>
+        <p>The cohort map, watermark map, and locks are instance-local private attributes. If siblings or attempts are routed to different workers, no worker sees the complete cohort and no watermark can reject stale traffic on another worker. The PR description documents one worker, but the protocol itself cannot detect a multi-worker deployment. A startup guard, routing guarantee, or explicit deployment test would turn that requirement into an enforceable contract.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L283-L286">process-local registries</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/tests/test_app.py#L896-L910">test proving server instances do not share cohorts</a></p>
+      </div>
+      <div class="question">
+        <h3>3. Is retry identity intentionally limited to one live collector invocation?</h3>
+        <p>RL generates <code>group_id</code> inside <code>generate_and_push</code> when the prompt does not already carry one, and writes it only into a deep-copied attempt sample. That is correct for in-loop retries. It does not make the ID durable across a collector restart or a replay that reconstructs the original prompt without this metadata. The GenRM registry is also process-local. Reviewers should confirm that restart recovery is explicitly outside scope or add persisted identity at the checkpoint boundary.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollout_manager.py#L1293-L1343">in-memory ID creation and copy</a></p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Recommended review order</h2>
+      <ol>
+        <li><strong>Settle the identity contract in RL:</strong> stable logical group, monotonic whole-group attempt, stable sibling slot, fresh TQ transaction.</li>
+        <li><strong>Verify the forwarding boundary:</strong> row extras must survive the selected agent and reach <code>/verify</code>.</li>
+        <li><strong>Review GenRM admission and supersession:</strong> one digest per slot, one active newest attempt, all waiters released.</li>
+        <li><strong>Review evidence and deployment:</strong> require the cross-repository retry test and decide how one-worker routing is guaranteed.</li>
+      </ol>
+      <p><strong>Practical consequence:</strong> once both revisions land together and the single-worker condition holds, a retry can no longer silently enlarge a GenRM cohort or attach a reward to the wrong sibling. The remaining risk is not the tuple design; it is whether production routing and recovery preserve the assumptions that make the tuple authoritative.</p>
+    </section>
+
+    <footer>
+      <p>This page contains only public repository, pull request, test, and GitHub Actions evidence. All source links are pinned to the reviewed full commit SHA.</p>
+    </footer>
+  </main>
+  <script>
+    (() => {
+      const button = document.querySelector(".theme-toggle");
+      const root = document.documentElement;
+      const update = () => {
+        button.textContent = root.dataset.theme === "light" ? "Use dark theme" : "Use light theme";
+      };
+      button.addEventListener("click", () => {
+        if (root.dataset.theme === "light") {
+          delete root.dataset.theme;
+          try { localStorage.setItem("engineering-notes-theme", "dark"); } catch {}
+        } else {
+          root.dataset.theme = "light";
+          try { localStorage.setItem("engineering-notes-theme", "light"); } catch {}
+        }
+        update();
+      });
+      update();
+    })();
+  </script>
+</body>
+</html>
