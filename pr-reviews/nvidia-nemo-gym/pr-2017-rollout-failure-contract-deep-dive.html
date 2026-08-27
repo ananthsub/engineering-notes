@@ -515,28 +515,30 @@
     </section>
 
     <section id="findings">
-      <h2>Six reproduced findings should shape this review</h2>
+      <h2>Six reproduced risks, separated by ownership</h2>
 
       <article class="finding">
-        <h3>1. The lower transport can retry forever and replay <code>POST /run</code></h3>
-        <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/server_utils.py#L217-L284">The shared request loop</a> keeps internal timeout, disconnect, and <code>ClientOSError</code> branches alive without a finite default. <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/server_utils.py#L372-L402"><code>ServerClient</code> marks the request internal</a>, and <code>run_examples()</code> supplies no connection-retry bound.</p>
+        <h3><span class="status open">Pre-existing</span> 1. The lower transport can retry forever and replay <code>POST /run</code></h3>
+        <p>This is not introduced by PR #2017: <code>nemo_gym/server_utils.py</code> has no diff between its base and head. <a href="https://github.com/NVIDIA-NeMo/Gym/blob/ddb44c9e9a4f905b7fa43a4ab02bc8eee69d56e5/nemo_gym/server_utils.py#L217-L284">The base request loop</a> already kept internal timeout, disconnect, and <code>ClientOSError</code> branches alive without a finite default. <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/server_utils.py#L372-L402"><code>ServerClient</code> marks the request internal</a>, and <code>run_examples()</code> supplies no connection-retry bound.</p>
         <p>A persistent timeout was observed continuing beyond three attempts. If the agent performed work before the connection dropped, each transport retry can duplicate that work. The new failure row never appears because control does not return to the PR’s catch block.</p>
-        <p><strong>Requested direction:</strong> give <code>/run</code> a finite, shared retry allowance and an explicit replay policy. A possibly delivered POST should return a failure outcome instead of being transmitted again.</p>
+        <p>Current main has added an optional connection-retry bound, but <a href="https://github.com/NVIDIA-NeMo/Gym/blob/b6226527e71ce47c9548a1dde01afa22715ba4ef/nemo_gym/server_utils.py#L217-L284">its default remains unbounded</a> and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/b6226527e71ce47c9548a1dde01afa22715ba4ef/nemo_gym/server_utils.py#L385-L402"><code>ServerClient</code> does not set it</a>.</p>
+        <p><strong>Ownership:</strong> track the finite <code>/run</code> retry and replay policy under issue #2750. It limits which failures PR #2017 can capture, but it should not require this focused PR to refactor the shared transport.</p>
       </article>
 
       <article class="finding">
-        <h3>2. Offline shard aggregation can suppress another shard’s failure</h3>
+        <h3><span class="status partial">Sequenced follow-up</span> 2. Offline shard aggregation can suppress another shard’s failure</h3>
         <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L685-L720"><code>_failure_rows_counted_as_zero()</code></a> and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L1769-L1783">offline aggregation</a> use only <code>(task_index, rollout_index)</code> as global identity across every shard.</p>
         <pre>shard A main:     (task=0, rollout=0, reward=1)
 shard B sidecar:  (task=0, rollout=0, agent_run_error)
 
 expected metric input: [1, 0]  → mean 0.5
 observed metric input: [1]     → mean 1.0</pre>
-        <p><strong>Requested direction:</strong> include shard/run provenance or a globally unique rollout identifier in success suppression and failure deduplication. Add a regression with two shards that reuse local indices.</p>
+        <p><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2783">PR #2783</a> establishes the right prerequisite: it <a href="https://github.com/NVIDIA-NeMo/Gym/blob/dfaac34e25f64228ae9b92e14dd6db472fc19d5a/nemo_gym/rollout_collection.py#L148-L185">assigns and validates UUID rollout identities</a> independently of capture. Because the aggregation helper exists only on PR #2017’s branch, PR #2783 does not itself change this helper. The eventual integration still must key success suppression and failure deduplication by that UUID.</p>
+        <p><strong>Ownership:</strong> sequence this with PR #2783 or a small integration follow-up and add a two-shard regression. The affected zero-scoring option is explicit opt-in, so this need not block the core sidecar and resume behavior if the limitation and merge order are clear.</p>
       </article>
 
       <article class="finding">
-        <h3>3. A stale selected failure can outvote the latest attempt</h3>
+        <h3><span class="status done">PR-local</span> 3. A stale selected failure can outvote the latest attempt</h3>
         <p>The same helper checks whether a row’s class is selected before it updates the per-rollout map. An earlier selected <code>agent_run_error</code> therefore survives when a later attempt is <code>agent_request_failed</code> and only the first class is selected.</p>
         <pre>attempt 0: agent_run_error       ← selected
 attempt 1: agent_request_failed  ← latest, not selected
@@ -546,21 +548,21 @@ observed: attempt 0 still contributes reward 0</pre>
       </article>
 
       <article class="finding">
-        <h3>4. One direct-caller exception leaves sibling requests running during retry</h3>
+        <h3><span class="status open">Pre-existing</span> 4. One direct-caller exception leaves sibling requests running during retry</h3>
         <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L1638-L1644"><code>as_completed</code> schedules every row</a>. When <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/environments/nemo_gym.py#L688-L710">NeMo-RL propagates the first failed future</a>, neither side cancels and drains the remaining Gym tasks before <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/experience/rollout_manager.py#L961-L990">missing rows are redispatched</a>.</p>
         <p>The reproduction observed two simultaneous requests and two successful completions for each still-running sibling. For stateful agents, that can duplicate model calls, tools, sandbox mutations, remote sessions, cost, and load.</p>
-        <p><strong>Requested direction:</strong> make the stream own its scheduled tasks and cancel/drain them before exposing a terminal exception, or provide explicit attempt identity and receiver-side deduplication before the caller redispatches.</p>
+        <p><code>tqdm.as_completed(map(...))</code> already existed at the PR base; this PR only adds the managed failure-value branch around each request. <strong>Ownership:</strong> address task cancellation or receiver-side deduplication as a Gym–NeMo-RL integration follow-up, not as a requirement for PR #2017.</p>
       </article>
 
       <article class="finding">
-        <h3>5. HTTP status alone cannot prove that the agent ran</h3>
+        <h3><span class="status done">PR-local</span> 5. HTTP status alone cannot prove that the agent ran</h3>
         <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L648-L674">The classification</a> treats every status outside <code>{429, 502, 503, 504}</code> as <code>agent_run_error</code>. The probe confirmed that 500 enters this potentially scoreable class while 502 becomes <code>agent_request_failed</code>.</p>
         <p>HTTP status does not identify which hop generated a response. A configured endpoint can terminate at <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/server_utils.py#L463-L473">a proxy or service mesh</a>. If that intermediary returns 500 before forwarding, opting <code>agent_run_error</code> into zero scoring converts an infrastructure failure into a model zero. <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/tests/unit_tests/test_rollout_collection.py#L458-L509">The tests lock in the status-only assumption</a> rather than proving the response’s origin.</p>
         <p><strong>Requested direction:</strong> establish origin with a trusted agent error envelope or another explicit signal. Treat an origin-unknown 500 as infrastructure rather than as evidence that the model ran.</p>
       </article>
 
       <article class="finding">
-        <h3>6. SingleController drops Gym’s training mask</h3>
+        <h3><span class="status open">Downstream</span> 6. SingleController drops Gym’s training mask</h3>
         <p>Consider two complete responses with rewards <code>[0.0, 1.0]</code>. The first carries <code>mask_sample=true</code>, <code>failure_kind</code>, and <code>failure_reason</code>. The reproduced paths disagree:</p>
         <pre>legacy GRPO loss mask:      [0.0, 1.0]
 SingleController sample_mask: [1.0, 1.0]
@@ -568,8 +570,18 @@ SingleController LOO baseline: [1.0, 0.0]
 SingleController advantage:    [-1.0, 1.0]</pre>
         <p>Legacy extraction <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/experience/rollouts.py#L2797-L2822">adds the flag to the final batch</a>, and GRPO converts it into the policy <code>sample_mask</code>. Both <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/algorithms/grpo.py#L3184-L3208">legacy baseline calculation</a> and <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/algorithms/advantage_estimator.py#L73-L114">the shared estimator</a> deliberately use all rewards, so the masked sample still changes its peers’ advantages.</p>
         <p>SingleController forwards the configuration gate but carries the row flag only as completion metadata. The DataPlane payload does not translate it into <code>sample_mask</code>. Repository-wide tracked-source search also found no consumer of <code>failure_kind</code> or <code>failure_reason</code>.</p>
-        <p><strong>Requested direction:</strong> propagate Gym’s mask from <code>Completion.env_extras</code> into the DataPlane <code>sample_mask</code>, and add an end-to-end SingleController regression. Decide separately and document whether a loss-masked reward should remain in the prompt-group baseline.</p>
+        <p><strong>Ownership:</strong> fix this in NeMo-RL by propagating Gym’s mask from <code>Completion.env_extras</code> into the DataPlane <code>sample_mask</code>, with an end-to-end SingleController regression. It does not show a compatibility break introduced by PR #2017.</p>
       </article>
+
+      <h2>The minimal merge boundary for PR #2017</h2>
+      <p>The direct-caller compatibility design is sound: <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L1591-L1644"><code>route_failures_to_sidecar</code> defaults to false</a>, managed collection alone enables it, and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/tests/unit_tests/test_rollout_collection.py#L538-L545">a focused test preserves NeMo-RL’s exception contract</a>. The smallest defensible scope is:</p>
+      <ol class="path">
+        <li>Keep the sidecar, resume-attempt, continuation, and explicit metric-zero behavior.</li>
+        <li>Fix the PR-local latest-attempt ordering bug before merge.</li>
+        <li>Resolve or narrowly document the PR-local status-origin assumption before allowing that class to stand for a model zero.</li>
+        <li>Sequence multi-shard aggregation identity with PR #2783; its UUID is the long-term key, but one integration change is still required after the branches meet.</li>
+        <li>Leave generic transport replay, sibling cancellation, and SingleController masking to their owning follow-ups.</li>
+      </ol>
 
       <h2>Two code-backed questions remain outside the reproduced findings</h2>
 
@@ -586,7 +598,7 @@ SingleController advantage:    [-1.0, 1.0]</pre>
 
     <section class="consequence">
       <h2>Reviewer consequence</h2>
-      <p>Review PR #2017 as the managed-evaluation layer of issue #2750, not as the end-to-end rollout failure contract. Its central decision—store no-result failures separately and never invent generation data—is sound and compatible with NeMo-RL. The aggregation identity bugs, uncancelled direct-caller work, and status-only origin inference are concrete correctness issues in this patch’s paths. SingleController’s dropped mask demonstrates that “return a complete masked result” is not yet a caller-independent NeMo-RL policy. The lower retry loop, shared structured outcome, replay identity, cleanup, and unified training-mask contract still need explicit ownership before evaluation and training can claim the same failure semantics.</p>
+      <p>Review PR #2017 as the managed-evaluation layer of issue #2750, not as the end-to-end rollout failure contract. Its central decision—store no-result failures separately and never invent generation data—is sound, opt-in at the managed boundary, and preserves NeMo-RL’s exception interface. The latest-attempt filter and status-origin assumption are the two PR-local correctness questions. Multi-shard identity should integrate with PR #2783. The lower retry loop, sibling cancellation, shared structured outcome, replay identity, cleanup, and unified training-mask contract are real but separately owned work; requiring all of them here would defeat the focused compatibility boundary.</p>
     </section>
 
     <footer>
