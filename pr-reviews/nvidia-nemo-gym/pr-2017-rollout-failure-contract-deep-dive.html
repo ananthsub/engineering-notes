@@ -496,13 +496,19 @@
               <td>After row 0 failed and all rows were retried, rows 1 and 2 reached two simultaneous requests and each completed twice.</td>
               <td>Exiting <code>as_completed</code> does not cancel the already scheduled Gym requests, and NeMo-RL does not issue that cancellation.</td>
             </tr>
+            <tr>
+              <td>HTTP status is treated as proof of who answered</td>
+              <td>Gym <code>62df56df…</code><br>temporary classifier probe</td>
+              <td>Status 500 produced <code>agent_run_error</code>; status 502 produced <code>agent_request_failed</code>.</td>
+              <td>The classification cannot distinguish an agent-generated 500 from an intermediary-generated 500.</td>
+            </tr>
           </tbody>
         </table>
       </div>
     </section>
 
     <section id="findings">
-      <h2>Four reproduced findings should shape this review</h2>
+      <h2>Five reproduced findings should shape this review</h2>
 
       <article class="finding">
         <h3>1. The lower transport can retry forever and replay <code>POST /run</code></h3>
@@ -539,12 +545,14 @@ observed: attempt 0 still contributes reward 0</pre>
         <p><strong>Requested direction:</strong> make the stream own its scheduled tasks and cancel/drain them before exposing a terminal exception, or provide explicit attempt identity and receiver-side deduplication before the caller redispatches.</p>
       </article>
 
-      <h2>Three code-backed questions remain outside the reproduced findings</h2>
-
-      <article class="question">
-        <h3>Can HTTP status alone prove that the agent ran?</h3>
-        <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L648-L674">The classification</a> treats every status outside <code>{429, 502, 503, 504}</code> as <code>agent_run_error</code>. A proxy can return 500, authentication middleware can return 401, and routing can return 404 before the handler runs. Because this class may be counted as a model zero, should origin be established by a trusted agent error envelope rather than inferred from status?</p>
+      <article class="finding">
+        <h3>5. HTTP status alone cannot prove that the agent ran</h3>
+        <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L648-L674">The classification</a> treats every status outside <code>{429, 502, 503, 504}</code> as <code>agent_run_error</code>. The probe confirmed that 500 enters this potentially scoreable class while 502 becomes <code>agent_request_failed</code>.</p>
+        <p>HTTP status does not identify which hop generated a response. A configured endpoint can terminate at <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/server_utils.py#L463-L473">a proxy or service mesh</a>. If that intermediary returns 500 before forwarding, opting <code>agent_run_error</code> into zero scoring converts an infrastructure failure into a model zero. <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/tests/unit_tests/test_rollout_collection.py#L458-L509">The tests lock in the status-only assumption</a> rather than proving the response’s origin.</p>
+        <p><strong>Requested direction:</strong> establish origin with a trusted agent error envelope or another explicit signal. Treat an origin-unknown 500 as infrastructure rather than as evidence that the model ran.</p>
       </article>
+
+      <h2>Two code-backed questions remain outside the reproduced findings</h2>
 
       <article class="question">
         <h3>Should resume validate the run before consuming old attempts?</h3>
@@ -559,7 +567,7 @@ observed: attempt 0 still contributes reward 0</pre>
 
     <section class="consequence">
       <h2>Reviewer consequence</h2>
-      <p>Review PR #2017 as the managed-evaluation layer of issue #2750, not as the end-to-end rollout failure contract. Its central decision—store no-result failures separately and never invent generation data—is sound and compatible with NeMo-RL. The aggregation identity bugs and uncancelled direct-caller work are concrete correctness issues in this patch’s paths. The lower retry loop, shared structured outcome, replay identity, cleanup, and effective training-mask contract still need explicit ownership before evaluation and training can claim the same failure semantics.</p>
+      <p>Review PR #2017 as the managed-evaluation layer of issue #2750, not as the end-to-end rollout failure contract. Its central decision—store no-result failures separately and never invent generation data—is sound and compatible with NeMo-RL. The aggregation identity bugs, uncancelled direct-caller work, and status-only origin inference are concrete correctness issues in this patch’s paths. The lower retry loop, shared structured outcome, replay identity, cleanup, and effective training-mask contract still need explicit ownership before evaluation and training can claim the same failure semantics.</p>
     </section>
 
     <footer>
