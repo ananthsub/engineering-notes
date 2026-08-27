@@ -168,7 +168,7 @@
       <span>Reviewed 2026-08-27 UTC</span>
     </div>
 
-    <div class="answer"><strong>Answer:</strong> PR #2611 is not merge-ready. It adds the right complete-result field, but AnySWE currently passes <code>mask_sample</code> twice and raises <code>TypeError</code> while constructing every result. The collector also includes masked rewards in final aggregate scores and mixes sidecar or omitted outcomes into progress “unmasked” scores. Beyond those blockers, one Gym producer emits contradictory top-level and nested values, NeMo RL reads only the nested value, and its newer asynchronous payload path always creates an all-ones sample mask. A safe rollout contract therefore needs producer ownership, a top-level consumer migration, explicit GRPO group policy, and documentation for both success and failure outcomes.</div>
+    <div class="answer"><strong>Answer:</strong> PR #2611 is not merge-ready. It adds the right complete-result field, but AnySWE currently passes <code>mask_sample</code> twice and raises <code>TypeError</code> while constructing every result. The collector also includes masked rewards in final aggregate scores and mixes sidecar or omitted outcomes into progress “unmasked” scores. Beyond those blockers, one Gym producer emits contradictory top-level and nested values, NeMo RL reads only the nested value, and two replay-producing paths lose the mask before training. This PR should focus on dual-writing existing producers, mask-aware evaluation aggregation, and consumer migration. <code>RolloutFailureRecord</code> and <code>run_outcomes()</code> remain separate follow-up work.</div>
 
     <div class="figure">
       <h3>Figure 1 — The design has two lanes; the PR currently describes one broad lane</h3>
@@ -233,7 +233,10 @@
       <a href="#contradiction">Reproduced contradiction</a>
       <a href="#interface">Uniform interface</a>
       <a href="#producers">Who sets the flag</a>
+      <a href="#aggregation">Mask-aware aggregation</a>
+      <a href="#gym-consumers">Gym consumers</a>
       <a href="#nemo-rl">NeMo RL consumer</a>
+      <a href="#migration-tests">Migration tests</a>
       <a href="#documentation">Documentation</a>
       <a href="#evidence">Evidence</a>
       <a href="#questions">Review questions</a>
@@ -539,7 +542,7 @@ got multiple values for keyword argument 'mask_sample'</code></pre>
         <article class="card ok">
           <span class="label">Agent harness</span>
           <h3>The harness invalidated an otherwise complete result</h3>
-          <p>Preserve the resources-server value and OR in harness-owned failures such as an incomplete captured trajectory or an agent timeout that still leaves a real, internally consistent response. Write the decision only at the top level.</p>
+          <p>Preserve the resources-server value and OR in harness-owned failures such as an incomplete captured trajectory or an agent timeout that still leaves a real, internally consistent response. Write the resolved value to the top level and any existing compatibility location.</p>
         </article>
         <article class="card alt">
           <span class="label">Rollout collector</span>
@@ -547,49 +550,111 @@ got multiple values for keyword argument 'mask_sample'</code></pre>
           <p>Promote the flag when correlation loses a model call or produces an ambiguous token chain. The token-capture finalizer already uses this pattern. It must preserve a prior <code>true</code>.</p>
         </article>
       </div>
-      <div class="card warn" style="margin-top:14px">
-        <h3>Do not set the flag when no valid result exists</h3>
-        <p>A request that never reached the agent, a lost session with no trustworthy response, an OOM before a result, or a reset failure belongs in <code>RolloutFailureRecord</code>. Until <code>run_outcomes()</code> exists, keep the existing failure routing marker and ensure training callers reject that row; do not make a synthetic response look complete merely by adding <code>mask_sample=true</code>.</p>
+      <div class="card alt" style="margin-top:14px">
+        <h3>Compatibility rule for this PR</h3>
+        <p>Keep every existing nested field. Compute one boolean, write it to the new top-level field, and copy the same value into each legacy location. During this compatibility window, consumers must resolve <code>top_level is True OR nested is True</code>. A simple “top-level key wins” rule is unsafe because <code>BaseVerifyResponse</code> now serializes the default <code>false</code> even when an unmigrated nested producer says <code>true</code>.</p>
       </div>
       <h3 style="margin-top:24px">Concrete migration list</h3>
       <div class="ledger">
         <div class="ledger-row">
-          <div>SWE and AnySWE</div>
-          <div>SWE can keep its top-level mirror as a compatibility step. AnySWE must first remove the duplicate keyword and source the value from <code>metrics.mask_sample</code>.</div>
-          <div>Then make the top-level field authoritative and deprecate <code>instance_config.mask_sample</code>.</div>
+          <div>SWE agent</div>
+          <div><code>SWEBenchWrapperInstanceConfig.mask_sample</code> is computed once and copied to inherited <code>BaseVerifyResponse.mask_sample</code>.</div>
+          <div>Already correct. Keep both top-level and nested values and add an equality assertion to prevent drift.</div>
         </div>
         <div class="ledger-row">
-          <div>Conversational tool use</div>
-          <div>The resources server should return <code>mask_sample=self._should_mask_sample(state)</code> at the top level.</div>
-          <div>The agent's transient placeholder must move to the invocation-failure lane. If retained temporarily, it must not serialize opposite nested and top-level values.</div>
+          <div>AnySWE agent</div>
+          <div>The computed value lives in <code>metrics.mask_sample</code>; <code>instance_config.mask_sample</code> remains at its default. The response then passes the key explicitly and again through <code>metrics.model_dump()</code>.</div>
+          <div>Use <code>bool(metrics.mask_sample)</code> as the source, update the compatibility instance-config copy, exclude the key from the expanded metrics dictionary, and pass it once at the top level. Keep both nested schemas.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Conversational resources server</div>
+          <div><code>_should_mask_sample(state)</code> currently populates only <code>instance_config.mask_sample</code>.</div>
+          <div>Store its result in one local variable and pass that value to both <code>mask_sample=…</code> and the existing nested dictionary.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Conversational agent</div>
+          <div>The transient response currently sets only <code>instance_config.mask_sample=true</code>, while the inherited top-level field defaults to <code>false</code>.</div>
+          <div>Dual-write <code>true</code> in that constructor. Preserve normal pass-through behavior and the nested field.</div>
         </div>
         <div class="ledger-row">
           <div>AnyTerminal</div>
-          <div>Keep deriving the top-level value from terminal-benchmark metrics.</div>
-          <div>Audit that infrastructure failure cannot be mistaken for an ordinary unsuccessful task.</div>
+          <div><code>TerminalBenchMetrics.mask_sample</code> is persisted in metrics and flattened into the response. Its metrics-first response MRO shadows the new base declaration, although the type and default currently match.</div>
+          <div>Keep the metrics field, pass its value explicitly to the inherited top-level field, and exclude it from the expanded metrics mapping. Add schema-default and equality tests.</div>
         </div>
         <div class="ledger-row">
           <div>OSWorld</div>
-          <div>Keep the flag for a complete trajectory invalidated by timeout or evaluator failure.</div>
-          <div>Move <code>_empty_response()</code> cases that “couldn't even start” to <code>RolloutFailureRecord</code>.</div>
+          <div>Normal and empty-result constructors already pass a top-level value, but <code>OSWorldVerifyResponse</code> redundantly redeclares the same field.</div>
+          <div>Use the inherited base field and keep the existing internal <code>RolloutResult.mask_sample</code> artifact field.</div>
         </div>
         <div class="ledger-row">
           <div>Token capture</div>
           <div>Keep top-level masking for incomplete or ambiguous captured chains.</div>
-          <div>This is a complete-result finalization failure, not an agent-specific nested setting.</div>
+          <div>No migration needed. Its finalizer already only promotes the rollout's top-level field to <code>true</code> and never clears an existing value.</div>
         </div>
       </div>
-      <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/resources_servers/conversational_tool_use_simulation/app.py#L1367-L1380">conversational-tool-use verifier payload</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/anyterminal_agent/app.py#L75-L125">AnyTerminal response</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/osworld_agent/app.py#L993-L1027">OSWorld empty response</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/token_id_capture/delivery.py#L117-L151">token-capture promotion</a></p>
+      <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/swe_agents/app.py#L3907-L3946">SWE dual write</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/anyswe_agent/app.py#L679-L698">AnySWE constructor</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/resources_servers/conversational_tool_use_simulation/app.py#L1365-L1382">conversational resources response</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/conversational_tool_use/simulation/app.py#L763-L798">conversational agent response</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/anyterminal_agent/app.py#L863-L883">AnyTerminal response</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/osworld_agent/app.py#L972-L1027">OSWorld responses</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/token_id_capture/delivery.py#L169-L191">token-capture promotion</a></p>
+    </section>
+
+    <section id="aggregation">
+      <h2>Make aggregation mask-aware at the shared endpoint</h2>
+      <p>The correct seam is <code>compute_aggregate_metrics()</code> in <code>reward_profile.py</code>. Both managed collection and <code>gym eval aggregate</code> eventually call the resources server's <code>/aggregate_metrics</code> endpoint. Filtering only in <code>run_from_config()</code> would leave post-run, sharded, direct-endpoint, and custom aggregation inconsistent.</p>
+      <div class="grid-2">
+        <article class="card ok">
+          <span class="label">Quality population</span>
+          <h3>Compute score metrics from unmasked rows</h3>
+          <p>Resolve the compatibility value for every response, then build <code>quality_responses</code> from rows where neither top-level nor nested masking is <code>true</code>. Use that subset for default reward statistics, per-task statistics, <code>compute_metrics()</code>, and <code>get_key_metrics()</code>. This centrally fixes pass@k, majority@k, ELO, and benchmark-specific headline metrics instead of changing dozens of resources servers.</p>
+          <p>A partially masked task uses its remaining rows. A fully masked task must not publish a zero reward. Keep a skeletal per-task entry with identity and masking coverage, but omit quality fields.</p>
+        </article>
+        <article class="card alt">
+          <span class="label">Operational population</span>
+          <h3>Keep all rows for evidence and coverage</h3>
+          <p>Do not delete masked rollouts from JSONL, exports, reward-profile inputs, resume state, or health checks. Add explicit counts such as total, masked, unmasked, masked percentage, partially masked tasks, and fully masked tasks. Exclude <code>mask_sample</code> itself from generic numeric aggregation.</p>
+          <p>When no sample is masked, preserve the existing output shape. When all samples are masked, return coverage without inventing reward or key metrics.</p>
+        </article>
+      </div>
+      <div class="card warn" style="margin-top:14px">
+        <h3>Two bypasses need explicit handling</h3>
+        <p>GDPVal overrides the aggregation endpoint and accumulates comparison votes before calling the shared helper, so it must filter masked votes before that accumulation. Progress telemetry also updates its unmasked counter after routing but without excluding sidecar and no-persist results. Move quality accounting behind the persistence-class decision or apply the same eligibility predicate there.</p>
+      </div>
+      <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/reward_profile.py#L647-L734">shared aggregation</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1254-L1389">managed aggregation dispatch</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1628-L1685">post-run aggregate command</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/resources_servers/gdpval/app.py#L719-L818">GDPVal override</a></p>
+    </section>
+
+    <section id="gym-consumers">
+      <h2>Normalize Gym callers at one compatibility boundary</h2>
+      <p>Add a small shared resolver that treats only boolean <code>true</code> as masked and returns <code>top-level OR instance_config.mask_sample</code>. Use it to promote the resolved value to the top level without deleting or rewriting the nested field.</p>
+      <div class="ledger">
+        <div class="ledger-row">
+          <div><code>run_examples()</code></div>
+          <div>Normalize each <code>/run</code> result before yielding it.</div>
+          <div>Direct library users, managed collection, and NeMo RL then receive a canonical top-level value even from a legacy producer.</div>
+        </div>
+        <div class="ledger-row">
+          <div><code>run_from_config()</code></div>
+          <div>Consume the normalized result, then let token capture OR in an additional top-level <code>true</code>.</div>
+          <div>Use the resolved value for progress quality metrics after persistence routing is known.</div>
+        </div>
+        <div class="ledger-row">
+          <div><code>gym eval aggregate</code></div>
+          <div>Normalize loaded JSONL records before aggregation.</div>
+          <div>This supports historical artifacts that contain only the nested field.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Reward profiling</div>
+          <div>Use the same resolver when reading standalone rollout files.</div>
+          <div>Keep completion coverage separate from usable-quality coverage and preserve <code>mask_sample</code> as a boolean in rollout information.</div>
+        </div>
+      </div>
+      <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1499-L1539">direct library boundary</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/reward_profile.py#L140-L166">rollout information</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/cli/eval.py#L433-L526">eval commands</a></p>
     </section>
 
     <section id="nemo-rl">
-      <h2>NeMo RL needs two consumer fixes, not only a new key lookup</h2>
+      <h2>NeMo RL needs three consumer fixes, not only a new key lookup</h2>
       <p>On public NeMo RL main, <code>_extract_mask_sample_flags()</code> reads only <code>full_result.instance_config.mask_sample</code>. A direct reproduction passed top-level <code>true</code> with nested <code>false</code> and received <code>false</code>; reversing the values produced <code>true</code>. NeMo RL therefore follows the legacy field, not PR #2611's contract.</p>
       <div class="grid-2">
         <article class="card warn">
           <span class="label">Required compatibility fix</span>
           <h3>Read and validate the top-level field</h3>
-          <p>Read <code>full_result.mask_sample</code> first. For one compatibility window, read the nested value only when the top-level key is absent. If both exist and disagree, mask the sample and emit a conflict metric or warning. Require actual booleans; <code>bool("false")</code> is <code>true</code> in Python.</p>
+          <p>Resolve <code>full_result.mask_sample is True OR full_result.instance_config.mask_sample is True</code>. OR is required during compatibility because an unmigrated producer now inherits a serialized top-level <code>false</code>. Emit a conflict metric when the locations disagree and require actual booleans; <code>bool("false")</code> is <code>true</code> in Python.</p>
           <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/rollouts.py#L266-L278">current nested-only extractor</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/tests/unit/experience/test_reward_penalties.py#L130-L169">nested-only tests</a></p>
         </article>
         <article class="card warn">
@@ -599,13 +664,56 @@ got multiple values for keyword argument 'mask_sample'</code></pre>
           <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/rollout_manager.py#L1032-L1057">completion conversion</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/payload.py#L80-L93">all-ones asynchronous sample mask</a></p>
         </article>
       </div>
+      <div class="card warn" style="margin-top:14px">
+        <h3>Apply the mask in both replay producers</h3>
+        <p>The SingleController <code>SyncRolloutActor</code> copies unfiltered <code>loss_multiplier</code> into its replay payload and drops the separate tensor-valued <code>mask_sample</code> field. Fold the resolved mask into <code>loss_multiplier</code> before constructing <code>bulk_batch</code> and <code>driver_carry</code>. Test parity between this path and <code>AsyncNemoGymRolloutImpl</code>.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/sync_rollout_actor.py#L280-L367">sync replay producer</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/algorithms/async_utils/replay_buffer.py#L819-L893">replay commit</a></p>
+      </div>
       <div class="card alt" style="margin-top:14px">
-        <h3>GRPO must choose a group policy before computing statistics</h3>
+        <h3>Keep GRPO group-statistic policy separate from the wire migration</h3>
         <p>The synchronous path currently calculates each prompt group's baseline and standard deviation with an all-ones mask, then zeros the flagged row's loss later. This prevents a flagged row from contributing gradients, but its infrastructure reward still changes the advantages of valid siblings. That reproduces the distortion described by issue #2750.</p>
-        <p><strong>Recommended NeMo RL policy:</strong> replace a flagged completion before admitting the prompt group. If replacement is exhausted, calculate baseline and standard deviation from unmasked completions and drop the whole group when too few valid members remain. “Loss only” may remain an explicitly named legacy mode, but it should not be described as excluding the sample from group statistics.</p>
+        <p>The initial consumer migration can preserve this existing loss-only behavior while fixing field transport and replay parity. Excluding masked rewards from baseline, standard deviation, or DAPO eligibility is a separate training-semantics decision that needs behavior for zero or one valid group member. Document the current behavior rather than silently changing it in the location migration.</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/algorithms/grpo.py#L3188-L3208">baseline uses all rows</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/algorithms/grpo.py#L3269-L3280">loss mask is applied later</a></p>
       </div>
-      <p>The existing <code>env.should_mask_flagged_samples</code> switch should evolve into a policy choice such as <code>replace</code>, <code>exclude_from_statistics</code>, <code>drop_group</code>, or temporary <code>loss_only</code>. Once Gym's contract is narrow, “ignore the flag and train anyway” is no longer a safe interpretation of a complete but unusable result. Report masked, replaced, conflicting, and dropped-group counts separately.</p>
+      <p>For this migration, keep <code>env.should_mask_flagged_samples</code> behavior stable and report resolved, conflicting, and loss-masked counts. A later NeMo RL change can replace the boolean with explicit group policies if required.</p>
+    </section>
+
+    <section id="migration-tests">
+      <h2>Tests should cross producer, eval, and training boundaries</h2>
+      <div class="grid-3">
+        <article class="card ok">
+          <span class="label">Producer tests</span>
+          <h3>Assert serialized equality, not only helper output</h3>
+          <ul>
+            <li>AnySWE <code>/run</code> constructs successfully and writes one resolved value to top-level, metrics, and instance config.</li>
+            <li>Both conversational-tool-use producers assert top-level equals nested for masked and unmasked cases.</li>
+            <li>SWE keeps equality between its inherited field and compatibility field.</li>
+            <li>AnyTerminal and OSWorld schema tests prove the inherited field has type <code>bool</code> and default <code>false</code>.</li>
+          </ul>
+        </article>
+        <article class="card alt">
+          <span class="label">Gym eval tests</span>
+          <h3>Exercise the same mixed rows through every eval path</h3>
+          <ul>
+            <li>Resolver matrix: absent, top-level only, nested only, matching, and conflicting values.</li>
+            <li>Mixed and fully masked tasks through default and custom aggregation.</li>
+            <li>Managed collection and <code>gym eval aggregate</code> produce identical output.</li>
+            <li>Masked rows remain exported and health-checked while quality metrics exclude them.</li>
+            <li>No masked rows preserve the previous metric schema.</li>
+          </ul>
+        </article>
+        <article class="card warn">
+          <span class="label">NeMo RL tests</span>
+          <h3>Prove the mask reaches both replay payloads</h3>
+          <ul>
+            <li>Extraction uses OR for canonical-only, nested-only, conflicting, and absent values.</li>
+            <li><code>Completion</code> produces mixed <code>sample_mask</code> values in <code>record_to_train_batch()</code>.</li>
+            <li><code>SyncRolloutActor</code> folds masking into both replay <code>sample_mask</code> and carried <code>loss_multiplier</code>.</li>
+            <li>Gate-off retains diagnostics but deliberately trains the sample.</li>
+            <li>A regression records that group statistics remain unchanged in this migration.</li>
+          </ul>
+        </article>
+      </div>
     </section>
 
     <section id="documentation">
@@ -614,20 +722,20 @@ got multiple values for keyword argument 'mask_sample'</code></pre>
         <article class="card ok">
           <span class="label">Gym producer guide</span>
           <h3>How environment authors classify an outcome</h3>
-          <p>Add a canonical page beside the resources-server and agent authoring guides. Define the complete-result precondition, all three fields, the monotonic ownership rule, and examples for policy zero, degraded judge, incomplete token capture, and no-result infrastructure failure.</p>
+          <p>Add a canonical page beside the resources-server and agent authoring guides. Define the complete-result precondition, all three fields, the monotonic ownership rule, and examples for a valid zero, degraded judge, and incomplete token capture.</p>
         </article>
         <article class="card alt">
           <span class="label">Gym caller guide</span>
           <h3>What managed and library APIs return</h3>
-          <p>Document the success/failure outcome union, persistence sidecars, stable rollout identity, and caller ownership of retry, replacement, masking, group dropping, and coverage. Link this page from <code>run_examples()</code>, reward profiling, and external-agent-harness documentation.</p>
+          <p>Document top-level and nested compatibility resolution, persistence, aggregation eligibility, evaluation coverage, and direct-caller behavior. Link this page from <code>run_examples()</code>, reward profiling, and external-agent-harness documentation.</p>
         </article>
         <article class="card warn">
           <span class="label">NeMo RL integration guide</span>
           <h3>How training consumes the fact</h3>
-          <p>State field precedence and the nested deprecation window. Explain the selected GRPO group policy, behavior when every completion is masked, synchronous and asynchronous parity, configuration values, and metrics. Show that reward zero with <code>false</code> remains trainable.</p>
+          <p>State OR-based compatibility resolution, current loss-only GRPO behavior, synchronous and asynchronous parity, configuration values, and metrics. Show that reward zero with <code>false</code> remains trainable. Do not promise removal of nested fields in this PR.</p>
         </article>
       </div>
-      <p>Also add a short migration note: producer releases write both locations with identical values; consumers read top-level first; conflicts fail closed and are observable; a named release removes nested writes and fallback reads. Keep <code>mask_sample</code> out of generic reward aggregation and publish intentional coverage metrics instead.</p>
+      <p>Also add a short migration note: producers write both locations with identical values; consumers resolve them with OR during this compatibility window; conflicts fail closed and are observable; no nested field is removed in this PR. Keep <code>mask_sample</code> out of generic reward aggregation and publish intentional coverage metrics instead.</p>
     </section>
 
     <section id="evidence">
@@ -692,7 +800,7 @@ got multiple values for keyword argument 'mask_sample'</code></pre>
       <h2>Review questions before treating this as the shared interface</h2>
       <div class="question">
         <h3>1. Will the contract explicitly require a complete result?</h3>
-        <p>The current comment names lost sessions, unavailable judges, OOM-killed containers, and reset timeouts. Some of those paths cannot provide a real response and complete token fields. The existing OSWorld empty-result path makes the ambiguity concrete: its comment says the rollout “couldn't even start,” but it constructs a placeholder response and sets <code>mask_sample=true</code>. The shared design says those cases must return <code>RolloutFailureRecord</code> and must not include <code>mask_sample</code>. Narrow the comment and tests to “a complete result exists but is unusable,” then use a separate outcome for pre-result failures.</p>
+        <p>The current comment names lost sessions, unavailable judges, OOM-killed containers, and reset timeouts. Some of those paths cannot provide a real response and complete token fields. Narrow the comment and tests to “a complete result exists but is unusable.” Defining the separate no-result representation is intentionally out of scope for this PR.</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/base_resources_server.py#L96-L114">PR wording</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/osworld_agent/app.py#L993-L1027">existing placeholder path</a> · <a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L16-L21">design rule</a></p>
       </div>
       <div class="question">
@@ -701,8 +809,8 @@ got multiple values for keyword argument 'mask_sample'</code></pre>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/base_resources_server.py#L96-L114">current wording</a></p>
       </div>
       <div class="question">
-        <h3>3. Will every known producer move to the top level in the same compatibility window?</h3>
-        <p>The conversational-tool-use failure path now serializes opposite top-level and nested values. Its resources-server sibling also keeps its masking decision only under <code>instance_config</code>. AnySWE's attempted migration raises because the key is supplied both explicitly and through <code>metrics.model_dump()</code>. Fix AnySWE, migrate both conversational-tool-use paths, and add regression tests that assert complete serialized dictionaries. Search all existing <code>mask_sample</code> and inverse <code>valid_sample</code> producers before documenting “prefer the top level.”</p>
+        <h3>3. Will every known producer dual-write one resolved value?</h3>
+        <p>The conversational-tool-use failure path now serializes opposite top-level and nested values. Its resources-server sibling also keeps its masking decision only under <code>instance_config</code>. AnySWE's attempted migration raises because the key is supplied both explicitly and through <code>metrics.model_dump()</code>. Fix AnySWE, migrate both conversational-tool-use paths, and add regression tests that assert complete serialized dictionaries. Keep the nested fields and document OR-based compatibility resolution.</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/conversational_tool_use/simulation/app.py#L785-L798">agent failure payload</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/resources_servers/conversational_tool_use_simulation/app.py#L1367-L1380">resources verifier payload</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/conversational_tool_use/simulation/tests/test_app.py#L1061-L1075">test misses top-level assertion</a></p>
       </div>
       <div class="question">
@@ -717,19 +825,19 @@ got multiple values for keyword argument 'mask_sample'</code></pre>
       </div>
       <div class="question">
         <h3>6. Where is the caller contract documented?</h3>
-        <p>The implementation comment cannot carry the full policy boundary. The design's completion criterion requires one documented contract for environment authors, managed evaluation, direct callers, and training adapters. The page should show the two outcome variants, the three complete-result fields, and which layer owns retry, persistence, masking, replacement, group statistics, and coverage.</p>
+        <p>The implementation comment cannot carry the full policy boundary. This PR needs documentation for producer dual-writes, Gym evaluation aggregation, direct callers, and training adapters. The future outcome-union documentation can remain separate, but both pages should clearly identify their boundary.</p>
         <p class="source"><a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L227-L229">component migration completion criterion</a></p>
       </div>
       <div class="question">
-        <h3>7. Which NeMo RL policy is part of the rollout contract?</h3>
-        <p>Changing the field lookup fixes transport but not GRPO semantics. Today the flagged reward participates in baseline and standard-deviation calculation before its loss is zeroed, and the asynchronous replay payload ignores the flag. Choose replacement, exclusion, or group dropping; implement the same policy in synchronous and asynchronous paths; and test a mixed prompt group where an infrastructure zero would otherwise change valid samples' advantages.</p>
+        <h3>7. Will every NeMo RL rollout path preserve the current loss-mask policy?</h3>
+        <p>Changing the field lookup fixes only the batched extractor. <code>AsyncNemoGymRolloutImpl</code> emits an all-ones replay mask, and <code>SyncRolloutActor</code> copies unfiltered loss multipliers. Resolve top-level and nested values with OR, carry the result through both replay producers, and verify synchronous/asynchronous parity. Keep the existing group-statistics behavior explicit and unchanged unless a separate training-semantics change is intended.</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/rollouts.py#L266-L278">legacy field lookup</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/payload.py#L80-L93">asynchronous all-ones mask</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/algorithms/grpo.py#L3188-L3208">group statistics</a></p>
       </div>
     </section>
 
     <section>
       <h2>Practical consequence</h2>
-      <p>Keep PR #2611 as the field-placement foundation, but do not merge it until AnySWE can construct a result and both progress and final scoring use the intended result population. Then fix the reproduced producer polarity, migrate every known complete-result producer, and narrow <code>mask_sample</code> to complete results. Update NeMo RL to consume the top-level field in both rollout paths and choose a group-statistics policy. Finally, complete issue #2750 with <code>run_outcomes()</code> and <code>RolloutFailureRecord</code>. That gives evaluation and training callers one stable boundary without turning missing infrastructure outcomes into ordinary zero-reward samples.</p>
+      <p>Keep PR #2611 focused on the field-placement foundation. Before merge, fix AnySWE construction, dual-write every existing nested producer without removing compatibility fields, normalize Gym's direct and file-based eval paths, and make shared aggregation operate on unmasked quality rows while retaining all records for coverage. Update NeMo RL's batched extractor and both replay-producing paths, but leave GRPO group-statistic policy unchanged unless this PR explicitly intends a training-semantics change. The separate no-result outcome work can proceed independently.</p>
     </section>
 
     <footer>
