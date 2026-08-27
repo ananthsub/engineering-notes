@@ -169,7 +169,7 @@
       <span>Snapshot: 2026-08-27 UTC</span>
     </div>
 
-    <div class="answer"><strong>Answer:</strong> the protocol is coherent for one live RL retry loop talking to one GenRM worker. NeMo-RL keeps <code>group_id</code> stable, increments <code>group_attempt</code> when it replaces the whole group, keeps <code>rollout_index</code> stable for each sibling, and allocates a fresh Transfer Queue ID for each physical dispatch. Gym keys the comparison cohort by <code>(group_id, group_attempt)</code> and its members by <code>rollout_index</code>. The remaining review gap is proof: the PRs have strong unit tests for each boundary, but no public failure-injection test runs the complete RL → Gym agent → GenRM path.</div>
+    <div class="answer"><strong>Answer after independent re-review:</strong> the retry tuple is coherent in the asynchronous one-prompt-group path, but the PR pair has a synchronous-path correctness blocker. <code>run_nemo_gym_rollout_sync()</code> passes the entire repeated batch as <code>num_generations</code>, causing rows from distinct prompts to share one <code>group_id</code>. Gym prioritizes that ID and rejects the second prompt as inconsistent. The Gym PR also overstates backward compatibility: prompt-only and <code>prompt_id</code>-only legacy cohort requests now fail strict coordinate validation. The one-worker, correctly sized asynchronous path still isolates retries as intended.</div>
 
     <div class="figure">
       <h3>Figure 1 — Which PR owns each half of the contract?</h3>
@@ -181,6 +181,7 @@
           <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-neutral)"/></marker>
           <marker id="arrow-ok" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-ok)"/></marker>
           <marker id="arrow-alt" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-alt)"/></marker>
+          <marker id="arrow-warn" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-problem)"/></marker>
         </defs>
         <text x="30" y="30" font-size="14" font-weight="700">LEGEND</text>
         <line x1="105" y1="25" x2="150" y2="25" class="ok-arrow"/><text x="160" y="30" font-size="13">runtime identity flow</text>
@@ -215,6 +216,7 @@
 
     <nav class="toc" aria-label="Page sections">
       <a href="#before-after">Before and after</a>
+      <a href="#blocking-findings">Blocking findings</a>
       <a href="#path">End-to-end path</a>
       <a href="#worked-example">Worked retry</a>
       <a href="#layers">What each PR adds</a>
@@ -241,6 +243,49 @@ reward_by_slot[slot] = reward</code></pre>
         </article>
       </div>
       <p class="source">The new Gym storage model is visible in <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L90-L128">the cohort dataclasses</a> and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L679-L695">the attempt-scoped key</a>.</p>
+    </section>
+
+    <section id="blocking-findings">
+      <h2>The synchronous path groups distinct prompts together</h2>
+      <p>The production synchronous GRPO path repeats every prompt, then sends the entire repeated batch to <code>run_nemo_gym_rollout_sync()</code>. That wrapper sets <code>num_generations=input_batch.size</code>. The row-preparation function therefore sees one logical group spanning the whole batch and assigns every row the same generated <code>group_id</code>.</p>
+      <div class="figure">
+        <h3>Figure 2 — A transport batch becomes one semantic cohort</h3>
+        <p class="caption">Example: two prompts with two generations each. The intended grouping has two cohorts; the synchronous wrapper currently creates one four-member cohort.</p>
+        <svg viewBox="0 0 920 360" role="img" aria-labelledby="fig-sync-title fig-sync-desc">
+          <title id="fig-sync-title">Synchronous heterogeneous batch grouping bug</title>
+          <desc id="fig-sync-desc">Four rows from two prompts should form two groups. Passing batch size four as num_generations assigns all four one group ID, and Gym rejects the second prompt because its content differs.</desc>
+          <defs>
+            <marker id="arrow-sync" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-problem)"/></marker>
+          </defs>
+          <text x="30" y="32" font-size="14" font-weight="700">INPUT: repeated_batch.size = 4</text>
+          <rect x="30" y="55" width="180" height="54" rx="8" class="active"/><text x="64" y="87" font-size="14">prompt A · slot 0</text>
+          <rect x="225" y="55" width="180" height="54" rx="8" class="active"/><text x="259" y="87" font-size="14">prompt A · slot 1</text>
+          <rect x="420" y="55" width="180" height="54" rx="8" class="physical"/><text x="454" y="87" font-size="14">prompt B · slot 0</text>
+          <rect x="615" y="55" width="180" height="54" rx="8" class="physical"/><text x="649" y="87" font-size="14">prompt B · slot 1</text>
+          <path d="M410 125 L410 177" class="dash-arrow"/>
+          <text x="435" y="154" font-size="13">num_generations = 4</text>
+          <rect x="120" y="185" width="675" height="70" rx="12" class="warning"/>
+          <text x="145" y="213" font-size="15" font-weight="700">RL stamps one cohort: group_id = G, rollout_index = 0, 1, 2, 3</text>
+          <text x="145" y="238" font-size="13" class="dim">Prompt identity is no longer represented by the group boundary.</text>
+          <path d="M460 255 L460 295" class="dash-arrow"/>
+          <rect x="120" y="300" width="675" height="42" rx="9" class="warning"/>
+          <text x="168" y="326" font-size="14" font-weight="700">Gym sees prompt B under G → 409 “inconsistent prompt or principle content”</text>
+        </svg>
+      </div>
+      <div class="grid-2">
+        <article class="card warn">
+          <span class="label">Correctness blocker</span>
+          <h3>Separate transport size from cohort size</h3>
+          <p>Pass the configured generations-per-prompt into the synchronous path, or group rows by stable task identity before assigning <code>group_id</code> and <code>rollout_index</code>.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollouts.py#L2595-L2674">synchronous wrapper</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/grpo.py#L2977-L2985">production prompt repetition</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/grpo.py#L3065-L3103">production synchronous call</a></p>
+        </article>
+        <article class="card warn">
+          <span class="label">Compatibility blocker if promised</span>
+          <h3>Legacy key branches are unreachable through <code>verify()</code></h3>
+          <p>Strict validation now requires <code>task_index</code> or <code>group_id</code> and always requires <code>rollout_index</code>. That rejects prompt-hash-only, <code>prompt_id</code>-only, and append-order clients before the retained legacy key logic runs.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L399-L413">strict validation</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L679-L696">legacy key branches</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/5bf22a09f8cd18f52c4ba55082f53c4478c2f772/resources_servers/genrm_compare/app.py#L203-L292">parent append-order behavior</a></p>
+        </article>
+      </div>
     </section>
 
     <section id="path">
@@ -283,7 +328,7 @@ reward_by_slot[slot] = reward</code></pre>
       <h2>Worked example: three siblings, one partial failure</h2>
       <p>Use one logical prompt group <code>G-42</code> with three siblings. Attempt 0 reaches GenRM with slots 0 and 2, but the group fails before slot 1 completes. RL replaces the whole group. The replacement keeps <code>G-42</code>, advances the attempt to 1, and uses a fresh Transfer Queue ID.</p>
       <div class="figure">
-        <h3>Figure 2 — Old and replacement responses cannot form one cohort</h3>
+        <h3>Figure 3 — Old and replacement responses cannot form one cohort</h3>
         <p class="caption">Blue solid boxes are the accepted replacement cohort. Orange dashed boxes are superseded state. Purple boxes are physical Transfer Queue transactions.</p>
         <svg viewBox="0 0 920 470" role="img" aria-labelledby="fig2-title fig2-desc">
           <title id="fig2-title">Retry timeline for a three-member prompt cohort</title>
@@ -324,7 +369,7 @@ reward_by_slot[slot] = reward</code></pre>
           <text x="120" y="438" font-size="12" class="dim">changes: attempt, TQ ID</text>
         </svg>
       </div>
-      <p>The critical separation is deliberate: <code>group_attempt</code> protects GenRM's semantic cohort, while <code>tq_group_id</code> protects the physical Transfer Queue transaction. Reusing one identifier for both would either mix old GenRM responses or collide with old queue rows.</p>
+      <p>The critical separation is deliberate: <code>group_attempt</code> protects GenRM's semantic cohort, while <code>tq_group_id</code> protects the physical Transfer Queue transaction. Reusing one identifier for both would either mix old GenRM responses or collide with old queue rows. This mechanism is sound only after RL forms the correct prompt-group boundary.</p>
     </section>
 
     <section id="layers">
@@ -378,7 +423,7 @@ reward_by_slot[slot] = reward</code></pre>
       <div class="grid-3">
         <article class="card ok">
           <h3>Demonstrated in unit tests</h3>
-          <p>RL preserves logical identity across its retry loop. Gym rejects conflicting duplicates, caches identical duplicates, separates attempts, rejects stale arrivals, and returns rewards by slot.</p>
+          <p>RL preserves logical identity across its retry loop. Gym rejects conflicting duplicates, caches identical duplicates, separates attempts, rejects stale arrivals, and returns rewards by slot. These tests exercise correctly formed cohorts; they do not cover a heterogeneous synchronous batch.</p>
         </article>
         <article class="card alt">
           <h3>Demonstrated at boundaries</h3>
@@ -396,31 +441,37 @@ reward_by_slot[slot] = reward</code></pre>
     <section id="questions">
       <h2>Concrete questions for reviewers</h2>
       <div class="question">
-        <h3>1. Can the pair add one cross-repository failure-injection test?</h3>
+        <h3>1. Can RL preserve prompt-group boundaries in the synchronous path?</h3>
+        <p>The current wrapper treats the entire repeated batch as one group. This must be corrected before the new Gym precedence rule is safe for synchronous GRPO or validation batches containing multiple prompts. A regression test should use two distinct prompts with two generations each and assert two group IDs with indices <code>[0,1]</code> in each.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollouts.py#L2260-L2329">group construction</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollouts.py#L2656-L2677">incorrect group-size argument</a></p>
+      </div>
+      <div class="question">
+        <h3>2. Can the pair add one cross-repository failure-injection test?</h3>
         <p>The unit tests prove individual functions. They do not prove that a partial old cohort, a whole-group retry, the agent's extra-field forwarding, the Gym transport echo, and RL's final commit all compose correctly. A two- or three-sibling test that loses one result after GenRM receives it, then observes attempt 1, would resolve this gap.</p>
         <p class="source">Relevant seams: <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollout_manager.py#L936-L1019">RL partial-row redispatch</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/responses_api_agents/simple_agent/app.py#L277-L352">Gym agent run path</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L415-L494">GenRM supersession</a></p>
       </div>
       <div class="question">
-        <h3>2. Where is the single-worker requirement enforced?</h3>
+        <h3>3. Where is the single-worker requirement enforced?</h3>
         <p>The cohort map, watermark map, and locks are instance-local private attributes. If siblings or attempts are routed to different workers, no worker sees the complete cohort and no watermark can reject stale traffic on another worker. The PR description documents one worker, but the protocol itself cannot detect a multi-worker deployment. A startup guard, routing guarantee, or explicit deployment test would turn that requirement into an enforceable contract.</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/app.py#L283-L286">process-local registries</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7f93814b014cab6826b2f446066b9eba347f114e/resources_servers/genrm_compare/tests/test_app.py#L896-L910">test proving server instances do not share cohorts</a></p>
       </div>
       <div class="question">
-        <h3>3. Is retry identity intentionally limited to one live collector invocation?</h3>
-        <p>RL generates <code>group_id</code> inside <code>generate_and_push</code> when the prompt does not already carry one, and writes it only into a deep-copied attempt sample. That is correct for in-loop retries. It does not make the ID durable across a collector restart or a replay that reconstructs the original prompt without this metadata. The GenRM registry is also process-local. Reviewers should confirm that restart recovery is explicitly outside scope or add persisted identity at the checkpoint boundary.</p>
-        <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollout_manager.py#L1293-L1343">in-memory ID creation and copy</a></p>
+        <h3>4. What owns a future partial-rollout checkpoint?</h3>
+        <p>A coupled RL and Gym restart is safe today because uncovered prompts are regenerated into a fresh Gym process. It is at-least-once recovery, not partial continuation: the rollout checkpoint persists task ordinals and completed replay groups, but not active <code>group_id</code>, <code>group_attempt</code>, per-slot responses, or GenRM members. Future partial rollout checkpointing needs one durable authority for the logical transaction. The simplest contract is for RL to persist the stable group, next attempt, expected cohort size, and per-slot durable response references, then replay a complete higher attempt into an empty GenRM after restart.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/async_utils/trajectory_collector.py#L681-L745">checkpoint cut</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/async_utils/trajectory_collector.py#L1077-L1103">persisted rollout state</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/grpo.py#L4383-L4425">frontier restore</a></p>
       </div>
     </section>
 
     <section>
       <h2>Recommended review order</h2>
       <ol>
-        <li><strong>Settle the identity contract in RL:</strong> stable logical group, monotonic whole-group attempt, stable sibling slot, fresh TQ transaction.</li>
-        <li><strong>Verify the forwarding boundary:</strong> row extras must survive the selected agent and reach <code>/verify</code>.</li>
-        <li><strong>Review GenRM admission and supersession:</strong> one digest per slot, one active newest attempt, all waiters released.</li>
-        <li><strong>Review evidence and deployment:</strong> require the cross-repository retry test and decide how one-worker routing is guaranteed.</li>
+        <li><strong>Fix synchronous grouping first:</strong> cohort size must be generations per prompt, not transport-batch size.</li>
+        <li><strong>Settle compatibility:</strong> either retain prompt-only append behavior or narrow the backward-compatibility claim.</li>
+        <li><strong>Verify the forwarding and retry boundary:</strong> row extras must reach <code>/verify</code>, and one replacement attempt must return rewards to the right slots.</li>
+        <li><strong>Review GenRM deployment:</strong> enforce one worker or provide shared, group-sticky state.</li>
+        <li><strong>Define future restart ownership:</strong> partial rollout checkpoints need durable logical transaction and per-slot state.</li>
       </ol>
-      <p><strong>Practical consequence:</strong> once both revisions land together and the single-worker condition holds, a retry can no longer silently enlarge a GenRM cohort or attach a reward to the wrong sibling. The remaining risk is not the tuple design; it is whether production routing and recovery preserve the assumptions that make the tuple authoritative.</p>
+      <p><strong>Practical consequence:</strong> the tuple design prevents retry mixing after a cohort is formed correctly. The current synchronous path does not form those cohorts correctly, so the RL fix must separate prompt-group size from batch size before the pair is safe to merge.</p>
     </section>
 
     <footer>
