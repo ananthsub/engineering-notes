@@ -134,9 +134,10 @@ tr:last-child td { border-bottom: none; }
 <h3>Admission and quiescence</h3>
 <div class="inv"><b>Closing a gate and testing admission happen atomically.</b><p>The <code>AdmissionLimiter</code> grants a capacity permit only while the gate accepts work. Closing the gate atomically rejects or parks new callers. A caller waiting for capacity holds no permit and does not count as in flight. An admitted request remains in flight until its response and required custody updates are durable.</p></div>
 <div class="inv"><b>Only policy model servers pause.</b><p>Prepare closes admission on policy model-server instances backed by NeMo-RL generation workers. It also closes admission on every resources server. Judge and simulator model-server instances remain open so accepted tools and verifiers can finish. Startup validation rejects environment traffic that targets a policy instance.</p></div>
+<div class="inv"><b>A model-server pause covers every FastAPI worker process.</b><p>A pause request routed to one Uvicorn worker cannot close admission for the other workers that share the service port. Each multi-worker model-server instance therefore has one service-level admission coordinator and a distinct control URL. The proposed implementation starts a companion control process before the Uvicorn worker pool and gives the workers a local Unix-domain socket address. Each spawned worker registers with the coordinator, watches checkpoint-state updates, applies them to its in-process admission middleware, and reports acknowledgements and local request counts. The coordinator reports <code>paused</code> only after every registered live worker has acknowledged the checkpoint ID and the sum of their in-flight counts is zero. A missing worker is an error, not an implicit zero. This pause does not stop generation workers; it prevents new policy calls while already accepted generations reach their durable custody boundary. Multi-worker resources servers use the same service-level pattern.</p></div>
 <div class="inv"><b>Accepted operations can finish nested calls.</b><p>The drain blocks only new top-level operations. A nested request remains admissible when it carries the lease of an accepted operation. This rule lets a tool call its simulator and a verifier call its judge while the system drains.</p></div>
 <div class="inv"><b>Agents park instead of waiting behind a closed gate.</b><p>A closed gate returns <code>409 checkpoint_parked</code> to a caller that can park. The agent records <code>next_operation</code> and stops at that boundary. It checks the park flag before every model call, tool call, and verification call. Only callers that cannot park remain as blocked waiters.</p></div>
-<div class="inv"><b>A slow rollout does not cancel the checkpoint.</b><p>When the prepare deadline expires, the actor force-closes each rollout that is still draining. It marks the rollout for <code>fresh_dispatch</code>, tombstones its call roots, and discards its partial state. Prepare then succeeds and reports the affected rollouts. Infrastructure failures may still abort the global checkpoint.</p></div>
+<div class="inv"><b>The deadline policy decides what happens to unfinished rollouts.</b><p><code>deadline_policy</code> defines how prepare handles a rollout that cannot reach a recoverable boundary before the absolute deadline. The proposed default is <code>restart_safe_rollouts</code>: fence the old attempt, tombstone its abandoned model-call roots, discard its agent and environment state, record <code>fresh_dispatch</code>, and continue the checkpoint. This action is allowed only when the affected state can be discarded completely. A tool with non-transactional external effects, a shared mutable runtime, or any component that cannot prove restart safety causes the global checkpoint to abort. The prepare response reports restarted rollouts and their blocking operations explicitly.</p></div>
 
 <h3>Ordering</h3>
 <div class="inv"><b>Generation workers stay available during prepare.</b><p>Accepted generations must finish staging their output before Gym can drain. Pausing workers earlier would deadlock prepare. NeMo-RL may pause, checkpoint, or refit workers only after Gym commits and before the final resume.</p></div>
@@ -147,7 +148,7 @@ tr:last-child td { border-bottom: none; }
 <h3>Durability and publication</h3>
 <div class="inv"><b><code>TransferQueue</code> snapshots are content-addressed.</b><p>Each snapshot uses a fresh path and is restored by the digest recorded in the checkpoint. An interrupted save therefore cannot damage an earlier checkpoint. Restore selects the newest published checkpoint by checkpoint ID, not filesystem modification time.</p></div>
 <div class="inv"><b>Components stream state into archive shards.</b><p>A component serializes frozen state directly into compressed shards. A member index maps each rollout to its shard, byte offset, and length. The shared filesystem never receives one file per rollout. Published archives are immutable, and retention removes complete checkpoints rather than individual shards.</p></div>
-<div class="inv"><b>Control operations are idempotent and fenced.</b><p>Every actor method and control endpoint carries <code>checkpoint_id</code> and an absolute deadline. Repeating a phase for the same checkpoint returns the recorded result. A stale checkpoint ID cannot reopen traffic or replace files. The actor's checkpoint lock serializes state transitions.</p></div>
+<div class="inv"><b>Control operations are idempotent and fenced.</b><p>Every actor method and control endpoint carries <code>checkpoint_id</code> and an absolute deadline. Repeating a phase for the same checkpoint returns the recorded result. A stale checkpoint ID cannot reopen traffic or replace files. A short-held mutex in the <code>NemoGym</code> actor protects checkpoint phase changes and snapshots of the live-execution registry. It prevents two checkpoint IDs from preparing concurrently, prevents commit, abort, restore, and resume from racing, and rejects invalid transitions such as commit before prepared. The actor releases the mutex before waiting for servers to drain so <code>checkpoint_progress</code> and <code>abort_checkpoint</code> remain callable during a long prepare.</p></div>
 
 <h3>Restore</h3>
 <div class="inv"><b>NeMo-RL chooses one recovery action for each execution.</b><p>An execution is already complete, resumes from an agent boundary, resumes from a full runtime snapshot, or starts again from its input. An execution marked <code>transferred_to_rl</code> cannot also have a continuation. The restored NeMo-RL registry decides whether work completed or failed. Gym does not make that decision.</p></div>
@@ -362,13 +363,13 @@ buildStepper("st-pp", "Prepare", ["SingleController","NemoGym actor","Agent serv
   resp:"(local)",
   eff:"nothing will write TransferQueue during the later save", fail:"skipping this can strand a group across the snapshot"},
  {id:"P2", f:0, t:1, call:"prepare_checkpoint",
-  req:"Ray: {checkpoint_id, deadline (absolute), sacrifice_policy}",
+  req:"Ray: {checkpoint_id, deadline (absolute), deadline_policy: restart_safe_rollouts}",
   resp:"(returns at P13)",
-  eff:"actor takes the checkpoint lock; phase running -> preparing", fail:"idempotent per checkpoint id; a different id is rejected while one is active"},
+  eff:"actor enters a short critical section: validate the transition, set the active checkpoint id, and change phase running -> preparing; P3 completes before the mutex is released", fail:"same checkpoint id returns its recorded transition; a different id is rejected while one is active"},
  {id:"P3", f:1, t:1, call:"Fence dispatch and freeze membership",
-  req:"close run_rollouts dispatch AND the concurrency semaphore; freeze the live-execution registry",
+  req:"while the same mutex is held: close the actor dispatch gate and snapshot membership of the live-execution registry; then release the mutex before any drain wait",
   resp:"(local)",
-  eff:"queued-never-issued entries are classified now: no continuation needed", fail:"—"},
+  eff:"no new execution can join the checkpoint set; queued-never-issued entries are classified now; progress and abort calls remain available during draining", fail:"—"},
  {id:"P4", f:1, t:2, call:"Park signal fan-out",
   req:"POST /ng-control/v1/agent/pause_after_current {checkpoint_id, deadline} per agent instance",
   resp:"{state: parking, active_runs}",
@@ -378,13 +379,13 @@ buildStepper("st-pp", "Prepare", ["SingleController","NemoGym actor","Agent serv
   resp:"{state: paused, local_pending_requests}",
   eff:"relay holds NEW harness requests locally; the harness may keep computing", fail:"re-send; idempotent"},
  {id:"P6", f:1, t:5, call:"Close admission by instance role",
-  req:"POST .../admission/pause {checkpoint_id, deadline}\ntargets: policy model instances and all resources servers\nexcluded: judge and simulator instances; generation workers stay available",
-  resp:"{state: draining, inflight, waiters}",
-  eff:"no new top-level operations; accepted ones finish", fail:"re-send; idempotent"},
+  req:"POST each service control URL .../admission/pause {checkpoint_id, deadline}\ntargets: policy model instances and all resources servers\nexcluded: judge and simulator instances; generation workers stay available",
+  resp:"{state: draining, workers: {acknowledged, expected}, inflight_total, waiters_total}",
+  eff:"the service coordinator publishes the closed state to every FastAPI worker; no new top-level operations enter after all workers acknowledge; accepted ones finish", fail:"a missing worker is an error; re-send is idempotent"},
  {id:"P7", f:7, t:5, call:"Accepted generations drain",
   req:"each finishes the R6-R9 path: stage -> coordinates -> custody row -> release",
   resp:"(normal operation)",
-  eff:"policy inflight falls toward zero", fail:"a straggler is handled at P11, never by waiting forever"},
+  eff:"each FastAPI worker decrements its local count after custody is durable; the service coordinator's aggregate falls toward zero", fail:"a straggler is handled at P11, never by waiting forever"},
  {id:"P8", f:4, t:6, call:"Accepted environment operations drain",
   req:"tools and verifiers finish; nested judge and simulator calls carry the accepted parent lease",
   resp:"(normal operation)",
@@ -395,19 +396,19 @@ buildStepper("st-pp", "Prepare", ["SingleController","NemoGym actor","Agent serv
   eff:"per-rollout state: parked | transferred_to_rl", fail:"a loop stuck mid-operation is visible at P10 with the blocking operation named"},
  {id:"P10", f:1, t:2, call:"Status long-poll until quiet or deadline",
   req:"GET .../agent/status, .../model-admission/status, .../resources-admission/status (long-poll <= 10 s)",
-  resp:"agent: per-rollout {parked | running | mid_operation {op, target, age}}\nservers: {state, inflight, waiters}",
+  resp:"agent: per-rollout {parked | running | mid_operation {op, target, age}}\nservers: {state, worker_acks, inflight_total, waiters_total}",
   eff:"progress remains observable and the deadline remains enforceable", fail:"rollouts owned by a dead worker are marked for fresh dispatch instead of blocking prepare"},
- {id:"P11", f:1, t:4, call:"Restart rollouts that miss the deadline",
-  req:"abort_inflight {rollout_id, attempt} at the blocking server; mark execution fresh_dispatch; tombstone its call roots",
+ {id:"P11", f:1, t:4, call:"Apply the deadline policy",
+  req:"for restart-safe state: abort_inflight {rollout_id, attempt} at the blocking server; fence the attempt; mark fresh_dispatch; tombstone its call roots",
   resp:"{aborted}",
-  eff:"prepare continues and reports the rollouts that require fresh dispatch", fail:"only an infrastructure failure aborts the global checkpoint"},
+  eff:"prepare continues and reports the rollouts that require fresh dispatch", fail:"non-discardable external or shared state aborts the global checkpoint"},
  {id:"P12", f:1, t:3, call:"Freeze blackbox runtimes",
   req:"checkpoint_runtime {rollout, attempt, mode: full_runtime_snapshot} once that rollout has no in-flight calls, or at the deadline with the forwarded call marked pending_reissue",
   resp:"RuntimeSnapshotDescriptor {artifact_ref, digest, provider_fingerprint}",
   eff:"harness memory + relay pending/cached state captured", fail:"provider without full-runtime support -> rollout marked restart"},
  {id:"P13", f:1, t:0, call:"Prepared",
   req:"(response to P2)",
-  resp:"{state: prepared, rollouts: {rid: parked | transferred | snapshot_ready | fresh_dispatch}, casualties: [{rid, attempt, stuck_op, age}]}",
+  resp:"{state: prepared, rollouts: {rid: parked | transferred | snapshot_ready | fresh_dispatch}, restarted_rollouts: [{rid, attempt, stuck_op, age}]}",
   eff:"Gym is paused at restorable points; SC may seal its data plane", fail:"SC aborts -> resume everything, delete temp"}
 ]);
 
@@ -509,7 +510,7 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <h3>NeMo-RL NemoGym actor (Ray methods)</h3>
 <div class="tbl"><table>
 <tr><th>API</th><th>Request → response</th><th>Phase</th><th>Status</th></tr>
-<tr><td><code>prepare_checkpoint</code></td><td><code>{checkpoint_id, deadline, sacrifice_policy}</code> → <code>{state, rollouts{rid: disposition}, casualties[]}</code></td><td>P2–P13</td><td><span class="pill new">new</span></td></tr>
+<tr><td><code>prepare_checkpoint</code></td><td><code>{checkpoint_id, deadline, deadline_policy: restart_safe_rollouts}</code> → <code>{state, rollouts{rid: disposition}, restarted_rollouts[]}</code>. The default restarts only rollouts whose partial state can be discarded completely; an unsafe unfinished operation aborts the checkpoint.</td><td>P2–P13</td><td><span class="pill new">new</span></td></tr>
 <tr><td><code>commit_checkpoint</code></td><td><code>{checkpoint_id, checkpoint_dir}</code> → <code>{state: committed_paused}</code></td><td>S3–S5</td><td><span class="pill new">new</span></td></tr>
 <tr><td><code>abort_checkpoint</code></td><td><code>{checkpoint_id, reason}</code> → resume all controls, delete temp</td><td>any pre-publish failure</td><td><span class="pill new">new</span></td></tr>
 <tr><td><code>restore_checkpoint</code></td><td><code>{checkpoint_dir}</code> → <code>{phase: restored_paused, per-component states}</code></td><td>T4–T9</td><td><span class="pill new">new</span></td></tr>
@@ -531,9 +532,10 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <h3>Gym model server</h3>
 <div class="tbl"><table>
 <tr><th>API</th><th>Contract</th><th>Status</th></tr>
-<tr><td><code>POST …/model-admission/pause</code></td><td><code>{checkpoint_id, deadline}</code> → <code>{draining, inflight, waiters}</code>; applies only to policy model-server instances</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>GET …/model-admission/status</code></td><td>long-poll → <code>{state, inflight}</code></td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>POST …/model-admission/resume</code></td><td><code>{checkpoint_id}</code> → <code>{accepting, released_waiters}</code></td><td><span class="pill new">new</span></td></tr>
+<tr><td>service-level admission coordinator</td><td>One coordinator per configured model-server instance owns the control URL and worker membership. It distributes the checkpoint state to every Uvicorn worker through local IPC and aggregates acknowledgements, in-flight counts, and waiters. A control request handled by an arbitrary data-plane worker is insufficient.</td><td><span class="pill new">new</span></td></tr>
+<tr><td><code>POST …/model-admission/pause</code></td><td><code>{checkpoint_id, deadline}</code> → <code>{state: draining, workers: {acknowledged, expected}, inflight_total, waiters_total}</code>; applies only to policy model-server instances and returns after every live FastAPI worker has observed the closed gate</td><td><span class="pill new">new</span></td></tr>
+<tr><td><code>GET …/model-admission/status</code></td><td>long-poll → <code>{state, per_worker, inflight_total, waiters_total}</code>; a missing worker is reported as an error rather than counted as drained</td><td><span class="pill new">new</span></td></tr>
+<tr><td><code>POST …/model-admission/resume</code></td><td><code>{checkpoint_id}</code> → <code>{accepting, workers: {acknowledged, expected}, released_waiters}</code>; admission reopens only after every live worker installs the matching checkpoint state</td><td><span class="pill new">new</span></td></tr>
 <tr><td><code>POST …/model-admission/abort_inflight</code></td><td><code>{rollout_id, attempt}</code>; force-closes a rollout that misses the prepare deadline and tombstones its call roots</td><td><span class="pill new">new</span></td></tr>
 <tr><td><code>POST …/model-checkpoint/commit</code> / <code>restore</code></td><td>ledger export / install: token-free custody rows, rollout manifests, and the resolution fingerprints the first resumed call needs (T5)</td><td><span class="pill new">new</span></td></tr>
 <tr><td>call-id echo</td><td><code>x-ng-model-call-id</code> response header on capture routes — the boundary join key</td><td><span class="pill new">new</span></td></tr>
