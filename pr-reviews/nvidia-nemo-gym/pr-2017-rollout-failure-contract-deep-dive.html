@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PR #2017 fixes evaluation failure routing, not the shared training contract</title>
+  <script>
+    (() => {
+      try {
+        if (localStorage.getItem("engineering-notes-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {}
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1f252d;
+      --border: #30363d;
+      --text: #e6edf3;
+      --dim: #a3adb8;
+      --accent: #58a6ff;
+      --diagram-ok: #5bc0eb;
+      --diagram-problem: #ffb000;
+      --diagram-alt: #d98bc3;
+      --diagram-neutral: #c7ced8;
+      --code-bg: #090c10;
+      --focus: #f0f6fc;
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --surface-2: #eef1f4;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --dim: #59636e;
+      --accent: #0969da;
+      --diagram-ok: #005a8d;
+      --diagram-problem: #9a4d00;
+      --diagram-alt: #7a3e6d;
+      --diagram-neutral: #4b5563;
+      --code-bg: #f1f4f7;
+      --focus: #111820;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.62 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 980px; margin: 0 auto; padding: 54px 24px 80px; }
+    h1, h2, h3 { line-height: 1.18; letter-spacing: -0.02em; }
+    h1 { max-width: 850px; margin: 0 0 14px; font-size: clamp(2rem, 5vw, 3.35rem); }
+    h2 { margin: 58px 0 18px; font-size: 1.72rem; }
+    h3 { margin: 30px 0 10px; font-size: 1.17rem; }
+    p { margin: 10px 0; }
+    a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    code { background: var(--code-bg); border-radius: 4px; padding: 0.08em 0.3em; }
+    pre {
+      margin: 12px 0;
+      padding: 15px 17px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--text);
+      font-size: 0.88rem;
+      line-height: 1.52;
+    }
+    .theme-toggle {
+      position: fixed;
+      z-index: 10;
+      top: 14px;
+      right: 14px;
+      min-width: 94px;
+      min-height: 42px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+    }
+    .provenance {
+      color: var(--dim);
+      font-size: 0.93rem;
+      overflow-wrap: anywhere;
+    }
+    .answer {
+      margin: 30px 0 22px;
+      padding: 20px 22px;
+      border-left: 5px solid var(--diagram-ok);
+      background: var(--surface);
+      font-size: 1.11rem;
+    }
+    .figure {
+      margin: 24px 0;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+      padding: 16px;
+    }
+    .figure figcaption {
+      margin: 0 0 12px;
+      color: var(--dim);
+      font-size: 0.91rem;
+    }
+    svg { display: block; width: 100%; min-width: 760px; height: auto; }
+    svg text { fill: var(--text); font-family: system-ui, sans-serif; }
+    svg .dim { fill: var(--dim); }
+    svg .box { fill: var(--surface-2); stroke: var(--diagram-neutral); stroke-width: 2; }
+    svg .active { fill: var(--surface-2); stroke: var(--diagram-ok); stroke-width: 3; }
+    svg .problem { fill: var(--surface-2); stroke: var(--diagram-problem); stroke-width: 3; stroke-dasharray: 8 5; }
+    svg .alt { fill: var(--surface-2); stroke: var(--diagram-alt); stroke-width: 3; }
+    svg .line { fill: none; stroke: var(--diagram-neutral); stroke-width: 2; }
+    svg .ok-line { fill: none; stroke: var(--diagram-ok); stroke-width: 3; }
+    svg .problem-line { fill: none; stroke: var(--diagram-problem); stroke-width: 3; stroke-dasharray: 8 5; }
+    svg .alt-line { fill: none; stroke: var(--diagram-alt); stroke-width: 3; }
+    svg a text { text-decoration: underline; }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin: 8px 0 0;
+      color: var(--dim);
+      font-size: 0.88rem;
+    }
+    .key::before {
+      content: "";
+      display: inline-block;
+      width: 21px;
+      margin-right: 7px;
+      border-top: 3px solid var(--diagram-neutral);
+      vertical-align: middle;
+    }
+    .key.active-key::before { border-color: var(--diagram-ok); }
+    .key.alt-key::before { border-color: var(--diagram-alt); }
+    .key.problem-key::before { border-color: var(--diagram-problem); border-top-style: dashed; }
+    nav {
+      margin: 28px 0;
+      padding: 15px 19px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    nav strong { display: block; margin-bottom: 7px; }
+    nav ol { margin: 0; padding-left: 22px; columns: 2; column-gap: 34px; }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin: 20px 0;
+    }
+    .panel {
+      padding: 17px 18px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    .panel h3 { margin-top: 0; }
+    .path {
+      margin: 18px 0;
+      padding-left: 19px;
+      border-left: 2px solid var(--border);
+    }
+    .path li { margin: 9px 0; padding-left: 5px; }
+    .status {
+      display: inline-block;
+      margin-right: 7px;
+      padding: 2px 7px;
+      border: 1px solid var(--diagram-neutral);
+      border-radius: 999px;
+      color: var(--text);
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .status.done { border-color: var(--diagram-ok); }
+    .status.partial { border-color: var(--diagram-problem); border-style: dashed; }
+    .status.open { border-color: var(--diagram-alt); }
+    .table-wrap { overflow-x: auto; margin: 18px 0; }
+    table { width: 100%; min-width: 720px; border-collapse: collapse; }
+    th, td { padding: 11px 12px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { background: var(--surface-2); }
+    .finding {
+      margin: 18px 0;
+      padding: 17px 19px;
+      border: 1px solid var(--diagram-problem);
+      border-left-width: 5px;
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    .finding h3 { margin-top: 0; }
+    .question {
+      margin: 16px 0;
+      padding: 15px 18px;
+      border: 1px dashed var(--diagram-alt);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    .question h3 { margin-top: 0; }
+    .note { color: var(--dim); font-size: 0.91rem; }
+    .consequence {
+      margin-top: 56px;
+      padding: 22px;
+      border: 2px solid var(--diagram-ok);
+      border-radius: 9px;
+      background: var(--surface);
+    }
+    footer { margin-top: 48px; color: var(--dim); font-size: 0.86rem; }
+    @media (max-width: 720px) {
+      main { padding: 66px 16px 60px; }
+      nav ol { columns: 1; }
+      .split { grid-template-columns: 1fr; }
+      .theme-toggle { top: 10px; right: 10px; }
+    }
+    @media print {
+      .theme-toggle { display: none; }
+      body { background: white; color: black; }
+      main { max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <button class="theme-toggle" type="button" aria-label="Toggle color theme">Light theme</button>
+  <main>
+    <h1>PR #2017 fixes evaluation failure routing, not the shared training contract</h1>
+    <p class="provenance">
+      Reviewed: <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2017">Gym PR #2017</a> at
+      <a href="https://github.com/NVIDIA-NeMo/Gym/commit/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf"><code>62df56df4cd4e2edc1ee28e083a09c75cf2fbccf</code></a>,
+      against <a href="https://github.com/NVIDIA-NeMo/Gym/issues/2750">Gym issue #2750</a>.
+      Training comparison: <a href="https://github.com/NVIDIA-NeMo/RL/commit/6ae035784fe40fd9c9e31d27fffa4a403243a0bd">NeMo-RL <code>6ae035784fe40fd9c9e31d27fffa4a403243a0bd</code></a>,
+      which pins <a href="https://github.com/NVIDIA-NeMo/Gym/commit/c3bac96314a59f28b896f597eb9845d175bb0252">Gym <code>c3bac96314a59f28b896f597eb9845d175bb0252</code></a>.
+    </p>
+
+    <div class="answer">
+      <strong>Answer:</strong> the PR is the right shape for managed evaluation. A failed agent call becomes a row-associated sidecar record with no invented reward, unrelated rows continue, and evaluation chooses whether selected classes count as zero. It intentionally leaves NeMo-RL on the old exception interface. NeMo-RL then applies its own row and prompt-group retry policy, without receiving the failure class that evaluation sees. That boundary preserves compatibility, but it is not yet the common contract proposed by issue #2750.
+    </div>
+
+    <figure class="figure">
+      <figcaption>Figure 1 — The same agent error crosses two different policy boundaries.</figcaption>
+      <svg viewBox="0 0 940 430" role="img" aria-labelledby="fig1-title fig1-desc">
+        <title id="fig1-title">Managed evaluation and NeMo-RL diverge after the same POST run failure</title>
+        <desc id="fig1-desc">Managed evaluation opts into a failure dictionary and writes a sidecar. NeMo-RL leaves routing disabled, receives an exception, and retries according to its own policy.</desc>
+        <defs>
+          <marker id="arrow1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-neutral)"></path>
+          </marker>
+          <marker id="arrow1ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-ok)"></path>
+          </marker>
+          <marker id="arrow1alt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-alt)"></path>
+          </marker>
+        </defs>
+        <rect class="box" x="20" y="150" width="175" height="88" rx="8"></rect>
+        <text x="108" y="182" text-anchor="middle" font-weight="700">POST /run</text>
+        <text class="dim" x="108" y="207" text-anchor="middle">task 7 · rollout 2</text>
+        <text class="dim" x="108" y="227" text-anchor="middle">HTTP 500 / 503 / error</text>
+
+        <path class="line" d="M195 194 H290" marker-end="url(#arrow1)"></path>
+        <rect class="box" x="290" y="150" width="210" height="88" rx="8"></rect>
+        <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L1591-L1644">
+          <text x="395" y="180" text-anchor="middle" font-weight="700">run_examples()</text>
+        </a>
+        <text class="dim" x="395" y="205" text-anchor="middle">decision: route failures?</text>
+        <text class="dim" x="395" y="226" text-anchor="middle">default is false</text>
+
+        <path class="ok-line" d="M500 173 C555 173 545 79 600 79" marker-end="url(#arrow1ok)"></path>
+        <text x="550" y="105" text-anchor="middle" font-size="13">true</text>
+        <rect class="active" x="600" y="30" width="315" height="110" rx="8"></rect>
+        <text x="757" y="58" text-anchor="middle" font-weight="700">Managed evaluation</text>
+        <text x="757" y="82" text-anchor="middle">plain failure dictionary, no reward</text>
+        <text x="757" y="104" text-anchor="middle">sidecar + resume attempt accounting</text>
+        <text x="757" y="126" text-anchor="middle">optional metric-only zero</text>
+
+        <path class="alt-line" d="M500 216 C555 216 545 319 600 319" marker-end="url(#arrow1alt)"></path>
+        <text x="550" y="290" text-anchor="middle" font-size="13">false</text>
+        <rect class="alt" x="600" y="264" width="315" height="120" rx="8"></rect>
+        <text x="757" y="293" text-anchor="middle" font-weight="700">NeMo-RL direct caller</text>
+        <text x="757" y="318" text-anchor="middle">HTTP exception crosses Ray boundary</text>
+        <text x="757" y="340" text-anchor="middle">RL classifies infra vs data</text>
+        <text x="757" y="362" text-anchor="middle">missing rows or prompt group retried</text>
+
+        <rect class="problem" x="20" y="320" width="470" height="72" rx="8"></rect>
+        <text x="255" y="347" text-anchor="middle" font-weight="700">Still below both branches</text>
+        <text x="255" y="371" text-anchor="middle">shared transport may retry forever before either caller sees an outcome</text>
+      </svg>
+      <div class="legend">
+        <span class="key active-key">PR-managed path</span>
+        <span class="key alt-key">direct training path</span>
+        <span class="key problem-key">unresolved lower-layer behavior</span>
+      </div>
+    </figure>
+
+    <nav aria-label="Table of contents">
+      <strong>Contents</strong>
+      <ol>
+        <li><a href="#before-after">What changes for evaluation</a></li>
+        <li><a href="#worked-example">One failure through both systems</a></li>
+        <li><a href="#rl-contract">How NeMo-RL collects and trains</a></li>
+        <li><a href="#issue-contract">Fit with issue #2750</a></li>
+        <li><a href="#evidence">Independent evidence</a></li>
+        <li><a href="#findings">Findings and review questions</a></li>
+      </ol>
+    </nav>
+
+    <section id="before-after">
+      <h2>Evaluation gains a failure value where it used to get an exception</h2>
+      <div class="split">
+        <div class="panel">
+          <h3>Before the PR</h3>
+          <p><code>run_from_config()</code> awaits each future before it can route a result. If <code>POST /run</code>, status handling, body reading, or JSON decoding raises, collection exits at that await. Earlier completed rows remain on disk, but the failed input has no row-associated record.</p>
+        </div>
+        <div class="panel">
+          <h3>At PR head</h3>
+          <p>Managed collection calls <code>run_examples(..., route_failures_to_sidecar=True)</code>. Expected request failures become plain dictionaries. The loop stamps the input row’s task, rollout, attempt, and agent identity before writing the record to the failure sidecar.</p>
+        </div>
+      </div>
+      <p>The important constraint is absence: an <code>agent_run_error</code> or <code>agent_request_failed</code> contains neither <code>reward</code> nor <code>response</code>. It therefore cannot look like a verifier score or a trainable generation. See the <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L648-L674">failure-row builder</a> and the <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L1150-L1243">persistence loop</a>.</p>
+      <p>Scoring remains a separate decision. The default denominator contains only completed rollouts. <code>count_failure_classes_as_zero</code> can project selected sidecar records into the aggregation request with <code>reward: 0.0</code>, without changing either stored artifact. That matches issue #2750’s rule that infrastructure is not silently turned into verifier output.</p>
+    </section>
+
+    <section id="worked-example">
+      <h2>Task 7, rollout 2 shows what each label does—and does not prove</h2>
+      <p>Use one materialized input throughout:</p>
+      <pre>{
+  "_ng_task_index": 7,
+  "_ng_rollout_index": 2,
+  "agent_ref": {"name": "browser_agent"},
+  "responses_create_params": {"input": [{"role": "user", "content": "Complete the task"}]}
+}</pre>
+
+      <h3>The agent endpoint returns HTTP 500</h3>
+      <p>Managed evaluation writes <code>agent_run_error</code> with status, exception type, message, and a bounded body. It does not resend that HTTP response in place. Resume can later create a new rollout attempt. The PR assumes a NeMo Gym agent itself uses 500 when its handler raises.</p>
+      <pre>{
+  "_ng_task_index": 7,
+  "_ng_rollout_index": 2,
+  "_ng_attempt_index": 0,
+  "_ng_failure_class": "agent_run_error",
+  "_ng_failure_http_status": 500,
+  "_ng_failure_type": "ClientResponseError"
+  // no reward, response, or token sequence
+}</pre>
+
+      <h3>A gateway returns HTTP 503</h3>
+      <p>The same row becomes <code>agent_request_failed</code>. This label says the reply does not prove that the agent ran. It is still a completed failure record for persistence, but not evidence about model quality.</p>
+
+      <h3>The connection fails</h3>
+      <p>The unit-level dispatcher can convert a surfaced <code>ClientError</code> into <code>agent_request_failed</code>. The production shared transport often prevents that branch from running: internal connection, disconnect, and timeout paths can retry without a finite default. The sidecar and resume limit apply only after the lower request call returns or raises.</p>
+
+      <h3>Resume creates another attempt</h3>
+      <p>The first resume sends the same task and rollout with <code>_ng_attempt_index: 1</code>. Under the default maximum of three rollout attempts, later resumes stop dispatching after three recorded sidecar attempts. A later success suppresses earlier failures when online aggregation builds its scored set. See <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L968-L1029">resume accounting</a>.</p>
+    </section>
+
+    <section id="rl-contract">
+      <h2>NeMo-RL needs a complete group, so it treats “no result” as control flow</h2>
+      <p>Current NeMo-RL does not call the managed CLI path. A Ray actor starts Gym services, creates <code>RolloutCollectionHelper</code>, and calls the lower-level <code>run_examples()</code> interface with its default failure routing disabled. The actor then converts each Gym Responses record into training messages.</p>
+      <ol class="path">
+        <li><a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/environments/nemo_gym.py#L535-L629"><code>NemoGym._spinup()</code></a> starts Gym and points its model server at NeMo-RL’s exposed generation endpoints.</li>
+        <li><a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/experience/rollout_manager.py#L839-L865"><code>AsyncNemoGymRolloutImpl._build_inputs()</code></a> clones one prompt into the configured group size and stamps each row with <code>_rowidx</code>.</li>
+        <li><a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/environments/nemo_gym.py#L655-L750"><code>NemoGym.run_rollouts()</code></a> streams Gym futures in completion order. One exception terminates that actor stream.</li>
+        <li><a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/environments/nemo_gym.py#L827-L1017">Postprocessing</a> accepts only output items with generation token IDs and requires prompt IDs and generation log probabilities. If none remain, it raises “no generation data.”</li>
+        <li><a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/experience/rollout_manager.py#L916-L1030">SingleController collection</a> retains arrived slots and re-dispatches only missing row indices. It emits a prompt group only after every slot is filled.</li>
+        <li><a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/algorithms/advantage_estimator.py#L73-L114">GRPO advantage estimation</a> computes a group-relative baseline across all responses for the prompt.</li>
+      </ol>
+
+      <figure class="figure">
+        <figcaption>Figure 2 — A four-response prompt group preserves arrived slots, but a failed stream can overlap its retry.</figcaption>
+        <svg viewBox="0 0 940 500" role="img" aria-labelledby="fig2-title fig2-desc">
+          <title id="fig2-title">NeMo-RL row redispatch and abandoned sibling overlap</title>
+          <desc id="fig2-desc">Rows zero and one arrive, row two fails, and row three remains active. NeMo-RL retains completed slots and retries missing rows, but the original row three request was not cancelled and can overlap.</desc>
+          <defs>
+            <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-neutral)"></path>
+            </marker>
+          </defs>
+          <text x="28" y="38" font-weight="700">Attempt 1: dispatch all four rows</text>
+          <text class="dim" x="28" y="65">time →</text>
+          <line class="line" x1="110" y1="61" x2="900" y2="61" marker-end="url(#arrow2)"></line>
+
+          <text x="40" y="112">row 0</text>
+          <rect class="active" x="120" y="86" width="180" height="40" rx="6"></rect>
+          <text x="210" y="112" text-anchor="middle">arrives · keep slot 0</text>
+
+          <text x="40" y="172">row 1</text>
+          <rect class="active" x="170" y="146" width="180" height="40" rx="6"></rect>
+          <text x="260" y="172" text-anchor="middle">arrives · keep slot 1</text>
+
+          <text x="40" y="232">row 2</text>
+          <rect class="problem" x="220" y="206" width="215" height="40" rx="6"></rect>
+          <text x="327" y="232" text-anchor="middle">HTTP error · stream raises</text>
+
+          <text x="40" y="292">row 3</text>
+          <rect class="problem" x="130" y="266" width="440" height="40" rx="6"></rect>
+          <text x="350" y="292" text-anchor="middle">original request still running after consumer exits</text>
+
+          <text x="28" y="355" font-weight="700">Attempt 2: re-dispatch missing slots 2 and 3</text>
+          <rect class="alt" x="300" y="378" width="190" height="42" rx="6"></rect>
+          <text x="395" y="404" text-anchor="middle">new row 2 request</text>
+          <rect class="alt" x="520" y="378" width="190" height="42" rx="6"></rect>
+          <text x="615" y="404" text-anchor="middle">new row 3 request</text>
+
+          <path class="problem-line" d="M570 286 C700 286 690 399 710 399"></path>
+          <text x="800" y="339" text-anchor="middle" font-weight="700">overlap</text>
+          <text class="dim" x="800" y="361" text-anchor="middle">two row 3 calls can execute</text>
+
+          <rect class="box" x="120" y="448" width="590" height="36" rx="6"></rect>
+          <text x="415" y="471" text-anchor="middle">commit only after slots [0, 1, 2, 3] all contain complete results</text>
+        </svg>
+        <div class="legend">
+          <span class="key active-key">completed slot retained</span>
+          <span class="key alt-key">new retry attempt</span>
+          <span class="key problem-key">failure or uncancelled work</span>
+        </div>
+      </figure>
+
+      <h3>NeMo-RL’s exception policy is richer than fail-fast, but separate from Gym’s labels</h3>
+      <p>Before crossing the Ray boundary, HTTP errors become picklable NeMo-RL exceptions. Every 5xx, 408, and 429 becomes <code>GymTransportError</code>; other statuses become <code>RolloutDataFailure</code>. A status-less exception is re-raised unchanged. SingleController defaults to three missing-row attempts, five infrastructure attempts per prompt, and two data attempts. Exhausted prompts stop the run by default; optional drop, shrink, or replacement policies are configured above this layer.</p>
+      <p>This means an HTTP 500 has two names in the same end-to-end system: managed Gym calls it <code>agent_run_error</code>, while NeMo-RL calls it infrastructure. PR #2017 does not pass its classification to NeMo-RL, so the trainer cannot choose policy from the same evidence evaluation uses.</p>
+
+      <h3>A complete but unusable result follows a different path</h3>
+      <p>NeMo-RL’s legacy batched path reads <code>full_result.instance_config.mask_sample</code>. The sample remains in reward and group-baseline calculations, then its training loss multiplier is set to zero. <code>failure_kind</code> and <code>failure_reason</code> do not affect training at this revision. The SingleController path preserves the nested flag in completion metadata; whether it becomes an effective sample mask is evaluated separately in the findings below.</p>
+    </section>
+
+    <section id="issue-contract">
+      <h2>PR #2017 implements one layer of issue #2750</h2>
+      <p>The proposed design at <a href="https://github.com/ananthsub/Gym/blob/354bd2f4bcfb987f0e18998ffa47f520eea8d8dc/investigations/nemo-gym-error-handling-future.md">public design revision <code>354bd2f4…</code></a> separates transport safety from caller policy. Gym should decide whether another HTTP transmission is safe. After Gym returns a success or structured failure, evaluation or training decides whether to retry the rollout, replace it, keep and mask it, drop it, or stop.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Issue #2750 requirement</th><th>PR #2017 at this head</th><th>What remains</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Failed <code>/run</code> stays attached to its row</td><td><span class="status done">Implemented</span> for HTTP, body, and JSON failures that reach the dispatcher</td><td>Transport retries can prevent a terminal failure from reaching it.</td></tr>
+            <tr><td>No infrastructure failure becomes an ordinary reward-zero result</td><td><span class="status done">Implemented</span> sidecar records carry no reward; zero scoring is explicit and metric-only</td><td>Status-only origin inference can still place proxy or middleware failures in a countable class.</td></tr>
+            <tr><td>Possibly delivered POST is not replayed implicitly</td><td><span class="status partial">Partial</span> the dispatcher does not replay returned statuses</td><td>The lower transport loop and NeMo-RL retries can replay or overlap delivered work.</td></tr>
+            <tr><td>Serializable, common failure record for every caller</td><td><span class="status partial">Partial</span> managed records are bounded dictionaries</td><td>No shared typed outcome, stage, endpoint, delivery state, retry guidance, cleanup state, or direct-caller record.</td></tr>
+            <tr><td>Exact coverage beside scores</td><td><span class="status partial">Partial</span> closing output reports failures and completed results</td><td>No persisted expected/completed/failed/omitted/unknown reconciliation; two aggregation identity bugs are reproduced below.</td></tr>
+            <tr><td>Training caller owns retry, mask, replacement, or drop</td><td><span class="status open">Outside PR</span> direct exceptions remain compatible</td><td>Gym and NeMo-RL still use different failure vocabularies and identity rules.</td></tr>
+            <tr><td>Finite network/model retries, startup cleanup, stalled-work status, session release, tracing</td><td><span class="status open">Outside PR</span></td><td>Separate work in issue #2750’s implementation sequence.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="evidence">
+      <h2>Independent evidence confirms the main behavior and exposes boundary bugs</h2>
+      <p class="note">The reproductions used public source at the pinned revisions. Temporary probes used fake HTTP responses and aiohttp exceptions; no live model, gateway, or external environment was exercised. Generic CI is not used as proof of runtime semantics.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Claim</th><th>Revision and reproduction</th><th>Observed result</th><th>What it proves</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Managed failures become sidecar rows; direct callers still raise</td>
+              <td>Gym <code>62df56df…</code><br><code>uv run pytest tests/unit_tests/test_rollout_collection.py -q -k '&lt;17 focused cases&gt;'</code></td>
+              <td>17 selected tests passed, including 500/503/connection classification, continuation, resume, opt-in scoring, direct propagation, and all-failed handling.</td>
+              <td>The PR’s intended dispatcher and managed-collection behavior works under focused mocks.</td>
+            </tr>
+            <tr>
+              <td>The PR changes base fail-fast behavior</td>
+              <td>Base <code>ddb44c9e…</code> vs head <code>62df56df…</code><br><code>uv run python &lt;temporary-probe&gt;.py</code></td>
+              <td>Base aborted on a transport-shaped error and did not persist the delayed sibling. Head recorded the failure and persisted the sibling.</td>
+              <td>The change is behavioral, not only new serialization.</td>
+            </tr>
+            <tr>
+              <td>NeMo-RL preserves group slots and bounds row retries</td>
+              <td>NeMo-RL <code>6ae03578…</code><br><code>python -m pytest tests/unit/experience/test_rollout_generation_failures.py tests/unit/experience/test_reward_penalties.py -q -k '&lt;7 focused cases&gt;'</code></td>
+              <td>7 selected tests passed: group timeout, missing-row redispatch, retained completed rows, exhausted row budget, data failure without row retry, and legacy mask gate on/off.</td>
+              <td>SingleController’s group reconstruction and legacy masking behavior are independently exercised.</td>
+            </tr>
+            <tr>
+              <td>Cross-shard identity collision</td>
+              <td>Gym <code>62df56df…</code><br>temporary aggregation probe</td>
+              <td>Shard A success <code>(0,0)</code> suppressed shard B failure <code>(0,0)</code>; observed mean <code>1.0</code>, expected <code>0.5</code>.</td>
+              <td>Offline aggregation needs shard identity or a globally unique rollout ID.</td>
+            </tr>
+            <tr>
+              <td>Earlier selected failure survives a later unselected failure</td>
+              <td>Gym <code>62df56df…</code><br>temporary sidecar probe</td>
+              <td>Attempt 0 <code>agent_run_error</code>, then attempt 1 <code>agent_request_failed</code>; selecting only the first class still returned one scored zero.</td>
+              <td>Filtering currently happens before “last attempt wins.”</td>
+            </tr>
+            <tr>
+              <td>Direct-caller retry can overlap uncancelled siblings</td>
+              <td>Gym <code>62df56df…</code> + NeMo-RL <code>6ae03578…</code><br>three-row concurrency probe</td>
+              <td>After row 0 failed and all rows were retried, rows 1 and 2 reached two simultaneous requests and each completed twice.</td>
+              <td>Exiting <code>as_completed</code> does not cancel the already scheduled Gym requests, and NeMo-RL does not issue that cancellation.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="findings">
+      <h2>Four reproduced findings should shape this review</h2>
+
+      <article class="finding">
+        <h3>1. The lower transport can retry forever and replay <code>POST /run</code></h3>
+        <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/server_utils.py#L217-L284">The shared request loop</a> keeps internal timeout, disconnect, and <code>ClientOSError</code> branches alive without a finite default. <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/server_utils.py#L372-L402"><code>ServerClient</code> marks the request internal</a>, and <code>run_examples()</code> supplies no connection-retry bound.</p>
+        <p>A persistent timeout was observed continuing beyond three attempts. If the agent performed work before the connection dropped, each transport retry can duplicate that work. The new failure row never appears because control does not return to the PR’s catch block.</p>
+        <p><strong>Requested direction:</strong> give <code>/run</code> a finite, shared retry allowance and an explicit replay policy. A possibly delivered POST should return a failure outcome instead of being transmitted again.</p>
+      </article>
+
+      <article class="finding">
+        <h3>2. Offline shard aggregation can suppress another shard’s failure</h3>
+        <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L685-L720"><code>_failure_rows_counted_as_zero()</code></a> and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L1769-L1783">offline aggregation</a> use only <code>(task_index, rollout_index)</code> as global identity across every shard.</p>
+        <pre>shard A main:     (task=0, rollout=0, reward=1)
+shard B sidecar:  (task=0, rollout=0, agent_run_error)
+
+expected metric input: [1, 0]  → mean 0.5
+observed metric input: [1]     → mean 1.0</pre>
+        <p><strong>Requested direction:</strong> include shard/run provenance or a globally unique rollout identifier in success suppression and failure deduplication. Add a regression with two shards that reuse local indices.</p>
+      </article>
+
+      <article class="finding">
+        <h3>3. A stale selected failure can outvote the latest attempt</h3>
+        <p>The same helper checks whether a row’s class is selected before it updates the per-rollout map. An earlier selected <code>agent_run_error</code> therefore survives when a later attempt is <code>agent_request_failed</code> and only the first class is selected.</p>
+        <pre>attempt 0: agent_run_error       ← selected
+attempt 1: agent_request_failed  ← latest, not selected
+observed: attempt 0 still contributes reward 0</pre>
+        <p>This contradicts the helper’s “last attempt wins” contract and changes both denominator and prompt-group size. Existing duplicate coverage uses the same class on both attempts, so it cannot detect the transition.</p>
+        <p><strong>Requested direction:</strong> deduplicate all attempts first, then filter the latest record by class. Add a selected-to-unselected transition test.</p>
+      </article>
+
+      <article class="finding">
+        <h3>4. One direct-caller exception leaves sibling requests running during retry</h3>
+        <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L1638-L1644"><code>as_completed</code> schedules every row</a>. When <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/environments/nemo_gym.py#L688-L710">NeMo-RL propagates the first failed future</a>, neither side cancels and drains the remaining Gym tasks before <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/experience/rollout_manager.py#L961-L990">missing rows are redispatched</a>.</p>
+        <p>The reproduction observed two simultaneous requests and two successful completions for each still-running sibling. For stateful agents, that can duplicate model calls, tools, sandbox mutations, remote sessions, cost, and load.</p>
+        <p><strong>Requested direction:</strong> make the stream own its scheduled tasks and cancel/drain them before exposing a terminal exception, or provide explicit attempt identity and receiver-side deduplication before the caller redispatches.</p>
+      </article>
+
+      <h2>Three code-backed questions remain outside the reproduced findings</h2>
+
+      <article class="question">
+        <h3>Can HTTP status alone prove that the agent ran?</h3>
+        <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L648-L674">The classification</a> treats every status outside <code>{429, 502, 503, 504}</code> as <code>agent_run_error</code>. A proxy can return 500, authentication middleware can return 401, and routing can return 404 before the handler runs. Because this class may be counted as a model zero, should origin be established by a trusted agent error envelope rather than inferred from status?</p>
+      </article>
+
+      <article class="question">
+        <h3>Should resume validate the run before consuming old attempts?</h3>
+        <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/62df56df4cd4e2edc1ee28e083a09c75cf2fbccf/nemo_gym/rollout_collection.py#L968-L1048">Resume trusts the prior materialized input</a> and matches only task and rollout indices. Reusing an output path after changing prompts, routing, or generation configuration can dispatch stale rows and spend the new run’s retry budget on old failures. Issue #2750 calls for input and resolved-config digests before reuse.</p>
+      </article>
+
+      <article class="question">
+        <h3>When does NeMo-RL receive the common failure vocabulary?</h3>
+        <p>The direct interface preserves raw exceptions, and NeMo-RL converts HTTP status into its own two-class taxonomy. The conversion drops Gym’s proposed <code>failure_kind</code>, stage, delivery state, endpoint, and bounded response body. Should this PR expose a serializable structured outcome now, or explicitly depend on the later <code>run_outcomes()</code> contract before training policy is considered covered?</p>
+      </article>
+    </section>
+
+    <section class="consequence">
+      <h2>Reviewer consequence</h2>
+      <p>Review PR #2017 as the managed-evaluation layer of issue #2750, not as the end-to-end rollout failure contract. Its central decision—store no-result failures separately and never invent generation data—is sound and compatible with NeMo-RL. The aggregation identity bugs and uncancelled direct-caller work are concrete correctness issues in this patch’s paths. The lower retry loop, shared structured outcome, replay identity, cleanup, and effective training-mask contract still need explicit ownership before evaluation and training can claim the same failure semantics.</p>
+    </section>
+
+    <footer>
+      Public-source review generated from pinned revisions on 27 August 2026. No private runs, infrastructure details, credentials, or internal links are included.
+    </footer>
+  </main>
+  <script>
+    (() => {
+      const root = document.documentElement;
+      const button = document.querySelector(".theme-toggle");
+      const update = () => {
+        button.textContent = root.dataset.theme === "light" ? "Dark theme" : "Light theme";
+      };
+      button.addEventListener("click", () => {
+        const next = root.dataset.theme === "light" ? "dark" : "light";
+        if (next === "light") root.dataset.theme = "light";
+        else delete root.dataset.theme;
+        try {
+          localStorage.setItem("engineering-notes-theme", next);
+        } catch {}
+        update();
+      });
+      update();
+    })();
+  </script>
+</body>
+</html>
