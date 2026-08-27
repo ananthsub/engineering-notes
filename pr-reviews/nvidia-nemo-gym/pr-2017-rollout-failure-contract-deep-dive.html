@@ -241,7 +241,7 @@
     </p>
 
     <div class="answer">
-      <strong>Answer:</strong> the PR is the right shape for managed evaluation. A failed agent call becomes a row-associated sidecar record with no invented reward, unrelated rows continue, and evaluation chooses whether selected classes count as zero. It intentionally leaves NeMo-RL on the old exception interface. NeMo-RL then applies its own row and prompt-group retry policy, without receiving the failure class that evaluation sees. That boundary preserves compatibility, but it is not yet the common contract proposed by issue #2750.
+      <strong>Answer:</strong> the PR is the right shape for managed evaluation. A failed agent call becomes a row-associated sidecar record with no invented reward, unrelated rows continue, and evaluation chooses whether selected classes count as zero. It intentionally leaves NeMo-RL on the old exception interface. NeMo-RL then applies its own row and prompt-group retry policy, without receiving the failure class that evaluation sees. Its two rollout paths also disagree on whether Gym’s <code>mask_sample</code> prevents training. That boundary preserves compatibility, but it is not yet the common contract proposed by issue #2750.
     </div>
 
     <figure class="figure">
@@ -427,7 +427,8 @@
       <p>This means an HTTP 500 has two names in the same end-to-end system: managed Gym calls it <code>agent_run_error</code>, while NeMo-RL calls it infrastructure. PR #2017 does not pass its classification to NeMo-RL, so the trainer cannot choose policy from the same evidence evaluation uses.</p>
 
       <h3>A complete but unusable result follows a different path</h3>
-      <p>NeMo-RL’s legacy batched path reads <code>full_result.instance_config.mask_sample</code>. The sample remains in reward and group-baseline calculations, then its training loss multiplier is set to zero. <code>failure_kind</code> and <code>failure_reason</code> do not affect training at this revision. The SingleController path preserves the nested flag in completion metadata; whether it becomes an effective sample mask is evaluated separately in the findings below.</p>
+      <p>NeMo-RL’s legacy batched path reads <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/experience/rollouts.py#L266-L278"><code>full_result.instance_config.mask_sample</code></a>. The sample remains in reward and group-baseline calculations, then <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/algorithms/grpo.py#L2290-L2305">its training loss multiplier is set to zero</a>.</p>
+      <p>SingleController preserves the flag only in <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/experience/rollout_manager.py#L1032-L1057"><code>Completion.env_extras</code></a>. <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/experience/payload.py#L55-L96">DataPlane payload construction ignores those extras and creates an all-ones <code>sample_mask</code></a>, so the flagged sample trains normally. <code>failure_kind</code> and <code>failure_reason</code> have no training consumer at this revision.</p>
     </section>
 
     <section id="issue-contract">
@@ -444,7 +445,7 @@
             <tr><td>Possibly delivered POST is not replayed implicitly</td><td><span class="status partial">Partial</span> the dispatcher does not replay returned statuses</td><td>The lower transport loop and NeMo-RL retries can replay or overlap delivered work.</td></tr>
             <tr><td>Serializable, common failure record for every caller</td><td><span class="status partial">Partial</span> managed records are bounded dictionaries</td><td>No shared typed outcome, stage, endpoint, delivery state, retry guidance, cleanup state, or direct-caller record.</td></tr>
             <tr><td>Exact coverage beside scores</td><td><span class="status partial">Partial</span> closing output reports failures and completed results</td><td>No persisted expected/completed/failed/omitted/unknown reconciliation; two aggregation identity bugs are reproduced below.</td></tr>
-            <tr><td>Training caller owns retry, mask, replacement, or drop</td><td><span class="status open">Outside PR</span> direct exceptions remain compatible</td><td>Gym and NeMo-RL still use different failure vocabularies and identity rules.</td></tr>
+            <tr><td>Training caller owns retry, mask, replacement, or drop</td><td><span class="status open">Outside PR</span> direct exceptions remain compatible</td><td>Gym and NeMo-RL still use different failure vocabularies and identity rules; legacy GRPO masks flagged loss, but SingleController trains the same flagged sample.</td></tr>
             <tr><td>Finite network/model retries, startup cleanup, stalled-work status, session release, tracing</td><td><span class="status open">Outside PR</span></td><td>Separate work in issue #2750’s implementation sequence.</td></tr>
           </tbody>
         </table>
@@ -502,13 +503,19 @@
               <td>Status 500 produced <code>agent_run_error</code>; status 502 produced <code>agent_request_failed</code>.</td>
               <td>The classification cannot distinguish an agent-generated 500 from an intermediary-generated 500.</td>
             </tr>
+            <tr>
+              <td>Gym’s training mask diverges across NeMo-RL paths</td>
+              <td>NeMo-RL <code>6ae03578…</code><br>three focused tests plus a payload-and-baseline probe</td>
+              <td>For rewards <code>[0, 1]</code> and flags <code>[true, false]</code>, SingleController produced <code>sample_mask=[1,1]</code> and advantages <code>[-1,1]</code>.</td>
+              <td>Legacy GRPO excludes the flagged sample from policy loss; SingleController trains it. Both include its reward in the group baseline.</td>
+            </tr>
           </tbody>
         </table>
       </div>
     </section>
 
     <section id="findings">
-      <h2>Five reproduced findings should shape this review</h2>
+      <h2>Six reproduced findings should shape this review</h2>
 
       <article class="finding">
         <h3>1. The lower transport can retry forever and replay <code>POST /run</code></h3>
@@ -552,6 +559,18 @@ observed: attempt 0 still contributes reward 0</pre>
         <p><strong>Requested direction:</strong> establish origin with a trusted agent error envelope or another explicit signal. Treat an origin-unknown 500 as infrastructure rather than as evidence that the model ran.</p>
       </article>
 
+      <article class="finding">
+        <h3>6. SingleController drops Gym’s training mask</h3>
+        <p>Consider two complete responses with rewards <code>[0.0, 1.0]</code>. The first carries <code>mask_sample=true</code>, <code>failure_kind</code>, and <code>failure_reason</code>. The reproduced paths disagree:</p>
+        <pre>legacy GRPO loss mask:      [0.0, 1.0]
+SingleController sample_mask: [1.0, 1.0]
+SingleController LOO baseline: [1.0, 0.0]
+SingleController advantage:    [-1.0, 1.0]</pre>
+        <p>Legacy extraction <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/experience/rollouts.py#L2797-L2822">adds the flag to the final batch</a>, and GRPO converts it into the policy <code>sample_mask</code>. Both <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/algorithms/grpo.py#L3184-L3208">legacy baseline calculation</a> and <a href="https://github.com/NVIDIA-NeMo/RL/blob/6ae035784fe40fd9c9e31d27fffa4a403243a0bd/nemo_rl/algorithms/advantage_estimator.py#L73-L114">the shared estimator</a> deliberately use all rewards, so the masked sample still changes its peers’ advantages.</p>
+        <p>SingleController forwards the configuration gate but carries the row flag only as completion metadata. The DataPlane payload does not translate it into <code>sample_mask</code>. Repository-wide tracked-source search also found no consumer of <code>failure_kind</code> or <code>failure_reason</code>.</p>
+        <p><strong>Requested direction:</strong> propagate Gym’s mask from <code>Completion.env_extras</code> into the DataPlane <code>sample_mask</code>, and add an end-to-end SingleController regression. Decide separately and document whether a loss-masked reward should remain in the prompt-group baseline.</p>
+      </article>
+
       <h2>Two code-backed questions remain outside the reproduced findings</h2>
 
       <article class="question">
@@ -567,7 +586,7 @@ observed: attempt 0 still contributes reward 0</pre>
 
     <section class="consequence">
       <h2>Reviewer consequence</h2>
-      <p>Review PR #2017 as the managed-evaluation layer of issue #2750, not as the end-to-end rollout failure contract. Its central decision—store no-result failures separately and never invent generation data—is sound and compatible with NeMo-RL. The aggregation identity bugs, uncancelled direct-caller work, and status-only origin inference are concrete correctness issues in this patch’s paths. The lower retry loop, shared structured outcome, replay identity, cleanup, and effective training-mask contract still need explicit ownership before evaluation and training can claim the same failure semantics.</p>
+      <p>Review PR #2017 as the managed-evaluation layer of issue #2750, not as the end-to-end rollout failure contract. Its central decision—store no-result failures separately and never invent generation data—is sound and compatible with NeMo-RL. The aggregation identity bugs, uncancelled direct-caller work, and status-only origin inference are concrete correctness issues in this patch’s paths. SingleController’s dropped mask demonstrates that “return a complete masked result” is not yet a caller-independent NeMo-RL policy. The lower retry loop, shared structured outcome, replay identity, cleanup, and unified training-mask contract still need explicit ownership before evaluation and training can claim the same failure semantics.</p>
     </section>
 
     <footer>
