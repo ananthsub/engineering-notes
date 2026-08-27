@@ -168,7 +168,7 @@
       <span>Reviewed 2026-08-27 UTC</span>
     </div>
 
-    <div class="answer"><strong>Answer:</strong> PR #2611 is a useful contract field, but it is not yet a uniform error interface. It correctly makes <code>mask_sample</code> available on every typed verifier result. However, its comment defines the field broadly enough to include failures that produced no valid sample, while the shared design explicitly gives those failures a separate <code>RolloutFailureRecord</code>. One Gym agent emits contradictory top-level and nested values. NeMo RL currently reads only the nested value, and its newer asynchronous payload path always creates an all-ones sample mask. A safe rollout contract therefore needs producer ownership, a top-level consumer migration, explicit GRPO group policy, and documentation for both success and failure outcomes.</div>
+    <div class="answer"><strong>Answer:</strong> PR #2611 is not merge-ready. It adds the right complete-result field, but AnySWE currently passes <code>mask_sample</code> twice and raises <code>TypeError</code> while constructing every result. The collector also includes masked rewards in final aggregate scores and mixes sidecar or omitted outcomes into progress “unmasked” scores. Beyond those blockers, one Gym producer emits contradictory top-level and nested values, NeMo RL reads only the nested value, and its newer asynchronous payload path always creates an all-ones sample mask. A safe rollout contract therefore needs producer ownership, a top-level consumer migration, explicit GRPO group policy, and documentation for both success and failure outcomes.</div>
 
     <div class="figure">
       <h3>Figure 1 — The design has two lanes; the PR currently describes one broad lane</h3>
@@ -228,6 +228,7 @@
     <nav class="toc" aria-label="Page sections">
       <a href="#example">Three concrete outcomes</a>
       <a href="#change">What the PR adds</a>
+      <a href="#blockers">Blocking defects</a>
       <a href="#contradiction">Reproduced contradiction</a>
       <a href="#interface">Uniform interface</a>
       <a href="#producers">Who sets the flag</a>
@@ -331,6 +332,28 @@
           <path d="M210 238 H270" class="dash-arrow" style="marker-end:url(#arrow2warn)"/>
           <text x="240" y="228" text-anchor="middle" class="dim">aborts</text>
         </svg>
+      </div>
+    </section>
+
+    <section id="blockers">
+      <h2>Two defects must be fixed before merge</h2>
+      <div class="grid-2">
+        <article class="card warn">
+          <span class="label">Blocking · AnySWE</span>
+          <h3>Every result construction passes <code>mask_sample</code> twice</h3>
+          <p><code>SWEBenchMetrics</code> already declares <code>mask_sample</code>, so <code>metrics.model_dump()</code> contains that key. The PR also supplies <code>mask_sample=…</code> explicitly before expanding the dictionary. Python rejects the duplicate keyword before Pydantic can validate the response.</p>
+          <pre><code>TypeError: AnySweVerifyResponse()
+got multiple values for keyword argument 'mask_sample'</code></pre>
+          <p>The computed decision is written to <code>metrics.mask_sample</code>. Construct the response from that single source, then add an end-to-end <code>/run</code> test. The current focused tests exercise the helper and schema but never instantiate this result shape.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/anyswe_agent/app.py#L43-L52">metrics schema</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/anyswe_agent/app.py#L604-L618">computed mask</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/anyswe_agent/app.py#L683-L698">duplicate constructor arguments</a></p>
+        </article>
+        <article class="card warn">
+          <span class="label">Blocking · scoring</span>
+          <h3>Masked infrastructure rewards still change published scores</h3>
+          <p>Managed collection persists masked complete results in the main JSONL and sends every persisted result to <code>/aggregate_metrics</code>. Generic aggregation averages <code>reward</code> without consulting <code>mask_sample</code>. A valid reward of 1 plus a masked infrastructure reward of 0 therefore publishes <code>mean/reward=0.5</code>, not the unmasked score 1.0.</p>
+          <p>The progress path has a related boundary error: sidecar failures and <code>_ng_no_persist</code> results enter its unmasked counter whenever their top-level flag is absent or false. Progress and final aggregation need one explicit population definition—normally persisted, complete, unmasked results—plus separate coverage counts for masked, failed, and omitted outcomes.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1150-L1197">routing followed by progress counting</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1254-L1267">persisted results sent to aggregation</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/reward_profile.py#L655-L709">generic aggregate path</a></p>
+        </article>
       </div>
     </section>
 
@@ -494,7 +517,7 @@
       <div class="ledger">
         <div class="ledger-row">
           <div>SWE and AnySWE</div>
-          <div>Keep the PR's top-level mirror as a compatibility step.</div>
+          <div>SWE can keep its top-level mirror as a compatibility step. AnySWE must first remove the duplicate keyword and source the value from <code>metrics.mask_sample</code>.</div>
           <div>Then make the top-level field authoritative and deprecate <code>instance_config.mask_sample</code>.</div>
         </div>
         <div class="ledger-row">
@@ -576,7 +599,12 @@
         <div class="ledger-row">
           <div>Focused PR suite</div>
           <div><code>uv run --extra dev pytest tests/unit_tests/test_base_resources_server.py tests/unit_tests/test_rollout_collection.py -q</code></div>
-          <div><strong>Head:</strong> 150 passed in 3.37s. This proves the added field and metric helper satisfy their authored tests.</div>
+          <div><strong>Head:</strong> 150 passed in 3.37s. This proves the added field and metric helper satisfy their authored tests, but those tests do not construct an AnySWE response.</div>
+        </div>
+        <div class="ledger-row">
+          <div>AnySWE constructor</div>
+          <div>Constructed the reviewed <code>AnySweVerifyResponse</code> with the same explicit argument and expanded metrics dictionary used by <code>run()</code>.</div>
+          <div><strong>Head:</strong> raises <code>TypeError</code> because <code>mask_sample</code> is supplied twice.</div>
         </div>
         <div class="ledger-row">
           <div>Contract before/after</div>
@@ -597,6 +625,11 @@
           <div>Aggregate compatibility</div>
           <div>Serialized a default zero-reward <code>BaseVerifyResponse</code> and ran <code>compute_aggregate_metrics()</code>.</div>
           <div><strong>Head:</strong> five <code>mask_sample</code> aggregate series appeared, all 0.0.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Masked final score</div>
+          <div>Aggregated one valid reward of 1 and one masked infrastructure reward of 0 through <code>compute_aggregate_metrics()</code>.</div>
+          <div><strong>Head:</strong> publishes <code>mean/reward=0.5</code>; the unmasked population's mean is 1.0.</div>
         </div>
         <div class="ledger-row">
           <div>NeMo RL field precedence</div>
@@ -626,12 +659,12 @@
       </div>
       <div class="question">
         <h3>2. Will every known producer move to the top level in the same compatibility window?</h3>
-        <p>The conversational-tool-use failure path now serializes opposite top-level and nested values. Its resources-server sibling also keeps its masking decision only under <code>instance_config</code>. Migrate both with the SWE agents, and add one regression test that asserts the complete serialized dictionary. Search all existing <code>mask_sample</code> and inverse <code>valid_sample</code> producers before documenting “prefer the top level.”</p>
+        <p>The conversational-tool-use failure path now serializes opposite top-level and nested values. Its resources-server sibling also keeps its masking decision only under <code>instance_config</code>. AnySWE's attempted migration raises because the key is supplied both explicitly and through <code>metrics.model_dump()</code>. Fix AnySWE, migrate both conversational-tool-use paths, and add regression tests that assert complete serialized dictionaries. Search all existing <code>mask_sample</code> and inverse <code>valid_sample</code> producers before documenting “prefer the top level.”</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/conversational_tool_use/simulation/app.py#L785-L798">agent failure payload</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/resources_servers/conversational_tool_use_simulation/app.py#L1367-L1380">resources verifier payload</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/conversational_tool_use/simulation/tests/test_app.py#L1061-L1075">test misses top-level assertion</a></p>
       </div>
       <div class="question">
         <h3>3. Which rows define the “unmasked reward” denominator?</h3>
-        <p>The current counter includes every result whose top-level mask flag is false, including returned <code>_ng_failure_class</code> sidecar rows and <code>_ng_no_persist</code> rows. That does not measure the score after infrastructure failures are removed. Define the set first—normally persisted complete results—and test the same mixed batch through progress metrics and final aggregation.</p>
+        <p>The current progress counter includes every result whose top-level mask flag is false, including returned <code>_ng_failure_class</code> sidecar rows and <code>_ng_no_persist</code> rows. Final aggregation excludes those routing classes but still includes complete rows with <code>mask_sample=true</code>. Neither path measures the score after infrastructure failures are removed. Define the set first—normally persisted complete, unmasked results—and test the same mixed batch through progress metrics and final aggregation.</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1150-L1171">storage classes</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1192-L1237">metric denominator</a></p>
       </div>
       <div class="question">
@@ -653,7 +686,7 @@
 
     <section>
       <h2>Practical consequence</h2>
-      <p>Keep PR #2611 as the field-placement foundation, but do not present it as the complete caller interface. Before merge, fix the reproduced producer polarity and metric denominator, migrate every known complete-result producer, and narrow <code>mask_sample</code> to complete results. Update NeMo RL to consume the top-level field in both rollout paths and choose a group-statistics policy. Then complete issue #2750 with <code>run_outcomes()</code> and <code>RolloutFailureRecord</code>. That gives evaluation and training callers one stable boundary without turning missing infrastructure outcomes into ordinary zero-reward samples.</p>
+      <p>Keep PR #2611 as the field-placement foundation, but do not merge it until AnySWE can construct a result and both progress and final scoring use the intended result population. Then fix the reproduced producer polarity, migrate every known complete-result producer, and narrow <code>mask_sample</code> to complete results. Update NeMo RL to consume the top-level field in both rollout paths and choose a group-statistics policy. Finally, complete issue #2750 with <code>run_outcomes()</code> and <code>RolloutFailureRecord</code>. That gives evaluation and training callers one stable boundary without turning missing infrastructure outcomes into ordinary zero-reward samples.</p>
     </section>
 
     <footer>
