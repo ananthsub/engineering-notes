@@ -17,7 +17,7 @@ Classify every edge:
 - **Follow-up:** the later PR extends behavior without being required for the earlier PR to merge.
 - **Uncertain:** public evidence suggests a relationship but does not prove its type.
 
-Use solid arrows only for verified dependency edges. Use dashed or labeled connectors for every other relationship. Put this legend inside the topology figure.
+Use solid arrows only for verified dependency edges. Use dashed or labeled connectors for every other relationship. Give each edge type a visible text label or distinct marker so color is never required. Put this legend inside the topology figure.
 
 ## Reconstruct topology carefully
 
@@ -103,7 +103,7 @@ Show:
 - dashed related or overlap edges;
 - a visible “you are here” marker when the user named one primary PR.
 
-The figure must teach the relationship before the prose.
+Use the high-contrast palette from `HTML_STYLE.md`, but distinguish lanes and states with labels, border styles, and markers too. The figure must teach the relationship before the prose and remain understandable in grayscale.
 
 ### Layer cards
 

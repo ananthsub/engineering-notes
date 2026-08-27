@@ -208,6 +208,8 @@ End with what the change means for a reviewer, user, or operator. Keep this prac
 - Use two to five figures when each answers a different question.
 - Every figure must be understandable without hover.
 - Use CSS variables for all HTML and SVG colors.
+- Use the high-contrast colorblind-safe palette from `HTML_STYLE.md`. Do not use red and green as a semantic pair.
+- Repeat color meaning with labels, symbols, shapes, border styles, point markers, or line patterns. Every figure must work in grayscale.
 - Put legends inside figures.
 - Make code links visible, underlined, and pinned.
 - Draw real queue slots, values, calls, timelines, or ownership boundaries.
@@ -224,7 +226,7 @@ Before upload:
 3. Check that each diagram makes a claim and each claim has a pinned source.
 4. Verify that the fix receives as much attention as the problem.
 5. Separate public evidence from inference.
-6. Test mobile layout, theme switching, links, JavaScript, HTML, and SVG bounds.
+6. Test mobile layout, theme switching, links, JavaScript, HTML, SVG bounds, and grayscale readability.
 7. Run the public-content review on the final source and assets.
 8. Compare the first screen with the concise reference pages. The deep dive may be longer, but it must teach as quickly.
 

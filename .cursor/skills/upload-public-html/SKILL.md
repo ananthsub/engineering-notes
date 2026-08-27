@@ -96,8 +96,9 @@ Before committing:
 4. Confirm every relative link resolves to a file that will be committed.
 5. Check the page at a phone-sized viewport when browser tools are available.
 6. For SVG, confirm every text label fits inside its `viewBox`.
-7. Confirm dark and light themes keep all text, code, and SVG labels readable.
-8. Re-run the public-content review on the final files.
+7. Confirm dark and light themes keep all text, code, lines, markers, and SVG labels at high contrast.
+8. Check diagrams in grayscale. Confirm labels, shapes, symbols, borders, or line patterns preserve every distinction without color.
+9. Re-run the public-content review on the final files.
 
 Do not publish a page with a known validation failure.
 

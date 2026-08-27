@@ -18,7 +18,9 @@ If the page breaks a limit, split the topic into separate pages.
 - Use inline SVG.
 - Draw the real object: numbered prompts, queue slots, process states, bytes, calls, or a timeline.
 - Use CSS variables for every color.
-- Green means correct, red means the problem, and gray means ignored.
+- Use the high-contrast blue/orange/purple/gray palette from `HTML_STYLE.md`. Do not use red and green as a semantic pair.
+- Blue plus a solid border means correct. Orange plus a warning symbol or hatch means the problem. Gray plus a dotted border means ignored.
+- Repeat every color distinction with a label, symbol, shape, border style, or line pattern. The figure must still work in grayscale.
 - Put the legend inside the figure beside the items it explains.
 - Label every arrow with the call or transition that causes it.
 - Wrap code references in clickable SVG `<a>` elements and underline the text. Phone readers cannot hover.
@@ -101,6 +103,7 @@ Before upload, answer these questions:
 5. Does every code claim link to a pinned public line?
 6. Are all worked-example quantities distinct, including derived values?
 7. Does the page remain readable on a phone in both themes?
-8. Is every fact safe to publish?
+8. Does every diagram remain understandable in grayscale, without relying on red versus green?
+9. Is every fact safe to publish?
 
 If any answer is no, revise before upload.
