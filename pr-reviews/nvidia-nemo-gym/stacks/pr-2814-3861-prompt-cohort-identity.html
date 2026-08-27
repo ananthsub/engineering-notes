@@ -169,7 +169,7 @@
       <span>Snapshot: 2026-08-27 UTC</span>
     </div>
 
-    <div class="answer"><strong>Answer after independent re-review:</strong> the retry tuple is coherent in the asynchronous one-prompt-group path, but the PR pair has a synchronous-path correctness blocker. <code>run_nemo_gym_rollout_sync()</code> passes the entire repeated batch as <code>num_generations</code>, causing rows from distinct prompts to share one <code>group_id</code>. Gym prioritizes that ID and rejects the second prompt as inconsistent. The Gym PR also overstates backward compatibility: prompt-only and <code>prompt_id</code>-only legacy cohort requests now fail strict coordinate validation. The one-worker, correctly sized asynchronous path still isolates retries as intended.</div>
+    <div class="answer"><strong>Answer after independent re-review:</strong> the retry IDs work when RL sends one prompt group at a time. They do not work in RL's synchronous Gym path when a batch contains more than one prompt. RL gives every row in the batch the same <code>group_id</code>. Gym then sees different prompts with the same group ID and rejects the later prompt. The Gym PR also breaks older requests that identify a prompt without the new group and rollout fields.</div>
 
     <div class="figure">
       <h3>Figure 1 — Which PR owns each half of the contract?</h3>
@@ -246,11 +246,21 @@ reward_by_slot[slot] = reward</code></pre>
     </section>
 
     <section id="blocking-findings">
-      <h2>The synchronous path groups distinct prompts together</h2>
-      <p>The production synchronous GRPO path repeats every prompt, then sends the entire repeated batch to <code>run_nemo_gym_rollout_sync()</code>. That wrapper sets <code>num_generations=input_batch.size</code>. The row-preparation function therefore sees one logical group spanning the whole batch and assigns every row the same generated <code>group_id</code>.</p>
+      <h2>RL puts different prompts in the same GenRM group</h2>
+      <p>This happens in RL's synchronous Gym helper. The inference engine is asynchronous, but these callers wait for the whole batch and use <code>run_nemo_gym_rollout_sync()</code>.</p>
+      <ol>
+        <li>GRPO repeats each prompt <code>num_generations_per_prompt</code> times.</li>
+        <li>RL sends the full repeated batch to <code>run_nemo_gym_rollout_sync()</code>.</li>
+        <li>The helper passes the total batch size as <code>num_generations</code>.</li>
+        <li><code>_prepare_nemo_gym_rows()</code> uses that number as the size of one prompt group.</li>
+        <li>Every row in the batch receives the same <code>group_id</code>, even when the rows came from different prompts.</li>
+      </ol>
+      <p>If the batch contains prompt A and prompt B, Gym receives both under the same group ID. GenRM records prompt A first. It then rejects prompt B because the prompt text changed inside the same group. If two tasks happen to have the same prompt text, the error can be harder to see because unrelated tasks may be compared as one group.</p>
+      <p>This path is used by synchronous GRPO training, GRPO validation, PPO, distillation, and <code>SyncRolloutActor</code>. A batch containing only one prompt is not affected.</p>
+      <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/grpo.py#L2977-L3103">GRPO repeat and call</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/grpo.py#L3977-L4024">GRPO validation</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/ppo.py#L1379-L1393">PPO</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/distillation.py#L803-L820">distillation</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/sync_rollout_actor.py#L245-L259">SyncRolloutActor</a></p>
       <div class="figure">
-        <h3>Figure 2 — A transport batch becomes one semantic cohort</h3>
-        <p class="caption">Example: two prompts with two generations each. The intended grouping has two cohorts; the synchronous wrapper currently creates one four-member cohort.</p>
+        <h3>Figure 2 — Two prompts incorrectly become one GenRM group</h3>
+        <p class="caption">This example has two prompts and two responses per prompt. RL should create two groups. The synchronous helper creates one group with four rows.</p>
         <svg viewBox="0 0 920 360" role="img" aria-labelledby="fig-sync-title fig-sync-desc">
           <title id="fig-sync-title">Synchronous heterogeneous batch grouping bug</title>
           <desc id="fig-sync-desc">Four rows from two prompts should form two groups. Passing batch size four as num_generations assigns all four one group ID, and Gym rejects the second prompt because its content differs.</desc>
@@ -266,7 +276,7 @@ reward_by_slot[slot] = reward</code></pre>
           <text x="435" y="154" font-size="13">num_generations = 4</text>
           <rect x="120" y="185" width="675" height="70" rx="12" class="warning"/>
           <text x="145" y="213" font-size="15" font-weight="700">RL stamps one cohort: group_id = G, rollout_index = 0, 1, 2, 3</text>
-          <text x="145" y="238" font-size="13" class="dim">Prompt identity is no longer represented by the group boundary.</text>
+          <text x="145" y="238" font-size="13" class="dim">Rows from prompt A and prompt B now have the same group ID.</text>
           <path d="M460 255 L460 295" class="dash-arrow"/>
           <rect x="120" y="300" width="675" height="42" rx="9" class="warning"/>
           <text x="168" y="326" font-size="14" font-weight="700">Gym sees prompt B under G → 409 “inconsistent prompt or principle content”</text>
@@ -275,9 +285,16 @@ reward_by_slot[slot] = reward</code></pre>
       <div class="grid-2">
         <article class="card warn">
           <span class="label">Correctness blocker</span>
-          <h3>Separate transport size from cohort size</h3>
-          <p>Pass the configured generations-per-prompt into the synchronous path, or group rows by stable task identity before assigning <code>group_id</code> and <code>rollout_index</code>.</p>
+          <h3>Use the response count for one prompt when assigning IDs</h3>
+          <p>The code needs two separate numbers:</p>
+          <ul>
+            <li><code>num_generations_per_prompt</code> tells RL which rows belong to one GenRM group.</li>
+            <li><code>input_batch.size</code> tells RL how many total rows it must wait for before the synchronous call returns.</li>
+          </ul>
+          <p>Add <code>num_generations_per_prompt</code> to <code>run_nemo_gym_rollout_sync()</code>. Pass the training or validation value from each caller. Use it when <code>_prepare_nemo_gym_rows()</code> assigns <code>group_id</code> and <code>rollout_index</code>. Continue waiting for every row in <code>input_batch.size</code>, and return all completed prompt groups in their original input order.</p>
+          <p>Changing only the existing <code>num_generations</code> argument is not enough. The current synchronous helper also uses that argument to make the whole batch return as one result. The fix must separate ID grouping from result collection.</p>
           <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/experience/rollouts.py#L2595-L2674">synchronous wrapper</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/grpo.py#L2977-L2985">production prompt repetition</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/0c22e3e0dc43b1bc9fc5dd2b8bda5b1790eada4a/nemo_rl/algorithms/grpo.py#L3065-L3103">production synchronous call</a></p>
+          <p><strong>Required test:</strong> send two different prompts with two responses each. Verify that prompt A has one group ID and rollout indices <code>0, 1</code>. Verify that prompt B has a different group ID and rollout indices <code>0, 1</code>. The synchronous result must still contain all four rows in input order.</p>
         </article>
         <article class="card warn">
           <span class="label">Compatibility blocker if promised</span>
