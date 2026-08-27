@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Does Gym PR #2611 provide a uniform rollout error interface?</title>
+  <script>
+    (() => {
+      try {
+        if (localStorage.getItem("engineering-notes-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {}
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1c2128;
+      --border: #30363d;
+      --text: #e6edf3;
+      --dim: #9aa4ae;
+      --accent: #58a6ff;
+      --diagram-ok: #5bc0eb;
+      --diagram-problem: #ffb000;
+      --diagram-alt: #d98bc3;
+      --diagram-neutral: #c7ced8;
+      --code-bg: #090c10;
+      --shadow: rgba(0, 0, 0, .28);
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --surface-2: #eef1f4;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --dim: #59636e;
+      --accent: #0969da;
+      --diagram-ok: #005a8d;
+      --diagram-problem: #9a4d00;
+      --diagram-alt: #7a3e6d;
+      --diagram-neutral: #4b5563;
+      --code-bg: #f0f3f6;
+      --shadow: rgba(31, 35, 40, .12);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.65 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+    a:hover { text-decoration-thickness: 2px; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 34px 22px 72px; }
+    .theme-toggle {
+      position: fixed; z-index: 10; top: 14px; right: 14px;
+      min-height: 42px; padding: 9px 13px;
+      border: 1px solid var(--border); border-radius: 999px;
+      color: var(--text); background: var(--surface);
+      box-shadow: 0 4px 18px var(--shadow); cursor: pointer;
+    }
+    h1 { max-width: 870px; margin: 6px 0 10px; font-size: clamp(2rem, 5vw, 3.35rem); line-height: 1.08; letter-spacing: -.035em; }
+    h2 { margin: 54px 0 12px; font-size: clamp(1.45rem, 3vw, 2rem); line-height: 1.2; }
+    h3 { margin: 0 0 8px; font-size: 1.05rem; }
+    p { margin: 10px 0; }
+    .eyebrow { color: var(--diagram-ok); font-weight: 750; letter-spacing: .08em; text-transform: uppercase; font-size: .78rem; }
+    .lede { max-width: 840px; font-size: 1.17rem; line-height: 1.6; }
+    .provenance {
+      display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 18px 0 24px;
+      color: var(--dim); font-size: .91rem;
+    }
+    .answer {
+      border-left: 5px solid var(--diagram-problem); padding: 13px 17px;
+      background: var(--surface); border-radius: 0 10px 10px 0;
+      font-size: 1.08rem;
+    }
+    .figure {
+      margin: 22px 0; padding: 16px;
+      border: 1px solid var(--border); border-radius: 14px;
+      background: var(--surface); box-shadow: 0 8px 28px var(--shadow);
+      overflow-x: auto;
+    }
+    .figure h3 { margin-bottom: 3px; }
+    .caption { color: var(--dim); font-size: .9rem; margin: 3px 0 12px; }
+    svg { display: block; width: 100%; min-width: 760px; height: auto; }
+    svg text { fill: var(--text); font-family: system-ui, sans-serif; }
+    svg .dim { fill: var(--dim); }
+    svg .box { fill: var(--bg); stroke: var(--diagram-neutral); stroke-width: 2; }
+    svg .active { fill: var(--bg); stroke: var(--diagram-ok); stroke-width: 3; }
+    svg .alt { fill: var(--bg); stroke: var(--diagram-alt); stroke-width: 2.5; }
+    svg .warning { fill: var(--bg); stroke: var(--diagram-problem); stroke-width: 2.5; stroke-dasharray: 8 5; }
+    svg .arrow { fill: none; stroke: var(--diagram-neutral); stroke-width: 2.4; marker-end: url(#arrow); }
+    svg .ok-arrow { fill: none; stroke: var(--diagram-ok); stroke-width: 3; marker-end: url(#arrow-ok); }
+    svg .alt-arrow { fill: none; stroke: var(--diagram-alt); stroke-width: 2.5; marker-end: url(#arrow-alt); }
+    svg .dash-arrow { fill: none; stroke: var(--diagram-problem); stroke-width: 2.5; stroke-dasharray: 8 5; marker-end: url(#arrow-warn); }
+    .toc {
+      display: flex; flex-wrap: wrap; gap: 8px; padding: 12px;
+      border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+    }
+    .toc a { padding: 5px 9px; }
+    .grid-2, .grid-3 { display: grid; gap: 14px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      padding: 17px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+    }
+    .card.ok { border-top: 4px solid var(--diagram-ok); }
+    .card.alt { border-top: 4px solid var(--diagram-alt); }
+    .card.warn { border-top: 4px dashed var(--diagram-problem); }
+    .label {
+      display: inline-block; padding: 2px 8px; margin-bottom: 8px;
+      border: 1px solid var(--border); border-radius: 999px; color: var(--dim); font-size: .79rem; font-weight: 700;
+    }
+    code {
+      padding: .12em .35em; border-radius: 5px;
+      color: var(--text); background: var(--code-bg); font-size: .9em;
+    }
+    pre {
+      margin: 12px 0; padding: 14px; overflow-x: auto;
+      border: 1px solid var(--border); border-radius: 9px; background: var(--code-bg);
+      color: var(--text); line-height: 1.55;
+    }
+    pre code { padding: 0; background: none; }
+    .trace { display: grid; gap: 0; margin: 18px 0; }
+    .trace-step {
+      position: relative; margin-left: 17px; padding: 4px 0 20px 28px;
+      border-left: 2px solid var(--diagram-neutral);
+    }
+    .trace-step:last-child { border-left-color: transparent; padding-bottom: 0; }
+    .trace-step::before {
+      content: ""; position: absolute; left: -7px; top: 9px; width: 12px; height: 12px;
+      border: 2px solid var(--diagram-ok); border-radius: 50%; background: var(--bg);
+    }
+    .trace-step.warn::before { border-color: var(--diagram-problem); border-style: dashed; }
+    .trace-step strong { display: block; }
+    .source { font-size: .88rem; color: var(--dim); }
+    .ledger { display: grid; gap: 10px; }
+    .ledger-row {
+      display: grid; grid-template-columns: 170px 1.1fr 1fr; gap: 12px;
+      padding: 13px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface);
+    }
+    .ledger-row > :first-child { font-weight: 750; }
+    .question { margin: 14px 0; padding: 16px; border-left: 4px dashed var(--diagram-problem); background: var(--surface); }
+    .small { color: var(--dim); font-size: .9rem; }
+    footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--dim); }
+    @media (max-width: 720px) {
+      .wrap { padding: 62px 16px 52px; }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .ledger-row { grid-template-columns: 1fr; gap: 4px; }
+      .theme-toggle { top: 10px; right: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <button class="theme-toggle" type="button" aria-label="Toggle color theme">Use light theme</button>
+  <main class="wrap">
+    <div class="eyebrow">NeMo Gym review · rollout failure contract</div>
+    <h1>Does PR #2611 provide a uniform rollout error interface?</h1>
+    <p class="lede">A design review of <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2611">Gym PR #2611</a> against <a href="https://github.com/NVIDIA-NeMo/Gym/issues/2750">issue #2750</a> and its public error-handling design documents.</p>
+    <div class="provenance">
+      <span>PR base: <a href="https://github.com/NVIDIA-NeMo/Gym/commit/c8e67b0c1f52641f0f6ce576f2300b9305ef8d92"><code>c8e67b0c1f52…</code></a></span>
+      <span>PR head: <a href="https://github.com/NVIDIA-NeMo/Gym/commit/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1"><code>f55c8a0e6f08…</code></a></span>
+      <span>Design snapshot: <a href="https://github.com/ananthsub/Gym/commit/e156f4fcb8571b101400f52a3aa42f4b221a75bc"><code>e156f4fcb857…</code></a></span>
+      <span>NeMo RL reference: <a href="https://github.com/NVIDIA-NeMo/RL/commit/a43d71b31850e4420fbf48a7da74088e84116f25"><code>a43d71b31850…</code></a></span>
+      <span>Reviewed 2026-08-27 UTC</span>
+    </div>
+
+    <div class="answer"><strong>Answer:</strong> PR #2611 is a useful contract field, but it is not yet a uniform error interface. It correctly makes <code>mask_sample</code> available on every typed verifier result. However, its comment defines the field broadly enough to include failures that produced no valid sample, while the shared design explicitly gives those failures a separate <code>RolloutFailureRecord</code>. One Gym agent emits contradictory top-level and nested values. NeMo RL currently reads only the nested value, and its newer asynchronous payload path always creates an all-ones sample mask. A safe rollout contract therefore needs producer ownership, a top-level consumer migration, explicit GRPO group policy, and documentation for both success and failure outcomes.</div>
+
+    <div class="figure">
+      <h3>Figure 1 — The design has two lanes; the PR currently describes one broad lane</h3>
+      <p class="caption">Solid blue and purple paths are the proposed contract. The dashed orange path shows where the PR's examples cross the boundary. Links are pinned to the reviewed revisions.</p>
+      <svg viewBox="0 0 920 445" role="img" aria-labelledby="fig1-title fig1-desc">
+        <title id="fig1-title">Two rollout outcome lanes compared with PR 2611</title>
+        <desc id="fig1-desc">A complete result may carry mask sample, failure kind, and failure reason. A missing result must carry a rollout failure record. The pull request comment lists lost session and OOM examples under mask sample, which can include missing-result cases.</desc>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-neutral)"/></marker>
+          <marker id="arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-ok)"/></marker>
+          <marker id="arrow-alt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-alt)"/></marker>
+          <marker id="arrow-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-problem)"/></marker>
+        </defs>
+        <text x="24" y="34" font-weight="750">One dispatched rollout</text>
+        <rect class="box" x="25" y="52" width="190" height="64" rx="10"/>
+        <text x="120" y="79" text-anchor="middle" font-weight="700">Did a complete</text>
+        <text x="120" y="101" text-anchor="middle" font-weight="700">result exist?</text>
+
+        <path class="ok-arrow" d="M215 76 H330"/>
+        <text x="273" y="66" text-anchor="middle" class="dim">yes</text>
+        <rect class="active" x="330" y="48" width="250" height="136" rx="10"/>
+        <text x="455" y="76" text-anchor="middle" font-weight="750">RolloutInvocationSuccess</text>
+        <text x="455" y="103" text-anchor="middle">real response + token fields</text>
+        <text x="455" y="128" text-anchor="middle">reward</text>
+        <text x="455" y="153" text-anchor="middle">mask_sample · failure_kind · failure_reason</text>
+        <a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L16-L21"><text x="455" y="174" text-anchor="middle" text-decoration="underline" class="dim">design lines 16–21</text></a>
+
+        <path class="alt-arrow" d="M120 116 V270 H330"/>
+        <text x="142" y="205" class="dim">no</text>
+        <rect class="alt" x="330" y="230" width="250" height="126" rx="10"/>
+        <text x="455" y="258" text-anchor="middle" font-weight="750">RolloutInvocationFailure</text>
+        <text x="455" y="285" text-anchor="middle">RolloutFailureRecord</text>
+        <text x="455" y="310" text-anchor="middle">stage · delivery · retry guidance · identity</text>
+        <text x="455" y="335" text-anchor="middle" font-weight="700">no reward · no placeholder · no mask_sample</text>
+        <a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L135-L144"><text x="455" y="376" text-anchor="middle" text-decoration="underline" class="dim">run_outcomes design</text></a>
+
+        <rect class="warning" x="645" y="74" width="245" height="220" rx="10"/>
+        <text x="767" y="103" text-anchor="middle" font-weight="750">⚠ PR comment examples</text>
+        <text x="767" y="132" text-anchor="middle">lost session</text>
+        <text x="767" y="157" text-anchor="middle">unavailable judge</text>
+        <text x="767" y="182" text-anchor="middle">OOM-killed container</text>
+        <text x="767" y="207" text-anchor="middle">reset timeout</text>
+        <text x="767" y="239" text-anchor="middle" font-weight="700">These do not prove that a</text>
+        <text x="767" y="261" text-anchor="middle" font-weight="700">complete result exists.</text>
+        <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/base_resources_server.py#L96-L114"><text x="767" y="284" text-anchor="middle" text-decoration="underline" class="dim">PR contract comment</text></a>
+        <path class="dash-arrow" d="M645 215 C615 215 615 293 580 293"/>
+        <text x="614" y="248" text-anchor="middle" class="dim">ambiguous</text>
+
+        <g transform="translate(24 401)">
+          <line x1="0" y1="0" x2="32" y2="0" class="ok-arrow"/><text x="43" y="5">complete result</text>
+          <line x1="210" y1="0" x2="242" y2="0" class="alt-arrow"/><text x="253" y="5">no result</text>
+          <line x1="400" y1="0" x2="432" y2="0" class="dash-arrow"/><text x="443" y="5">boundary mismatch</text>
+        </g>
+      </svg>
+    </div>
+
+    <nav class="toc" aria-label="Page sections">
+      <a href="#example">Three concrete outcomes</a>
+      <a href="#change">What the PR adds</a>
+      <a href="#contradiction">Reproduced contradiction</a>
+      <a href="#interface">Uniform interface</a>
+      <a href="#producers">Who sets the flag</a>
+      <a href="#nemo-rl">NeMo RL consumer</a>
+      <a href="#documentation">Documentation</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#questions">Review questions</a>
+    </nav>
+
+    <section id="example">
+      <h2>Start with three concrete outcomes</h2>
+      <p>The field names become clear only after the caller can see the object that actually exists.</p>
+      <div class="grid-3">
+        <article class="card ok">
+          <span class="label">A · policy scored zero</span>
+          <pre><code>{
+  "reward": 0.0,
+  "mask_sample": false
+}</code></pre>
+          <p>The verifier completed normally. Zero is policy evidence and remains scoreable and trainable.</p>
+        </article>
+        <article class="card alt">
+          <span class="label">B · complete but unusable</span>
+          <pre><code>{
+  "reward": 0.4,
+  "mask_sample": true,
+  "failure_kind": "judge_degraded",
+  "failure_reason": "fallback judge"
+}</code></pre>
+          <p>The real response and token sequence still exist. The caller may preserve the group slot while excluding this sample from loss or score.</p>
+        </article>
+        <article class="card warn">
+          <span class="label">C · no valid result</span>
+          <pre><code>{
+  "outcome": "failure",
+  "failure": {
+    "stage": "agent_request",
+    "delivery": "may_have_received"
+  }
+}</code></pre>
+          <p>There is no honest reward or sample. A placeholder <code>reward=0</code> plus <code>mask_sample=true</code> would erase delivery and retry information.</p>
+        </article>
+      </div>
+      <p class="source">Design source: <a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L16-L21">missing versus unusable results</a> and <a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L72-L80">the three verifier fields</a>.</p>
+    </section>
+
+    <section id="change">
+      <h2>What PR #2611 adds—and what it does not</h2>
+      <div class="grid-2">
+        <article class="card ok">
+          <h3>Useful foundation</h3>
+          <p><code>BaseVerifyResponse</code> gains <code>mask_sample: bool = False</code>. Any typed agent response can now expose the same top-level key. SWE and AnySWE mirror their legacy nested value into it.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/base_resources_server.py#L96-L114">base response</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/swe_agents/app.py#L3930-L3946">SWE mirror</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/anyswe_agent/app.py#L683-L699">AnySWE mirror</a></p>
+        </article>
+        <article class="card warn">
+          <h3>Still outside this PR</h3>
+          <p>The PR does not add the outcome union, a serializable failure record, or <code>run_outcomes()</code>. A request exception still escapes <code>run_examples()</code> before managed routing can attach it to the input row.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1499-L1539">current library boundary</a> · <a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L135-L144">proposed boundary</a></p>
+        </article>
+      </div>
+
+      <div class="figure">
+        <h3>Figure 2 — One returned dictionary moves through both caller paths</h3>
+        <p class="caption">The new field survives the HTTP result dictionary. That solves field placement, but it does not turn pre-result exceptions into caller-visible values.</p>
+        <svg viewBox="0 0 920 330" role="img" aria-labelledby="fig2-title fig2-desc">
+          <title id="fig2-title">Mask sample field path through managed and direct callers</title>
+          <desc id="fig2-desc">A verifier result passes through an agent run and run examples. A library caller receives the dictionary directly. Managed collection persists the dictionary and computes progress and aggregate metrics. Exceptions before the dictionary still bypass both result paths.</desc>
+          <defs>
+            <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-neutral)"/></marker>
+            <marker id="arrow2ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-ok)"/></marker>
+            <marker id="arrow2warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-problem)"/></marker>
+          </defs>
+          <rect class="active" x="20" y="50" width="190" height="85" rx="10"/>
+          <text x="115" y="79" text-anchor="middle" font-weight="750">BaseVerifyResponse</text>
+          <text x="115" y="105" text-anchor="middle">reward + mask_sample</text>
+          <text x="115" y="126" text-anchor="middle" class="dim">typed complete result</text>
+          <path d="M210 92 H290" class="ok-arrow" style="marker-end:url(#arrow2ok)"/>
+          <rect class="active" x="290" y="50" width="170" height="85" rx="10"/>
+          <text x="375" y="79" text-anchor="middle" font-weight="750">agent /run</text>
+          <text x="375" y="105" text-anchor="middle">JSON dictionary</text>
+          <path d="M460 92 H540" class="ok-arrow" style="marker-end:url(#arrow2ok)"/>
+          <rect class="active" x="540" y="50" width="170" height="85" rx="10"/>
+          <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1499-L1539"><text x="625" y="79" text-anchor="middle" text-decoration="underline" font-weight="750">run_examples()</text></a>
+          <text x="625" y="105" text-anchor="middle">(row, result)</text>
+
+          <path d="M625 135 V214 H754" class="arrow" style="marker-end:url(#arrow2)"/>
+          <rect class="box" x="754" y="180" width="145" height="70" rx="10"/>
+          <text x="826" y="207" text-anchor="middle" font-weight="700">library caller</text>
+          <text x="826" y="232" text-anchor="middle">chooses policy</text>
+
+          <path d="M625 135 V214 H480" class="arrow" style="marker-end:url(#arrow2)"/>
+          <rect class="box" x="270" y="180" width="210" height="88" rx="10"/>
+          <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1082-L1237"><text x="375" y="208" text-anchor="middle" text-decoration="underline" font-weight="750">run_from_config()</text></a>
+          <text x="375" y="234" text-anchor="middle">persist + progress metrics</text>
+          <text x="375" y="257" text-anchor="middle">then aggregate</text>
+
+          <rect class="warning" x="20" y="195" width="190" height="85" rx="10"/>
+          <text x="115" y="223" text-anchor="middle" font-weight="750">request raises first</text>
+          <text x="115" y="248" text-anchor="middle">no result dictionary</text>
+          <text x="115" y="270" text-anchor="middle" class="dim">still an exception</text>
+          <path d="M210 238 H270" class="dash-arrow" style="marker-end:url(#arrow2warn)"/>
+          <text x="240" y="228" text-anchor="middle" class="dim">aborts</text>
+        </svg>
+      </div>
+    </section>
+
+    <section id="contradiction">
+      <h2>A known producer contradicts the new top-level field</h2>
+      <p>The conversational-tool-use simulation agent was already identified in the PR description as a nested <code>mask_sample</code> producer, but it is not migrated. Its transient failure builder sets only <code>instance_config.mask_sample=true</code>. Pydantic fills the newly inherited top-level field with its default, <code>false</code>.</p>
+      <pre><code>{
+  "_ng_failure_class": "transient",
+  "reward": 0.0,
+  "mask_sample": false,
+  "instance_config": {
+    "mask_sample": true
+  }
+}</code></pre>
+      <p>This exact object was reproduced from the agent's existing 429 failure path at the reviewed head. The new contract comment tells consumers to prefer the top-level field, so a direct caller following the contract reads the wrong polarity.</p>
+
+      <div class="figure">
+        <h3>Figure 3 — Why <code>reward_unmasked</code> still includes an infrastructure zero</h3>
+        <p class="caption">Orange dashed elements are the reproduced path. The sidecar routing marker and sample-usability flag answer different questions, but the metric code checks only the false top-level flag.</p>
+        <svg viewBox="0 0 920 355" role="img" aria-labelledby="fig3-title fig3-desc">
+          <title id="fig3-title">Contradictory mask fields flow into unmasked metrics</title>
+          <desc id="fig3-desc">A 429 during seed session creates a transient failure with nested mask true and top-level mask false. Managed routing places it in the failure sidecar, but the progress metric code counts it as unmasked because it checks only the top-level field.</desc>
+          <defs>
+            <marker id="arrow3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-problem)"/></marker>
+          </defs>
+          <rect class="warning" x="20" y="60" width="160" height="90" rx="10"/>
+          <text x="100" y="88" text-anchor="middle" font-weight="750">seed_session</text>
+          <text x="100" y="114" text-anchor="middle">HTTP 429</text>
+          <text x="100" y="138" text-anchor="middle" class="dim">observed input</text>
+          <path d="M180 105 H250" class="dash-arrow" style="marker-end:url(#arrow3)"/>
+
+          <rect class="warning" x="250" y="38" width="265" height="150" rx="10"/>
+          <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/conversational_tool_use/simulation/app.py#L760-L798"><text x="382" y="67" text-anchor="middle" text-decoration="underline" font-weight="750">transient failure builder</text></a>
+          <text x="382" y="96" text-anchor="middle">_ng_failure_class = "transient"</text>
+          <text x="382" y="122" text-anchor="middle">instance_config.mask_sample = true</text>
+          <text x="382" y="148" text-anchor="middle" font-weight="750">top-level mask_sample = false</text>
+          <text x="382" y="174" text-anchor="middle" class="dim">inherited default</text>
+
+          <path d="M515 82 H600" class="dash-arrow" style="marker-end:url(#arrow3)"/>
+          <rect class="alt" x="600" y="35" width="290" height="92" rx="10"/>
+          <text x="745" y="64" text-anchor="middle" font-weight="750">storage routing</text>
+          <text x="745" y="90" text-anchor="middle">failure marker → sidecar</text>
+          <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1150-L1171"><text x="745" y="116" text-anchor="middle" text-decoration="underline" class="dim">separate question</text></a>
+
+          <path d="M515 155 C555 155 555 238 600 238" class="dash-arrow" style="marker-end:url(#arrow3)"/>
+          <rect class="warning" x="600" y="188" width="290" height="112" rx="10"/>
+          <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1192-L1237"><text x="745" y="217" text-anchor="middle" text-decoration="underline" font-weight="750">progress metric filter</text></a>
+          <text x="745" y="244" text-anchor="middle">if not result["mask_sample"]</text>
+          <text x="745" y="270" text-anchor="middle" font-weight="750">counts failure as unmasked</text>
+          <text x="745" y="292" text-anchor="middle" class="dim">observed helper result: no masked keys</text>
+
+          <g transform="translate(26 330)">
+            <line x1="0" y1="0" x2="32" y2="0" class="dash-arrow" style="marker-end:url(#arrow3)"/><text x="43" y="5">reproduced contradictory path</text>
+            <rect x="345" y="-9" width="30" height="18" class="alt"/><text x="386" y="5">sidecar routing</text>
+          </g>
+        </svg>
+      </div>
+
+      <p>There is a second compatibility effect. A default <code>BaseVerifyResponse</code> serializes <code>mask_sample=false</code>, and the generic reward profiler converts booleans to numbers. A one-result reproduction produced five new aggregate series: <code>mean</code>, <code>max</code>, <code>min</code>, <code>median</code>, and <code>std/mask_sample</code>, all zero. Therefore “an unmodified environment behaves identically” is not true for aggregate metric output.</p>
+      <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/reward_profile.py#L245-L260">boolean-to-numeric conversion</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/reward_profile.py#L655-L688">default aggregate path</a></p>
+    </section>
+
+    <section id="interface">
+      <h2>The uniform interface should be an outcome union, not one overloaded response</h2>
+      <p>PR #2611 can remain the complete-result half. Issue #2750 needs a second top-level variant for invocations that end before a valid result exists.</p>
+      <div class="figure">
+        <h3>Figure 4 — Target caller contract</h3>
+        <p class="caption">The producer reports facts. The caller owns retry, replacement, masking, dropping, and stop policy. Neither side has to infer policy from free text or a zero reward.</p>
+        <svg viewBox="0 0 920 455" role="img" aria-labelledby="fig4-title fig4-desc">
+          <title id="fig4-title">Uniform run outcomes interface for managed and direct callers</title>
+          <desc id="fig4-desc">Run outcomes yields success or failure. Success contains a complete BaseVerifyResponse with three separate failure fields. Failure contains a RolloutFailureRecord. Managed evaluation persists and reports coverage. Library callers choose their own policy.</desc>
+          <defs>
+            <marker id="arrow4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-neutral)"/></marker>
+            <marker id="arrow4ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-ok)"/></marker>
+            <marker id="arrow4alt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--diagram-alt)"/></marker>
+          </defs>
+          <rect class="box" x="30" y="72" width="180" height="78" rx="10"/>
+          <text x="120" y="102" text-anchor="middle" font-weight="750">dispatch one row</text>
+          <text x="120" y="128" text-anchor="middle">stable rollout identity</text>
+          <path d="M210 111 H305" class="arrow" style="marker-end:url(#arrow4)"/>
+          <rect class="box" x="305" y="62" width="200" height="98" rx="10"/>
+          <a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L135-L156"><text x="405" y="94" text-anchor="middle" text-decoration="underline" font-weight="750">run_outcomes()</text></a>
+          <text x="405" y="121" text-anchor="middle">converts expected failures</text>
+          <text x="405" y="146" text-anchor="middle">programming errors still raise</text>
+
+          <path d="M505 90 H620" class="ok-arrow" style="marker-end:url(#arrow4ok)"/>
+          <rect class="active" x="620" y="34" width="270" height="132" rx="10"/>
+          <text x="755" y="64" text-anchor="middle" font-weight="750">Success(result)</text>
+          <text x="755" y="91" text-anchor="middle">complete BaseVerifyResponse</text>
+          <text x="755" y="117" text-anchor="middle">mask_sample · failure_kind · failure_reason</text>
+          <text x="755" y="143" text-anchor="middle" class="dim">three orthogonal facts</text>
+
+          <path d="M405 160 V255 H620" class="alt-arrow" style="marker-end:url(#arrow4alt)"/>
+          <rect class="alt" x="620" y="207" width="270" height="112" rx="10"/>
+          <text x="755" y="237" text-anchor="middle" font-weight="750">Failure(record)</text>
+          <text x="755" y="264" text-anchor="middle">stage · kind · delivery · retry guidance</text>
+          <text x="755" y="290" text-anchor="middle">no invented reward or sample</text>
+
+          <path d="M620 126 C555 126 560 368 450 368" class="arrow" style="marker-end:url(#arrow4)"/>
+          <path d="M620 275 C555 275 560 368 450 368" class="arrow" style="marker-end:url(#arrow4)"/>
+          <rect class="box" x="245" y="330" width="205" height="93" rx="10"/>
+          <text x="347" y="360" text-anchor="middle" font-weight="750">managed evaluation</text>
+          <text x="347" y="386" text-anchor="middle">persist each outcome</text>
+          <text x="347" y="410" text-anchor="middle">reconcile coverage + score</text>
+
+          <path d="M620 126 C550 126 560 405 205 405" class="arrow" style="marker-end:url(#arrow4)"/>
+          <path d="M620 275 C540 275 555 405 205 405" class="arrow" style="marker-end:url(#arrow4)"/>
+          <rect class="box" x="25" y="350" width="180" height="93" rx="10"/>
+          <text x="115" y="380" text-anchor="middle" font-weight="750">library caller</text>
+          <text x="115" y="406" text-anchor="middle">retry · replace · mask</text>
+          <text x="115" y="430" text-anchor="middle">drop · stop</text>
+        </svg>
+      </div>
+      <div class="grid-2">
+        <article class="card ok">
+          <h3>Complete-result rules</h3>
+          <ul>
+            <li><code>mask_sample</code> answers only whether this complete result is usable.</li>
+            <li><code>failure_kind</code> is a stable category.</li>
+            <li><code>failure_reason</code> explains this occurrence to a person.</li>
+            <li>Do not infer retryability or delivery state from these fields.</li>
+          </ul>
+        </article>
+        <article class="card alt">
+          <h3>Invocation-failure rules</h3>
+          <ul>
+            <li>Attach failure data to the original input row.</li>
+            <li>Preserve stage, delivery state, retry guidance, and identity.</li>
+            <li>Cross process and Ray boundaries with bounded plain data.</li>
+            <li>Never synthesize a reward, response, or token sequence.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="producers">
+      <h2>Who should set <code>mask_sample</code> now</h2>
+      <p>The layer that first knows a complete result is unusable should set the top-level field. Later layers may only promote <code>false</code> to <code>true</code>; they must not clear an upstream decision. This creates one monotonic rule across resources servers, agents, and rollout finalization.</p>
+      <div class="grid-3">
+        <article class="card ok">
+          <span class="label">Resources server</span>
+          <h3>Verification failed after a real trajectory exists</h3>
+          <p>Set <code>mask_sample=true</code> when a judge is unavailable, verification generation fails, a tool or simulated user fails independently of policy quality, or a fallback score is not trustworthy. Keep <code>false</code> for a legitimate policy failure, including reward zero.</p>
+        </article>
+        <article class="card ok">
+          <span class="label">Agent harness</span>
+          <h3>The harness invalidated an otherwise complete result</h3>
+          <p>Preserve the resources-server value and OR in harness-owned failures such as an incomplete captured trajectory or an agent timeout that still leaves a real, internally consistent response. Write the decision only at the top level.</p>
+        </article>
+        <article class="card alt">
+          <span class="label">Rollout collector</span>
+          <h3>Finalization proves the token record is unusable</h3>
+          <p>Promote the flag when correlation loses a model call or produces an ambiguous token chain. The token-capture finalizer already uses this pattern. It must preserve a prior <code>true</code>.</p>
+        </article>
+      </div>
+      <div class="card warn" style="margin-top:14px">
+        <h3>Do not set the flag when no valid result exists</h3>
+        <p>A request that never reached the agent, a lost session with no trustworthy response, an OOM before a result, or a reset failure belongs in <code>RolloutFailureRecord</code>. Until <code>run_outcomes()</code> exists, keep the existing failure routing marker and ensure training callers reject that row; do not make a synthetic response look complete merely by adding <code>mask_sample=true</code>.</p>
+      </div>
+      <h3 style="margin-top:24px">Concrete migration list</h3>
+      <div class="ledger">
+        <div class="ledger-row">
+          <div>SWE and AnySWE</div>
+          <div>Keep the PR's top-level mirror as a compatibility step.</div>
+          <div>Then make the top-level field authoritative and deprecate <code>instance_config.mask_sample</code>.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Conversational tool use</div>
+          <div>The resources server should return <code>mask_sample=self._should_mask_sample(state)</code> at the top level.</div>
+          <div>The agent's transient placeholder must move to the invocation-failure lane. If retained temporarily, it must not serialize opposite nested and top-level values.</div>
+        </div>
+        <div class="ledger-row">
+          <div>AnyTerminal</div>
+          <div>Keep deriving the top-level value from terminal-benchmark metrics.</div>
+          <div>Audit that infrastructure failure cannot be mistaken for an ordinary unsuccessful task.</div>
+        </div>
+        <div class="ledger-row">
+          <div>OSWorld</div>
+          <div>Keep the flag for a complete trajectory invalidated by timeout or evaluator failure.</div>
+          <div>Move <code>_empty_response()</code> cases that “couldn't even start” to <code>RolloutFailureRecord</code>.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Token capture</div>
+          <div>Keep top-level masking for incomplete or ambiguous captured chains.</div>
+          <div>This is a complete-result finalization failure, not an agent-specific nested setting.</div>
+        </div>
+      </div>
+      <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/resources_servers/conversational_tool_use_simulation/app.py#L1367-L1380">conversational-tool-use verifier payload</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/anyterminal_agent/app.py#L75-L125">AnyTerminal response</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/osworld_agent/app.py#L993-L1027">OSWorld empty response</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/token_id_capture/delivery.py#L117-L151">token-capture promotion</a></p>
+    </section>
+
+    <section id="nemo-rl">
+      <h2>NeMo RL needs two consumer fixes, not only a new key lookup</h2>
+      <p>On public NeMo RL main, <code>_extract_mask_sample_flags()</code> reads only <code>full_result.instance_config.mask_sample</code>. A direct reproduction passed top-level <code>true</code> with nested <code>false</code> and received <code>false</code>; reversing the values produced <code>true</code>. NeMo RL therefore follows the legacy field, not PR #2611's contract.</p>
+      <div class="grid-2">
+        <article class="card warn">
+          <span class="label">Required compatibility fix</span>
+          <h3>Read and validate the top-level field</h3>
+          <p>Read <code>full_result.mask_sample</code> first. For one compatibility window, read the nested value only when the top-level key is absent. If both exist and disagree, mask the sample and emit a conflict metric or warning. Require actual booleans; <code>bool("false")</code> is <code>true</code> in Python.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/rollouts.py#L266-L278">current nested-only extractor</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/tests/unit/experience/test_reward_penalties.py#L130-L169">nested-only tests</a></p>
+        </article>
+        <article class="card warn">
+          <span class="label">Required asynchronous fix</span>
+          <h3>Carry usability into the replay payload</h3>
+          <p>Add a typed <code>mask_sample</code> fact to <code>Completion</code>, populate it in <code>AsyncNemoGymRolloutImpl._result_to_completion()</code>, and set each payload row's <code>sample_mask</code> from it. The current <code>record_to_train_batch()</code> creates <code>torch.ones</code> for every completion, so this path cannot honor either field location.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/rollout_manager.py#L1032-L1057">completion conversion</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/payload.py#L80-L93">all-ones asynchronous sample mask</a></p>
+        </article>
+      </div>
+      <div class="card alt" style="margin-top:14px">
+        <h3>GRPO must choose a group policy before computing statistics</h3>
+        <p>The synchronous path currently calculates each prompt group's baseline and standard deviation with an all-ones mask, then zeros the flagged row's loss later. This prevents a flagged row from contributing gradients, but its infrastructure reward still changes the advantages of valid siblings. That reproduces the distortion described by issue #2750.</p>
+        <p><strong>Recommended NeMo RL policy:</strong> replace a flagged completion before admitting the prompt group. If replacement is exhausted, calculate baseline and standard deviation from unmasked completions and drop the whole group when too few valid members remain. “Loss only” may remain an explicitly named legacy mode, but it should not be described as excluding the sample from group statistics.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/algorithms/grpo.py#L3188-L3208">baseline uses all rows</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/algorithms/grpo.py#L3269-L3280">loss mask is applied later</a></p>
+      </div>
+      <p>The existing <code>env.should_mask_flagged_samples</code> switch should evolve into a policy choice such as <code>replace</code>, <code>exclude_from_statistics</code>, <code>drop_group</code>, or temporary <code>loss_only</code>. Once Gym's contract is narrow, “ignore the flag and train anyway” is no longer a safe interpretation of a complete but unusable result. Report masked, replaced, conflicting, and dropped-group counts separately.</p>
+    </section>
+
+    <section id="documentation">
+      <h2>Documentation must define the contract at three boundaries</h2>
+      <div class="grid-3">
+        <article class="card ok">
+          <span class="label">Gym producer guide</span>
+          <h3>How environment authors classify an outcome</h3>
+          <p>Add a canonical page beside the resources-server and agent authoring guides. Define the complete-result precondition, all three fields, the monotonic ownership rule, and examples for policy zero, degraded judge, incomplete token capture, and no-result infrastructure failure.</p>
+        </article>
+        <article class="card alt">
+          <span class="label">Gym caller guide</span>
+          <h3>What managed and library APIs return</h3>
+          <p>Document the success/failure outcome union, persistence sidecars, stable rollout identity, and caller ownership of retry, replacement, masking, group dropping, and coverage. Link this page from <code>run_examples()</code>, reward profiling, and external-agent-harness documentation.</p>
+        </article>
+        <article class="card warn">
+          <span class="label">NeMo RL integration guide</span>
+          <h3>How training consumes the fact</h3>
+          <p>State field precedence and the nested deprecation window. Explain the selected GRPO group policy, behavior when every completion is masked, synchronous and asynchronous parity, configuration values, and metrics. Show that reward zero with <code>false</code> remains trainable.</p>
+        </article>
+      </div>
+      <p>Also add a short migration note: producer releases write both locations with identical values; consumers read top-level first; conflicts fail closed and are observable; a named release removes nested writes and fallback reads. Keep <code>mask_sample</code> out of generic reward aggregation and publish intentional coverage metrics instead.</p>
+    </section>
+
+    <section id="evidence">
+      <h2>Validation evidence</h2>
+      <p>All execution used isolated worktrees at the pinned Gym revisions and public NeMo RL main. The reviewed diff contains model fields, metrics, agent result mapping, and tests; no credential access, dependency hooks, destructive commands, or data-exfiltration behavior was found.</p>
+      <div class="ledger">
+        <div class="ledger-row">
+          <div>Focused PR suite</div>
+          <div><code>uv run --extra dev pytest tests/unit_tests/test_base_resources_server.py tests/unit_tests/test_rollout_collection.py -q</code></div>
+          <div><strong>Head:</strong> 150 passed in 3.37s. This proves the added field and metric helper satisfy their authored tests.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Contract before/after</div>
+          <div>Imported <code>BaseVerifyResponse.model_fields</code> at both pinned revisions.</div>
+          <div><strong>Base:</strong> no <code>mask_sample</code>. <strong>Head:</strong> field exists with default <code>false</code>.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Existing producer</div>
+          <div>Ran the conversational-tool-use agent's existing seed-session 429 path and serialized its returned model.</div>
+          <div><strong>Head:</strong> top-level <code>false</code>, nested <code>true</code>, failure class <code>transient</code>.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Progress classification</div>
+          <div>Fed that returned shape through the exact unmasked-counter predicate and <code>_masking_step_metrics()</code>.</div>
+          <div><strong>Head:</strong> count=1 in the unmasked counter; no masked metric was emitted.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Aggregate compatibility</div>
+          <div>Serialized a default zero-reward <code>BaseVerifyResponse</code> and ran <code>compute_aggregate_metrics()</code>.</div>
+          <div><strong>Head:</strong> five <code>mask_sample</code> aggregate series appeared, all 0.0.</div>
+        </div>
+        <div class="ledger-row">
+          <div>NeMo RL field precedence</div>
+          <div>Ran the pinned public <code>_extract_mask_sample_flags()</code> with opposing top-level and nested values.</div>
+          <div><strong>Public main:</strong> returned the nested values <code>[false, true]</code>, ignoring top-level values <code>[true, false]</code>.</div>
+        </div>
+        <div class="ledger-row">
+          <div>NeMo RL async payload</div>
+          <div>Traced <code>Completion</code> through <code>record_to_train_batch()</code>.</div>
+          <div><strong>Public main:</strong> environment extras retain the result, but every emitted <code>sample_mask</code> is initialized to one.</div>
+        </div>
+        <div class="ledger-row">
+          <div>Public CI</div>
+          <div><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2611/checks">PR checks</a></div>
+          <div>DCO passes. No broader public test run was available at the review snapshot.</div>
+        </div>
+      </div>
+      <p class="small">Scope limit: these reproductions prove local Gym contract behavior and NeMo RL's field extraction. The asynchronous and GRPO findings are pinned code-path traces, not an end-to-end training run. No claim is made about verl or another training runtime.</p>
+    </section>
+
+    <section id="questions">
+      <h2>Review questions before treating this as the shared interface</h2>
+      <div class="question">
+        <h3>1. Will the contract explicitly require a complete result?</h3>
+        <p>The current comment names lost sessions, unavailable judges, OOM-killed containers, and reset timeouts. Some of those paths cannot provide a real response and complete token fields. The existing OSWorld empty-result path makes the ambiguity concrete: its comment says the rollout “couldn't even start,” but it constructs a placeholder response and sets <code>mask_sample=true</code>. The shared design says those cases must return <code>RolloutFailureRecord</code> and must not include <code>mask_sample</code>. Narrow the comment and tests to “a complete result exists but is unusable,” then use a separate outcome for pre-result failures.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/base_resources_server.py#L96-L114">PR wording</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/osworld_agent/app.py#L993-L1027">existing placeholder path</a> · <a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L16-L21">design rule</a></p>
+      </div>
+      <div class="question">
+        <h3>2. Will every known producer move to the top level in the same compatibility window?</h3>
+        <p>The conversational-tool-use failure path now serializes opposite top-level and nested values. Its resources-server sibling also keeps its masking decision only under <code>instance_config</code>. Migrate both with the SWE agents, and add one regression test that asserts the complete serialized dictionary. Search all existing <code>mask_sample</code> and inverse <code>valid_sample</code> producers before documenting “prefer the top level.”</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/conversational_tool_use/simulation/app.py#L785-L798">agent failure payload</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/resources_servers/conversational_tool_use_simulation/app.py#L1367-L1380">resources verifier payload</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/conversational_tool_use/simulation/tests/test_app.py#L1061-L1075">test misses top-level assertion</a></p>
+      </div>
+      <div class="question">
+        <h3>3. Which rows define the “unmasked reward” denominator?</h3>
+        <p>The current counter includes every result whose top-level mask flag is false, including returned <code>_ng_failure_class</code> sidecar rows and <code>_ng_no_persist</code> rows. That does not measure the score after infrastructure failures are removed. Define the set first—normally persisted complete results—and test the same mixed batch through progress metrics and final aggregation.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1150-L1171">storage classes</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1192-L1237">metric denominator</a></p>
+      </div>
+      <div class="question">
+        <h3>4. Is <code>mask_sample</code> a control field or a generic score?</h3>
+        <p>The default serializer plus generic boolean aggregation adds five metric series even when nothing is masked. Either filter contract fields from generic reward profiling and publish intentional coverage metrics, or document the expanded metric schema and update the compatibility claim. A regression should cover an unmodified typed environment with all defaults.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/reward_profile.py#L245-L260">generic conversion</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/tests/unit_tests/test_base_resources_server.py#L75-L115">current field tests</a></p>
+      </div>
+      <div class="question">
+        <h3>5. Where is the caller contract documented?</h3>
+        <p>The implementation comment cannot carry the full policy boundary. The design's completion criterion requires one documented contract for environment authors, managed evaluation, direct callers, and training adapters. The page should show the two outcome variants, the three complete-result fields, and which layer owns retry, persistence, masking, replacement, group statistics, and coverage.</p>
+        <p class="source"><a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L227-L229">component migration completion criterion</a></p>
+      </div>
+      <div class="question">
+        <h3>6. Which NeMo RL policy is part of the rollout contract?</h3>
+        <p>Changing the field lookup fixes transport but not GRPO semantics. Today the flagged reward participates in baseline and standard-deviation calculation before its loss is zeroed, and the asynchronous replay payload ignores the flag. Choose replacement, exclusion, or group dropping; implement the same policy in synchronous and asynchronous paths; and test a mixed prompt group where an infrastructure zero would otherwise change valid samples' advantages.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/rollouts.py#L266-L278">legacy field lookup</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/payload.py#L80-L93">asynchronous all-ones mask</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/algorithms/grpo.py#L3188-L3208">group statistics</a></p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Practical consequence</h2>
+      <p>Keep PR #2611 as the field-placement foundation, but do not present it as the complete caller interface. Before merge, fix the reproduced producer polarity and metric denominator, migrate every known complete-result producer, and narrow <code>mask_sample</code> to complete results. Update NeMo RL to consume the top-level field in both rollout paths and choose a group-statistics policy. Then complete issue #2750 with <code>run_outcomes()</code> and <code>RolloutFailureRecord</code>. That gives evaluation and training callers one stable boundary without turning missing infrastructure outcomes into ordinary zero-reward samples.</p>
+    </section>
+
+    <footer>
+      <p>Public sources only. Claims are pinned to the reviewed PR head and design snapshot. No private runs, infrastructure, tickets, or documents are included.</p>
+    </footer>
+  </main>
+  <script>
+    (() => {
+      const button = document.querySelector(".theme-toggle");
+      const update = () => {
+        button.textContent = document.documentElement.dataset.theme === "light"
+          ? "Use dark theme"
+          : "Use light theme";
+      };
+      update();
+      button.addEventListener("click", () => {
+        const light = document.documentElement.dataset.theme === "light";
+        if (light) {
+          delete document.documentElement.dataset.theme;
+        } else {
+          document.documentElement.dataset.theme = "light";
+        }
+        try {
+          localStorage.setItem("engineering-notes-theme", light ? "dark" : "light");
+        } catch {}
+        update();
+      });
+    })();
+  </script>
+</body>
+</html>
