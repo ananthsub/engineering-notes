@@ -228,6 +228,7 @@
     <nav class="toc" aria-label="Page sections">
       <a href="#example">Three concrete outcomes</a>
       <a href="#change">What the PR adds</a>
+      <a href="#wording">Contract wording</a>
       <a href="#blockers">Blocking defects</a>
       <a href="#contradiction">Reproduced contradiction</a>
       <a href="#interface">Uniform interface</a>
@@ -243,12 +244,12 @@
       <p>The field names become clear only after the caller can see the object that actually exists.</p>
       <div class="grid-3">
         <article class="card ok">
-          <span class="label">A · policy scored zero</span>
+          <span class="label">A · evaluated system scored zero</span>
           <pre><code>{
   "reward": 0.0,
   "mask_sample": false
 }</code></pre>
-          <p>The verifier completed normally. Zero is policy evidence and remains scoreable and trainable.</p>
+          <p>The verifier completed normally. Zero is valid evidence about the evaluated system and remains part of evaluation and any other downstream use.</p>
         </article>
         <article class="card alt">
           <span class="label">B · complete but unusable</span>
@@ -333,6 +334,43 @@
           <text x="240" y="228" text-anchor="middle" class="dim">aborts</text>
         </svg>
       </div>
+    </section>
+
+    <section id="wording">
+      <h2>The field description is too long, training-specific, and hard to scan</h2>
+      <p>The current text is an ordinary comment, not a docstring, and it will not appear as the field's description in Pydantic's generated schema. It is formatted as two dense prose blocks above two small fields. The double-backtick markup around <code>reward</code> also has no useful effect in a Python comment.</p>
+      <div class="grid-2">
+        <article class="card warn">
+          <span class="label">Current framing</span>
+          <h3>It turns a data contract into training advice</h3>
+          <p>Phrases such as “Gym states the fact and stops there” and “frameworks legitimately differ” sound conversational but do not sharpen the type's meaning. The list of loss masking, episode resampling, group statistics, and group dropping overfits the field to RL training. Gym itself needs the field to compute evaluation scores and coverage, and other callers may persist, inspect, retry, or filter the result.</p>
+          <p>The phrase “this reward is the policy's” is also too narrow. The evaluated system may be an agent, model, workflow, or external harness.</p>
+        </article>
+        <article class="card ok">
+          <span class="label">Recommended framing</span>
+          <h3>Describe the result, not every possible consumer action</h3>
+          <p>State the completeness invariant, explain what the boolean means, and preserve legitimate zero rewards. Put operational guidance in user documentation rather than the schema field description.</p>
+          <pre><code>mask_sample: bool = Field(
+    default=False,
+    description=(
+        "Whether this completed sample should be excluded "
+        "from evaluation scores and other downstream quality "
+        "calculations because its reward is not a valid "
+        "measurement of the evaluated system's behavior."
+    ),
+)
+
+failure_reason: Optional[str] = Field(
+    default=None,
+    description=(
+        "Human-readable explanation of a failure or "
+        "degradation reported for this result."
+    ),
+)</code></pre>
+        </article>
+      </div>
+      <p>This wording is caller-neutral: Gym evaluation, NeMo RL, and direct library users all receive the same fact. Their handling belongs in the caller contract. If <code>Field(description=...)</code> is not desired, the same two sentences still work as short field comments.</p>
+      <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/base_resources_server.py#L96-L114">current field comments</a></p>
     </section>
 
     <section id="blockers">
@@ -658,27 +696,32 @@ got multiple values for keyword argument 'mask_sample'</code></pre>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/base_resources_server.py#L96-L114">PR wording</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/osworld_agent/app.py#L993-L1027">existing placeholder path</a> · <a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L16-L21">design rule</a></p>
       </div>
       <div class="question">
-        <h3>2. Will every known producer move to the top level in the same compatibility window?</h3>
+        <h3>2. Will the field description be caller-neutral and schema-visible?</h3>
+        <p>The current comment reads like guidance written specifically for an RL trainer and does not become Pydantic schema documentation. Replace it with a short <code>Field(description=...)</code> that defines validity for evaluation scores and other downstream quality calculations. Move examples of retry, loss masking, resampling, and group handling to the caller documentation.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/base_resources_server.py#L96-L114">current wording</a></p>
+      </div>
+      <div class="question">
+        <h3>3. Will every known producer move to the top level in the same compatibility window?</h3>
         <p>The conversational-tool-use failure path now serializes opposite top-level and nested values. Its resources-server sibling also keeps its masking decision only under <code>instance_config</code>. AnySWE's attempted migration raises because the key is supplied both explicitly and through <code>metrics.model_dump()</code>. Fix AnySWE, migrate both conversational-tool-use paths, and add regression tests that assert complete serialized dictionaries. Search all existing <code>mask_sample</code> and inverse <code>valid_sample</code> producers before documenting “prefer the top level.”</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/conversational_tool_use/simulation/app.py#L785-L798">agent failure payload</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/resources_servers/conversational_tool_use_simulation/app.py#L1367-L1380">resources verifier payload</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/responses_api_agents/conversational_tool_use/simulation/tests/test_app.py#L1061-L1075">test misses top-level assertion</a></p>
       </div>
       <div class="question">
-        <h3>3. Which rows define the “unmasked reward” denominator?</h3>
+        <h3>4. Which rows define the “unmasked reward” denominator?</h3>
         <p>The current progress counter includes every result whose top-level mask flag is false, including returned <code>_ng_failure_class</code> sidecar rows and <code>_ng_no_persist</code> rows. Final aggregation excludes those routing classes but still includes complete rows with <code>mask_sample=true</code>. Neither path measures the score after infrastructure failures are removed. Define the set first—normally persisted complete, unmasked results—and test the same mixed batch through progress metrics and final aggregation.</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1150-L1171">storage classes</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/rollout_collection.py#L1192-L1237">metric denominator</a></p>
       </div>
       <div class="question">
-        <h3>4. Is <code>mask_sample</code> a control field or a generic score?</h3>
+        <h3>5. Is <code>mask_sample</code> a control field or a generic score?</h3>
         <p>The default serializer plus generic boolean aggregation adds five metric series even when nothing is masked. Either filter contract fields from generic reward profiling and publish intentional coverage metrics, or document the expanded metric schema and update the compatibility claim. A regression should cover an unmodified typed environment with all defaults.</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/nemo_gym/reward_profile.py#L245-L260">generic conversion</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f55c8a0e6f086cbb6b44c8d3fa8932b526af5ab1/tests/unit_tests/test_base_resources_server.py#L75-L115">current field tests</a></p>
       </div>
       <div class="question">
-        <h3>5. Where is the caller contract documented?</h3>
+        <h3>6. Where is the caller contract documented?</h3>
         <p>The implementation comment cannot carry the full policy boundary. The design's completion criterion requires one documented contract for environment authors, managed evaluation, direct callers, and training adapters. The page should show the two outcome variants, the three complete-result fields, and which layer owns retry, persistence, masking, replacement, group statistics, and coverage.</p>
         <p class="source"><a href="https://github.com/ananthsub/Gym/blob/e156f4fcb8571b101400f52a3aa42f4b221a75bc/investigations/nemo-gym-error-handling-future.md#L227-L229">component migration completion criterion</a></p>
       </div>
       <div class="question">
-        <h3>6. Which NeMo RL policy is part of the rollout contract?</h3>
+        <h3>7. Which NeMo RL policy is part of the rollout contract?</h3>
         <p>Changing the field lookup fixes transport but not GRPO semantics. Today the flagged reward participates in baseline and standard-deviation calculation before its loss is zeroed, and the asynchronous replay payload ignores the flag. Choose replacement, exclusion, or group dropping; implement the same policy in synchronous and asynchronous paths; and test a mixed prompt group where an infrastructure zero would otherwise change valid samples' advantages.</p>
         <p class="source"><a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/rollouts.py#L266-L278">legacy field lookup</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/experience/payload.py#L80-L93">asynchronous all-ones mask</a> · <a href="https://github.com/NVIDIA-NeMo/RL/blob/a43d71b31850e4420fbf48a7da74088e84116f25/nemo_rl/algorithms/grpo.py#L3188-L3208">group statistics</a></p>
       </div>
