@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Are Gym #2180 and #2181 safe to merge?</title>
+<script>
+  (() => {
+    try {
+      if (localStorage.getItem("engineering-notes-theme") === "light") {
+        document.documentElement.dataset.theme = "light";
+      }
+    } catch {}
+  })();
+</script>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --dim: #8b949e;
+  --accent: #58a6ff;
+  --diagram-ok: #5bc0eb;
+  --diagram-problem: #ffb000;
+  --diagram-alt: #d98bc3;
+  --diagram-neutral: #c7ced8;
+}
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --surface: #f6f8fa;
+  --border: #d0d7de;
+  --text: #1f2328;
+  --dim: #59636e;
+  --accent: #0969da;
+  --diagram-ok: #005a8d;
+  --diagram-problem: #9a4d00;
+  --diagram-alt: #7a3e6d;
+  --diagram-neutral: #4b5563;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  margin: 0;
+  padding: 0 16px 80px;
+}
+.wrap { max-width: 980px; margin: 0 auto; }
+h1 { font-size: 1.7rem; line-height: 1.25; margin: 2.2rem 0 0.6rem; }
+h2 { font-size: 1.25rem; margin: 2.6rem 0 0.7rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+h3 { font-size: 1.02rem; margin: 1.6rem 0 0.5rem; }
+p { margin: 0.7rem 0; }
+a { color: var(--accent); text-decoration: underline; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86em; }
+code { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 0.1em 0.35em; }
+pre {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 0.8rem 1rem; overflow-x: auto; line-height: 1.5;
+}
+pre code { background: none; border: none; padding: 0; }
+.tablewrap { overflow-x: auto; margin: 0.9rem 0 1.3rem; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+th {
+  text-align: left; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--dim); background: var(--surface); padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+td { padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+.prov {
+  font-size: 0.85rem; color: var(--dim); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; padding: 0.7rem 1rem; margin: 1rem 0;
+}
+.prov code { background: var(--bg); }
+.verdict {
+  border: 1px solid var(--border); border-left: 4px solid var(--diagram-ok);
+  background: var(--surface); border-radius: 0 8px 8px 0; padding: 0.9rem 1.1rem; margin: 1.2rem 0;
+}
+.verdict.warn { border-left-color: var(--diagram-problem); }
+.badge {
+  display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.05em;
+  text-transform: uppercase; border-radius: 999px; padding: 0.12rem 0.55rem; border: 1px solid var(--border);
+}
+.badge.fix { color: var(--diagram-problem); border-color: var(--diagram-problem); }
+.badge.ok { color: var(--diagram-ok); border-color: var(--diagram-ok); }
+.badge.alt { color: var(--diagram-alt); border-color: var(--diagram-alt); }
+figure { margin: 1.4rem 0; }
+figure svg { display: block; max-width: 100%; height: auto; }
+figcaption { font-size: 0.84rem; color: var(--dim); margin-top: 0.5rem; line-height: 1.5; }
+.toc { font-size: 0.9rem; columns: 2; column-gap: 2rem; }
+@media (max-width: 640px) { .toc { columns: 1; } }
+.toc a { display: block; margin: 0.2rem 0; }
+#themeToggle {
+  position: fixed; top: 10px; right: 10px; z-index: 10;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: 999px; padding: 0.35rem 0.8rem; font-size: 0.8rem; cursor: pointer;
+}
+ul, ol { padding-left: 1.4rem; }
+li { margin: 0.35rem 0; }
+.small { font-size: 0.85rem; color: var(--dim); }
+.svg-label { font: 12px -apple-system, "Segoe UI", sans-serif; fill: var(--text); }
+.svg-dim { font: 11px -apple-system, "Segoe UI", sans-serif; fill: var(--dim); }
+.svg-ok-t { font: 12px -apple-system, "Segoe UI", sans-serif; fill: var(--diagram-ok); }
+.svg-prob-t { font: 12px -apple-system, "Segoe UI", sans-serif; fill: var(--diagram-problem); }
+.svg-alt-t { font: 12px -apple-system, "Segoe UI", sans-serif; fill: var(--diagram-alt); }
+.svg-mono { font: 11px ui-monospace, Menlo, monospace; fill: var(--text); }
+</style>
+</head>
+<body>
+<button id="themeToggle" aria-label="Toggle color theme">Light</button>
+<script>
+  (() => {
+    const btn = document.getElementById("themeToggle");
+    const root = document.documentElement;
+    const setLabel = () => { btn.textContent = root.dataset.theme === "light" ? "Dark" : "Light"; };
+    setLabel();
+    btn.addEventListener("click", () => {
+      const light = root.dataset.theme === "light";
+      if (light) { delete root.dataset.theme; } else { root.dataset.theme = "light"; }
+      try { localStorage.setItem("engineering-notes-theme", light ? "dark" : "light"); } catch {}
+      setLabel();
+    });
+  })();
+</script>
+<div class="wrap">
+
+<h1>Are Gym #2180 and #2181 safe to merge?</h1>
+<div class="prov">
+  Merge-safety review · analyzed 2026-08-28 · repo <a href="https://github.com/NVIDIA-NeMo/Gym">NVIDIA-NeMo/Gym</a><br>
+  <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2180">#2180</a> resolve each call's parent at request time · head <code>c703db40b65fc619092cf2a5d6537cb9c591fb65</code> · base <code>main</code> at <code>9eeb7f02b82d98630f9a90c7d4597d233c2f047b</code><br>
+  <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2181">#2181</a> supply the previous call's exact training tokens · head <code>f8b86c090a1548d4d2b8d8fdc5f656cbb12bd58e</code> · base = #2180's branch<br>
+  Related: <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2774">#2774</a> <code>65ea5c3e2…</code> · <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2775">#2775</a> (draft) <code>b96d415e6…</code> · <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2776">#2776</a> (draft) <code>577ded849…</code> · <a href="https://github.com/NVIDIA-NeMo/RL/pull/3837">RL #3837</a> (draft) <code>9c40f48cd…</code>
+</div>
+
+<div class="verdict">
+  <strong>Short answer.</strong> <span class="badge ok">#2180: safe with fixes</span> — no token-corruption path; every doubtful case fails closed to a masked sample; multi-worker mechanics and bounds hold; nothing from the previously validated revision was dropped. Three items need a maintainer decision before merge (two confirmed delivery regressions and a duplicated hash module).
+  <br><br>
+  <span class="badge fix">#2181: one blocking fix first</span> — the opt-in <code>delta_records</code> feature writes suffix-only prompts under <code>schema_version&nbsp;1</code>, and today's <code>main</code> reader accepts those records and trains on the suffix as if it were the full prompt, <em>unmasked</em>. Reproduced empirically. The fix is two constants. Prefix supply itself — the PR's core — is sound and fail-hard.
+  <br><br>
+  Both PRs merge into current <code>main</code> (<code>f7bca4ddc</code>) with <strong>zero conflicts</strong> (verified with <code>git merge-tree</code>). The TransferQueue stack #2774–#2776 is a re-cut of an older revision of this same series and needs a substantial rebase after these merge; RL #3837 pins a fixed Gym submodule SHA and cannot break.
+</div>
+
+<figure>
+<svg viewBox="0 0 940 330" role="img" aria-label="Topology: the review scope is PRs 2180 and 2181 stacked on main; a related TransferQueue lane 2774 to 2776 re-cuts the same series from a pre-rebase revision; NeMo-RL 3837 pins a fixed Gym submodule SHA from the 2278 line.">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--diagram-neutral)"/>
+    </marker>
+  </defs>
+  <text x="20" y="28" class="svg-dim">LANE A · review scope (verified dependency chain)</text>
+  <rect x="20" y="40" width="200" height="52" rx="6" fill="var(--surface)" stroke="var(--diagram-neutral)"/>
+  <text x="120" y="61" text-anchor="middle" class="svg-label">main @ 9eeb7f02b</text>
+  <text x="120" y="78" text-anchor="middle" class="svg-dim">has #2675 + #2676 (terminal attribution)</text>
+  <rect x="280" y="40" width="200" height="52" rx="6" fill="var(--surface)" stroke="var(--diagram-ok)" stroke-width="2"/>
+  <text x="380" y="61" text-anchor="middle" class="svg-ok-t">#2180 · open · c703db40</text>
+  <text x="380" y="78" text-anchor="middle" class="svg-dim">request-time parent resolution</text>
+  <rect x="540" y="40" width="200" height="52" rx="6" fill="var(--surface)" stroke="var(--diagram-ok)" stroke-width="2"/>
+  <text x="640" y="61" text-anchor="middle" class="svg-ok-t">#2181 · open · f8b86c09</text>
+  <text x="640" y="78" text-anchor="middle" class="svg-dim">verified prefix supply + deltas</text>
+  <line x1="220" y1="66" x2="275" y2="66" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="247" y="58" text-anchor="middle" class="svg-dim">base</text>
+  <line x1="480" y1="66" x2="535" y2="66" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="507" y="58" text-anchor="middle" class="svg-dim">base</text>
+  <text x="770" y="58" class="svg-ok-t">◀ you are here:</text>
+  <text x="770" y="74" class="svg-dim">merge decision</text>
+
+  <text x="20" y="140" class="svg-dim">LANE B · related: TransferQueue staging stack (re-cut of an OLDER revision of lane A)</text>
+  <rect x="20" y="152" width="200" height="52" rx="6" fill="var(--surface)" stroke="var(--diagram-alt)"/>
+  <text x="120" y="173" text-anchor="middle" class="svg-alt-t">#2774 · open · 65ea5c3e</text>
+  <text x="120" y="190" text-anchor="middle" class="svg-dim">staging contract + hooks</text>
+  <rect x="280" y="152" width="200" height="52" rx="6" fill="var(--surface)" stroke="var(--diagram-alt)" stroke-dasharray="6 3"/>
+  <text x="380" y="173" text-anchor="middle" class="svg-alt-t">#2775 · draft · b96d415e</text>
+  <text x="380" y="190" text-anchor="middle" class="svg-dim">capture ledger custody</text>
+  <rect x="540" y="152" width="200" height="52" rx="6" fill="var(--surface)" stroke="var(--diagram-alt)" stroke-dasharray="6 3"/>
+  <text x="640" y="173" text-anchor="middle" class="svg-alt-t">#2776 · draft · 577ded84</text>
+  <text x="640" y="190" text-anchor="middle" class="svg-dim">witness terminal attribution</text>
+  <line x1="220" y1="178" x2="275" y2="178" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr)"/>
+  <line x1="480" y1="178" x2="535" y2="178" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr)"/>
+  <path d="M 380 96 L 380 118 L 120 118 L 120 148" fill="none" stroke="var(--diagram-alt)" stroke-width="1.4" stroke-dasharray="4 4"/>
+  <text x="252" y="112" text-anchor="middle" class="svg-alt-t">overlaps: carries 23 re-cut commits of lane A (pre-rebase)</text>
+
+  <text x="20" y="252" class="svg-dim">LANE C · consumer</text>
+  <rect x="20" y="264" width="230" height="52" rx="6" fill="var(--surface)" stroke="var(--diagram-neutral)" stroke-dasharray="6 3"/>
+  <text x="135" y="285" text-anchor="middle" class="svg-label">RL #3837 · draft · 9c40f48c</text>
+  <text x="135" y="302" text-anchor="middle" class="svg-dim">TQ token sink in vLLM worker</text>
+  <path d="M 250 290 L 640 290 L 640 208" fill="none" stroke="var(--diagram-neutral)" stroke-width="1.4" stroke-dasharray="4 4"/>
+  <text x="452" y="282" text-anchor="middle" class="svg-dim">pins fixed Gym submodule SHA d9ad9d2e (older #2278-line cut; staging surface wire-identical to #2776)</text>
+
+  <rect x="770" y="152" width="150" height="112" rx="6" fill="none" stroke="var(--border)"/>
+  <text x="782" y="172" class="svg-dim">legend</text>
+  <line x1="782" y1="188" x2="812" y2="188" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="818" y="192" class="svg-dim">dependency</text>
+  <line x1="782" y1="210" x2="812" y2="210" stroke="var(--diagram-alt)" stroke-width="1.4" stroke-dasharray="4 4"/>
+  <text x="818" y="214" class="svg-dim">related edge</text>
+  <rect x="782" y="226" width="30" height="14" rx="3" fill="none" stroke="var(--diagram-alt)" stroke-dasharray="6 3"/>
+  <text x="818" y="237" class="svg-dim">draft PR</text>
+  <rect x="782" y="246" width="30" height="14" rx="3" fill="none" stroke="var(--diagram-ok)" stroke-width="2"/>
+  <text x="818" y="257" class="svg-dim">review scope</text>
+</svg>
+<figcaption>Fig. 1 — Three lanes. Lane A is the review scope: #2180 stacks on a <code>main</code> that already contains the merged terminal-attribution PRs (#2675/#2676); #2181 stacks on #2180. Lane B declares #2349's branch as its base but its content was cut from a pre-rebase revision of lane A: 23 carried commits (11 patch-identical, 12 drifted), an old schema-version ladder, and no knowledge of the terminal-attribution code merged underneath it. Lane C pins an immutable Gym SHA, so lane A merging cannot break it.</figcaption>
+</figure>
+
+<h2 id="toc">Contents</h2>
+<nav class="toc">
+  <a href="#what">What the two PRs do</a>
+  <a href="#path">The per-call path after both merge</a>
+  <a href="#blocking">The blocking finding (#2181)</a>
+  <a href="#regressions">Confirmed yield regressions (#2180)</a>
+  <a href="#perf">Performance on the critical path</a>
+  <a href="#hashing">Hashing assumptions for parent identity</a>
+  <a href="#findings">All findings by severity</a>
+  <a href="#evidence">Evidence and how to reproduce</a>
+  <a href="#ledger">Behavior ledger</a>
+  <a href="#related">The TQ stack and RL #3837</a>
+  <a href="#order">Recommended merge order</a>
+</nav>
+
+<h2 id="what">What the two PRs do</h2>
+
+<h3>#2180 — parent identity becomes a request-time decision</h3>
+<p>Before this PR, the trajectory builder inferred which recorded call a continuation extends by token-prefix matching at build time. #2180 moves that decision to request time: when a tagged request arrives at the model server, <a href="https://github.com/NVIDIA-NeMo/Gym/blob/c703db40b65fc619092cf2a5d6537cb9c591fb65/nemo_gym/token_id_capture/sink.py#L140">resolve_parent</a> fingerprints the model-authored turns of the request and verifies the candidate parent's conversation-context digest. The outcome is a tri-state stamped onto the record: <code>ROOT</code> (no model-authored turn), <code>RESOLVED</code> (exactly one verified parent), or <code>UNRESOLVED</code> with a reason (<code>no_match</code>, <code>ambiguous</code>, <code>resolver_unavailable</code>, <code>lookup_error</code>). The builder then <a href="https://github.com/NVIDIA-NeMo/Gym/blob/c703db40b65fc619092cf2a5d6537cb9c591fb65/nemo_gym/token_id_capture/builder.py#L188">re-verifies every claimed link</a> by hashing the child's prompt prefix against the parent digest, so a wrong <code>RESOLVED</code> becomes <code>parent_digest_mismatch</code> → masked, never a silent join. Multi-worker deployments share lineage through the capture JSONL itself under file locks; a startup gate <a href="https://github.com/NVIDIA-NeMo/Gym/blob/c703db40b65fc619092cf2a5d6537cb9c591fb65/nemo_gym/base_responses_api_model.py#L1427">refuses <code>num_workers &gt; 1</code></a> without a process-shared store.</p>
+<p><strong>Assumes from below:</strong> the merged terminal-attribution join (#2675/#2676) — this PR extends the builder to take a <code>terminal_call_id</code> anchor. <strong>Changed by above:</strong> #2181 consumes the resolution to supply prefixes; in #2180 alone, <code>parent_tokens</code> is stamped but unconsumed.</p>
+
+<h3>#2181 — the engine receives the parent's exact tokens, with proof</h3>
+<p>For a <code>RESOLVED</code> continuation, the model server attaches <code>required_prefix_token_ids</code> — the parent's exact cumulative token ids — as the <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f8b86c090a1548d4d2b8d8fdc5f656cbb12bd58e/responses_api_models/vllm_model/app.py#L669">last preprocessing step</a> before dispatch, and marks <code>prefix_requested</code>. After generation, <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f8b86c090a1548d4d2b8d8fdc5f656cbb12bd58e/responses_api_models/vllm_model/app.py#L700">_verify_generation_prefix</a> demands generation-time proof: the served prompt token ids must extend the requested prefix exactly, or the model call fails with <code>RuntimeError</code> — a hard failure, unlike capture errors, which never fail a call. Unsupported paths (completions API, native responses, missing token-id return) are rejected at config-validation time. Separately, an opt-in <code>delta_records</code> mode stores only the prompt suffix beyond the parent's cumulative tokens; the reader <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f8b86c090a1548d4d2b8d8fdc5f656cbb12bd58e/nemo_gym/token_id_capture/builder.py#L201">rebuilds full prompts iteratively</a> (cycle guard, 10,000-step depth bound, digest re-verification; broken chains are excluded and masked).</p>
+
+<h2 id="path">The per-call path after both merge</h2>
+
+<figure>
+<svg viewBox="0 0 940 250" role="img" aria-label="Per-call pipeline: resolve parent, register intent, apply prefix supply, dispatch to the engine, verify the generation-time prefix proof, then stamp lineage and commit the record with fsync.">
+  <defs>
+    <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--diagram-neutral)"/>
+    </marker>
+  </defs>
+  <rect x="20" y="30" width="130" height="58" rx="6" fill="var(--surface)" stroke="var(--diagram-ok)" stroke-width="2"/>
+  <text x="85" y="52" text-anchor="middle" class="svg-mono">resolve_parent()</text>
+  <text x="85" y="70" text-anchor="middle" class="svg-dim">ROOT / RESOLVED /</text>
+  <text x="85" y="83" text-anchor="middle" class="svg-dim">UNRESOLVED</text>
+  <rect x="185" y="30" width="130" height="58" rx="6" fill="var(--surface)" stroke="var(--diagram-neutral)"/>
+  <text x="250" y="56" text-anchor="middle" class="svg-mono">register_call_</text>
+  <text x="250" y="70" text-anchor="middle" class="svg-mono">intent()</text>
+  <rect x="350" y="30" width="150" height="58" rx="6" fill="var(--surface)" stroke="var(--diagram-ok)" stroke-width="2"/>
+  <text x="425" y="52" text-anchor="middle" class="svg-mono">_apply_prefix_supply</text>
+  <text x="425" y="70" text-anchor="middle" class="svg-dim">required_prefix_token_ids</text>
+  <text x="425" y="83" text-anchor="middle" class="svg-dim">only if RESOLVED · last step</text>
+  <rect x="535" y="30" width="115" height="58" rx="6" fill="var(--surface)" stroke="var(--diagram-neutral)"/>
+  <text x="592" y="56" text-anchor="middle" class="svg-label">engine</text>
+  <text x="592" y="72" text-anchor="middle" class="svg-dim">generation</text>
+  <rect x="685" y="30" width="150" height="58" rx="6" fill="var(--surface)" stroke="var(--diagram-ok)" stroke-width="2"/>
+  <text x="760" y="52" text-anchor="middle" class="svg-mono">_verify_generation_</text>
+  <text x="760" y="66" text-anchor="middle" class="svg-mono">prefix()</text>
+  <text x="760" y="82" text-anchor="middle" class="svg-dim">hard fail on mismatch</text>
+  <line x1="150" y1="59" x2="180" y2="59" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr2)"/>
+  <line x1="315" y1="59" x2="345" y2="59" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr2)"/>
+  <line x1="500" y1="59" x2="530" y2="59" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr2)"/>
+  <line x1="650" y1="59" x2="680" y2="59" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr2)"/>
+  <path d="M 760 88 L 760 140 L 480 140" fill="none" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr2)"/>
+  <rect x="320" y="118" width="155" height="46" rx="6" fill="var(--surface)" stroke="var(--diagram-ok)" stroke-width="2"/>
+  <text x="397" y="137" text-anchor="middle" class="svg-mono">stamp + commit_entry</text>
+  <text x="397" y="153" text-anchor="middle" class="svg-dim">fsync before return</text>
+  <rect x="60" y="118" width="200" height="46" rx="6" fill="var(--surface)" stroke="var(--diagram-neutral)"/>
+  <text x="160" y="137" text-anchor="middle" class="svg-label">capture JSONL (shared lineage)</text>
+  <text x="160" y="153" text-anchor="middle" class="svg-dim">flock · any worker resolves next call</text>
+  <line x1="315" y1="141" x2="265" y2="141" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr2)"/>
+  <path d="M 100 118 L 100 100 L 85 100 L 85 92" fill="none" stroke="var(--diagram-neutral)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arr2)"/>
+  <text x="130" y="102" class="svg-dim">next call resolves against committed rows</text>
+  <text x="20" y="215" class="svg-dim">Record fields stamped per call: parent_call_id · cum_len · digest · parent_resolution(+reason) · continuation fingerprint/digest ·</text>
+  <text x="20" y="232" class="svg-dim">prefix_requested · prefix_supplied · prompt_is_delta (opt-in) — plus response_id from merged #2675, used by the terminal join.</text>
+</svg>
+<figcaption>Fig. 2 — One model call through the merged stack. #2180 owns the left decision (blue: resolution before dispatch) and the durable commit; #2181 owns the prefix hand-off and the generation-time proof. The commit is fsynced before the response returns, which is what lets a harness's next call land on any worker and still resolve.</figcaption>
+</figure>
+
+<h2 id="blocking">The blocking finding: delta records are mis-read by today's <code>main</code></h2>
+
+<p>The re-cut of #2181 collapsed its schema constants to <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f8b86c090a1548d4d2b8d8fdc5f656cbb12bd58e/nemo_gym/token_id_capture/records.py#L45"><code>TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 1</code>, <code>MIN = 1</code></a> (the previously validated revision wrote version 5 with a floor of 3). <code>prompt_is_delta</code> is therefore a new field on a version-1 record — and <code>main</code>'s <code>TokenEntry</code> uses <code>extra="allow"</code>, so <code>main</code>'s reader accepts the record and treats the stored <em>suffix</em> as the full prompt. <code>main</code> has no lineage fields to warn it: prefix inference roots the fragment, the terminal join attributes it (it is the last call, with a corroborated <code>response_id</code>), and the consumer delivers it unmasked.</p>
+
+<figure>
+<svg viewBox="0 0 940 330" role="img" aria-label="A three-call rollout written with delta records is read two ways: the PR reader rebuilds the full prompt and digest-verifies it; the main reader treats the suffix as a full prompt and delivers it unmasked.">
+  <defs>
+    <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--diagram-neutral)"/>
+    </marker>
+  </defs>
+  <text x="20" y="26" class="svg-dim">Written by #2181 with delta_records: true — all records schema_version = 1</text>
+  <rect x="20" y="38" width="270" height="100" rx="6" fill="var(--surface)" stroke="var(--diagram-neutral)"/>
+  <text x="34" y="60" class="svg-mono">c1  prompt=[1,2,3]      gen=[4,5]</text>
+  <text x="34" y="82" class="svg-mono">c2  prompt=[6,7] Δ      gen=[8]</text>
+  <text x="34" y="104" class="svg-mono">c3  prompt=[9] Δ        gen=[10,11]</text>
+  <text x="34" y="126" class="svg-dim">Δ = suffix beyond parent cumulative</text>
+
+  <line x1="290" y1="70" x2="360" y2="70" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr3)"/>
+  <line x1="290" y1="120" x2="360" y2="230" stroke="var(--diagram-neutral)" stroke-width="1.6" marker-end="url(#arr3)"/>
+
+  <text x="370" y="48" class="svg-ok-t">Read by the #2181 reader</text>
+  <rect x="370" y="58" width="540" height="86" rx="6" fill="var(--surface)" stroke="var(--diagram-ok)" stroke-width="2"/>
+  <text x="384" y="80" class="svg-mono">materialize c3 → [1,2,3,4,5,6,7,8,9]   (iterative, ≤10k depth)</text>
+  <text x="384" y="102" class="svg-mono">compute_digest(full) == recorded digest  ✓</text>
+  <text x="384" y="124" class="svg-ok-t">delivered correctly · broken chain ⇒ masked, never guessed</text>
+
+  <text x="370" y="216" class="svg-prob-t">⚠ Read by today's main (9eeb7f02b) — reproduced</text>
+  <rect x="370" y="226" width="540" height="86" rx="6" fill="var(--surface)" stroke="var(--diagram-problem)" stroke-width="2" stroke-dasharray="7 3"/>
+  <text x="384" y="248" class="svg-mono">schema_version 1 ≤ ceiling 1 → accepted; prompt_is_delta ignored</text>
+  <text x="384" y="270" class="svg-mono">c3 delivered: prompt=[9] gen=[10,11]   mask_sample: False</text>
+  <text x="384" y="292" class="svg-prob-t">truncated prompt trained on, silently — terminal join corroborates it</text>
+</svg>
+<figcaption>Fig. 3 — The one silent-corruption path in the review. It requires <code>delta_records: true</code> (default <code>false</code>, no shipped config sets it) <em>and</em> a pre-#2181 reader over the same capture directory — a rolling deploy, or a record outliving a deployment, which is exactly the case the schema comment claims to defend. The fix is two constants: stamp delta entries <code>schema_version = 2</code> and set the reader ceiling to 2. <code>main</code>'s existing <code>_refuse_a_newer_record</code> validator then rejects them loudly.</figcaption>
+</figure>
+
+<h2 id="regressions">Confirmed yield regressions in #2180 — safe direction, but decide them explicitly</h2>
+
+<p>#2180 changes the mask policy: a terminal path containing an <code>unresolved_boundary</code> is now "broken" (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/c703db40b65fc619092cf2a5d6537cb9c591fb65/nemo_gym/token_id_capture/builder.py#L381">builder.py:381</a>), where <code>main</code> only checked quarantine — terminal attribution can no longer rescue unresolved ancestry. Running identical inputs through both revisions:</p>
+
+<div class="tablewrap"><table>
+  <tr><th>Scenario</th><th>main @ 9eeb7f02b</th><th>#2180 @ c703db40b</th></tr>
+  <tr><td>Legacy (unstamped) single call, corroborated <code>response_id</code> terminal</td><td>delivered, <code>mask=False</code></td><td><strong>masked</strong> (<code>missing_resolution</code>)</td></tr>
+  <tr><td>Legacy 2-call chain with attribution</td><td>delivered</td><td><strong>masked</strong></td></tr>
+  <tr><td>Context-compaction rollout (UNRESOLVED node is the terminal)</td><td>delivered</td><td><strong>masked</strong></td></tr>
+</table></div>
+
+<ul>
+  <li><strong>Migration:</strong> every record written by current <code>main</code> — or by an external framework sink built against <code>main</code>'s contract — lacks <code>parent_resolution</code>, so after upgrade those rollouts mask 100%, with no schema-version signal (both sides write version 1). The mask-fraction kill switch defaults off (<code>max_mask_fraction: None</code>), so nothing aborts; the run silently yields zero trainable samples from old records.</li>
+  <li><strong>Compaction:</strong> the in-tree exact-prefix compaction flow (<code>vllm_model_with_compaction</code> / <code>simple_agent_with_compaction</code>, #2616) rewrites the message list, resolves UNRESOLVED, and now masks even though its token prefix digest-verifies — the PR defeats a feature on <code>main</code> whose entire point is a token-exact chain across compaction. Options: permit a digest-verified token-prefix join across an UNRESOLVED boundary, or add an explicit-parent declaration from the compaction agent.</li>
+</ul>
+<p>Both regressions flip samples <code>main</code> delivers today into masked samples — the safe direction (never wrong tokens), which is why they are should-fix rather than blocking. But they are silent at the sample level, so they need an explicit decision, not an accidental merge.</p>
+
+<h2 id="perf">Performance on the critical path</h2>
+<p>Parent resolution now runs once per model call, sequential with generation. It executes off the event loop (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/c703db40b65fc619092cf2a5d6537cb9c591fb65/nemo_gym/token_id_capture/lineage.py#L638"><code>resolve()</code> wraps <code>_resolve</code> in <code>asyncio.to_thread</code></a>), and untagged traffic pays nothing. A benchmark driving the real code paths — <code>TokenCaptureStore.append</code> → <code>FileLineageStore._resolve</code>, with <code>stamp_continuation</code>/<code>stamp_lineage</code> exactly as the sink performs them — over a 40-turn rollout (system + user + per-turn assistant tool call, tool result; two size profiles), on local SSD:</p>
+
+<div class="tablewrap"><table>
+  <tr><th>Configuration</th><th>Typical: 14k tok cumulative</th><th>Long: 80k tok cumulative</th></tr>
+  <tr><td>Hashing at final turn (fingerprint + context digest)</td><td>~0.6 ms combined</td><td>~0.6 ms (scales with conversation bytes, not tokens)</td></tr>
+  <tr><td>File store, warm cache (same worker), per resolve</td><td>p50 1.4 ms · p95 2.4 ms</td><td>p50 6.1 ms · p95 11.6 ms</td></tr>
+  <tr><td>File store, cold cache (fresh worker each call — worst case), per resolve</td><td>p50 5.4 ms · p95 16.4 ms</td><td>p50 25.7 ms · <strong>p95 81.9 ms</strong></td></tr>
+  <tr><td>File store, delta records (#2181), warm</td><td>p50 2.5 ms · p95 5.2 ms</td><td>p50 7.6 ms · p95 18.3 ms</td></tr>
+  <tr><td>External backend (TQ shape), compute only</td><td>p50 0.5 ms</td><td>p50 1.7 ms</td></tr>
+  <tr><td>External backend, <strong>ops per resolve</strong></td><td colspan="2"><strong>1 tail-fetch + 1 parent-load — warm and cold alike</strong>; with 1 ms injected per-op latency, p50 3.1 / 4.3 ms (≈ compute + 2×RTT)</td></tr>
+  <tr><td>#2181 prefix supply (copy + generation-proof compare)</td><td>0.13 ms</td><td>0.64 ms</td></tr>
+</table></div>
+
+<p><strong>Reading.</strong> Against per-call generation times measured in seconds, every warm configuration is under 1% serving overhead — resolution performs as expected, and this is on top of the previously measured ~2.3 ms/call p50 capture overhead. Three structural observations matter more than the absolute numbers:</p>
+<ul>
+  <li><strong>The external-backend cost model is exactly 2 round-trips per resolved call</strong>, because the shared cache is deliberately metadata-only (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/c703db40b65fc619092cf2a5d6537cb9c591fb65/nemo_gym/token_id_capture/lineage.py#L602"><code>_materialize</code></a> re-loads the winning parent's tokens from the backend every time). For a TransferQueue adapter this is the read-after-ack requirement made concrete: added latency ≈ 2×(TQ read RTT) per model call, e.g. +10 ms/call at 5 ms reads — still small against generation, but a per-rollout cache of the last materialized cumulative would cut the steady-state parent-load to zero if it ever matters. Note RL #3837 currently sidesteps this entirely: its worker fetches prefixes from TQ itself, so Gym-side resolution stays on the metadata path.</li>
+  <li><strong>The heavy tail is cold-cache refetch</strong> (worker restart or LRU eviction): O(file bytes) re-read and re-parse, p95 ~82 ms at long context. Delta records shrink exactly this term. Steady multi-worker round-robin is <em>not</em> the cold case — each worker's cursor advances, so it re-reads only entries committed since its last view.</li>
+  <li><strong>Thread-pool residency:</strong> resolves run on the default <code>asyncio.to_thread</code> executor. At the measured per-resolve costs and seconds-long calls, steady-state resolver occupancy is a small fraction of one thread per few hundred in-flight rollouts — not a bottleneck; worth rechecking only if a slow shared filesystem multiplies the file-store numbers.</li>
+</ul>
+<p class="small">Method note: local SSD; backend latency injected via <code>time.sleep</code>; the benchmark asserts every continuation actually resolves RESOLVED, so the numbers measure the real match path, not failures. One incidental validation: an early version of the benchmark echoed assistant content at a different length than the recorded output — resolution failed closed with <code>no_match</code> rather than matching approximately, which is the designed behavior.</p>
+
+<h2 id="hashing">Hashing assumptions for parent identity</h2>
+<p>Parent identity rests on two hashes: <code>assistant_fingerprint</code> (model-authored turns only — typed content parts plus tool calls with canonicalized arguments, reasoning excluded) selects candidates, and <code>conversation_digest</code> over the child's first <code>context_len</code> items (every turn, tool results included, plus the request envelope pseudo-turn carrying system prompt and tool schema) verifies the match. Both are SHA-256, domain-separated, length-delimited per field — no concatenation ambiguity. The safety question splits cleanly:</p>
+
+<h3>Where wrong acceptance is possible — effectively nowhere, with one documented nuance</h3>
+<ul>
+  <li>A fingerprint collision alone cannot deliver wrong tokens: the builder independently re-verifies every claimed link by hashing the child's prompt prefix against the parent's token digest (<a href="https://github.com/NVIDIA-NeMo/Gym/blob/c703db40b65fc619092cf2a5d6537cb9c591fb65/nemo_gym/token_id_capture/builder.py#L188">builder.py:188</a>) — acceptance requires two independent SHA-256 agreements over different domains. Empty context digests fail closed; ambiguity refuses.</li>
+  <li><strong>The one real nuance:</strong> when several candidates share identical <code>(digest, cum_len)</code> — identical-token retries — the resolver picks <code>min(call_id)</code> deterministically. Token-exact by construction, but the two retries are distinct generations: their recorded <em>logprobs</em> can differ (nondeterministic kernels, or a weight refit between retries), and the child physically extended one specific retry. The delivered chain uses the chosen entry's logprobs wholesale. This is an accepted approximation for importance sampling, not a token-correctness bug — it should be stated in the docs rather than discovered.</li>
+</ul>
+
+<h3>Where legitimate parents are rejected — yield assumptions, silent at the sample level</h3>
+<ul>
+  <li><strong>Seeded assistant history masks entire task classes (verified gap).</strong> If a dataset row's <code>input</code> already contains assistant or <code>function_call</code> items — multi-turn pivot datasets derived from prior rollouts, few-shot prompts with assistant demonstrations — the very first call has a non-empty fingerprint, finds no recorded candidate, and resolves <code>UNRESOLVED no_match</code>: every rollout of that task masks. #2180 has no escape hatch for this; the related #2775 tree carries one (an empty-ledger check that roots seeded history as a text root), which is the fix shape. Until then this is a silent 100%-mask cliff per affected task.</li>
+  <li><strong>Byte-exact echo:</strong> the fingerprint assumes the harness echoes assistant text exactly. Dialect differences are normalized and pinned by golden vectors across all three dialects, tool arguments are compared canonically, and reasoning is excluded — but a harness that re-wraps or trims assistant text breaks the chain → masked.</li>
+  <li><strong>Envelope stability:</strong> matching deliberately includes the system prompt and tool schema, so a harness that registers tools dynamically mid-rollout (or rewrites instructions per turn) breaks context verification → masked. Correct for safety; a known yield cost for dynamic-tool harnesses.</li>
+  <li><strong>Version skew:</strong> entries with a different <code>fingerprint_version</code> are skipped during indexing, so a mid-rollout upgrade masks the resumed tail — relevant to partial-rollout resume across deployments.</li>
+</ul>
+<p>Every violated assumption lands on the masked side — the unsafe direction is guarded twice, the safe direction is where the silent costs live. That is the right trade for training correctness; the seeded-history case is the one that needs code, not documentation.</p>
+
+<h2 id="findings">All findings by severity</h2>
+<div class="tablewrap"><table>
+  <tr><th>Sev</th><th>PR</th><th>Finding</th><th>Resolution</th></tr>
+  <tr><td><span class="badge fix">blocking</span></td><td>2181</td><td>Delta records at schema 1 mis-read by pre-#2181 readers as full prompts; delivered unmasked (Fig. 3)</td><td>Stamp <code>prompt_is_delta</code> entries <code>schema_version=2</code>; reader ceiling 2; keep floor 1</td></tr>
+  <tr><td><span class="badge fix">should-fix</span></td><td>2180</td><td>Legacy-record masking after upgrade — 100% of main-written records mask with no version signal</td><td>Maintainer decision: bump writer schema version, or sign off + release note</td></tr>
+  <tr><td><span class="badge fix">should-fix</span></td><td>2180</td><td>Compaction rollouts mask (defeats #2616's exact-prefix chain)</td><td>Digest-verified join across UNRESOLVED, or explicit parent declared by the compaction agent</td></tr>
+  <tr><td><span class="badge fix">should-fix</span></td><td>2180</td><td><code>lineage.py</code> duplicates <code>fingerprint.py</code> function-for-function (same domain constants, two <code>FINGERPRINT_VERSION</code>s); <code>terminal.py</code> imports one copy, <code>sink.py</code> the other; no agreement test</td><td>One module imports the other (no cycle exists), or add a cross-module golden test</td></tr>
+  <tr><td><span class="badge fix">should-fix</span></td><td>2180</td><td>Seeded assistant history (few-shot assistant turns, pivot datasets) resolves <code>no_match</code> on the first call — 100% of that task's rollouts mask, silently</td><td>Adopt #2775's empty-ledger escape: no recorded rows + unmatched fingerprint ⇒ root, not <code>no_match</code></td></tr>
+  <tr><td><span class="badge fix">should-fix</span></td><td>2180</td><td>Startup break: <code>token_id_capture.sink</code> without <code>lineage_store</code> now refuses to boot unless <code>allow_unresolved_continuations: true</code></td><td>Deliberate and safer than silent masking — needs a release note</td></tr>
+  <tr><td><span class="badge fix">should-fix</span></td><td>2181</td><td><code>vllm_model_supply_prefix.yaml</code> layered on the training config omits <code>return_token_ids</code>; a backend without generation-time <code>prompt_token_ids</code> fails every resolved continuation hard (loud, not corrupt)</td><td>Validator requires <code>request_prompt_and_generation_token_ids: true</code>, or document that the forked backend implies it</td></tr>
+  <tr><td><span class="badge alt">nit</span></td><td>both</td><td>Stale "schema-v5" commit message; <code>delivered_fraction</code> can read 1.0 after dropping unreconstructable deltas; <code>parent_tokens</code> dead in #2180 alone; FIFO-not-LRU in-memory eviction; one redundant entry re-parse per resolve</td><td>Non-gating</td></tr>
+</table></div>
+<p class="small">Explicitly checked and clean: no silent wrong-parent path in #2180 (builder re-verifies every link by digest); fail-closed empty-context-digest and request-envelope protections from the validated revision are intact; no drive-by changes; all new config fields default off.</p>
+
+<h2 id="evidence">Evidence and how to reproduce</h2>
+<p>All evidence below comes from public code at the pinned SHAs; runs are locally reproducible with the commands shown. No public CI conclusion was visible on the PR pages at analysis time (the TQ-lane PRs additionally wait on runner validation), so test evidence here is reproduction, not CI citation.</p>
+<div class="tablewrap"><table>
+  <tr><th>Claim</th><th>Basis</th></tr>
+  <tr><td>#2180 head: capture/builder/terminal/conformance suites pass</td><td><code>uv sync --extra dev</code> at <code>c703db40b</code>, then <code>pytest tests/unit_tests/test_token_id_capture.py test_trajectory_builder.py test_rollout_correlation.py</code> → 168 passed; wider capture-adjacent files → 454 passed; <code>ruff check</code> clean</td></tr>
+  <tr><td>#2181 head: capture + full vllm_model suites pass</td><td>same procedure at <code>f8b86c090</code> → 322 passed (targeted) / 357 (review set)</td></tr>
+  <tr><td>Stack top: no regression elsewhere in core</td><td><code>pytest tests/unit_tests</code> → 3441 passed, 3 failed — the same 3 sandbox-provider tests fail identically on clean <code>main@f7bca4ddc</code> (pre-existing, environment-specific)</td></tr>
+  <tr><td>Delta mis-read (Fig. 3)</td><td>Wrote a 3-call delta rollout with #2181's code; read the directory with <code>main@9eeb7f02b</code>'s consumer: returned <code>mask_sample: False</code>, delivered <code>prompt=[9]</code>, <code>gen=[10,11]</code>, terminal attributed via <code>response_id</code></td></tr>
+  <tr><td>Mask-policy regressions (table above)</td><td>Identical fixture rollouts run through both revisions' builders; outcomes as tabulated</td></tr>
+  <tr><td>Zero merge conflicts vs main</td><td><code>git merge-tree refs/pull/2181/head upstream/main</code> at <code>f7bca4ddc</code> → empty conflict set</td></tr>
+  <tr><td>TQ-lane drift numbers</td><td><code>git range-diff 9eeb7f02b..8e2127756 ef505ddb9..56520054f</code> (23 pairs, 11 identical); <code>git merge-tree refs/pull/2776/head refs/pull/2181/head</code> → 20 conflicted files</td></tr>
+  <tr><td>Resolution latency + backend op counts (<a href="#perf">table above</a>)</td><td>Benchmark driving <code>TokenCaptureStore.append</code> → <code>FileLineageStore._resolve</code> and an <code>IncrementalLineageStore</code> fake backend with op counters and injected latency, at <code>f8b86c090</code>; 40-turn rollouts, two size profiles; every continuation asserted RESOLVED</td></tr>
+</table></div>
+
+<h2 id="ledger">Behavior ledger</h2>
+<div class="tablewrap"><table>
+  <tr><th>Behavior</th><th>Before stack (main)</th><th>Introduced</th><th>Final result</th></tr>
+  <tr><td>Parent identity</td><td>Token-prefix inference at build time</td><td>#2180</td><td>Request-time tri-state resolution; builder digest-verifies every link; trie demoted to missing-parent recovery</td></tr>
+  <tr><td>Mask policy</td><td>Terminal attribution can deliver across unknown ancestry</td><td>#2180</td><td>Unresolved boundary ⇒ broken ⇒ masked (source of both yield regressions)</td></tr>
+  <tr><td>Multi-worker capture</td><td>Unsupported (no shared resolution)</td><td>#2180</td><td>Shared lineage over the capture JSONL + flock; startup gate enforces process-shared store</td></tr>
+  <tr><td>Prompt sent to engine</td><td>Text; engine re-tokenizes</td><td>#2181</td><td><code>required_prefix_token_ids</code> for resolved continuations, with generation-time proof or hard failure</td></tr>
+  <tr><td>Prompt storage</td><td>Full cumulative prompt per call</td><td>#2181 (opt-in)</td><td>Suffix-only delta with digest-verified iterative rebuild — blocked on the schema stamp</td></tr>
+  <tr><td>Record schema</td><td>v1</td><td>—</td><td>Still v1 writer/floor on both PRs (the collapse is deliberate but under-signaled; see blocking + migration findings)</td></tr>
+  <tr><td>Terminal attribution</td><td>#2675/#2676 witnesses join</td><td>—</td><td>Preserved; #2180 feeds the content witness richer fingerprints and anchors the builder on the attributed terminal</td></tr>
+</table></div>
+
+<h2 id="related">The TQ stack (#2774–#2776) and RL #3837</h2>
+<p>The TransferQueue lane is <em>related, not dependent</em>: it declares #2349's branch as base, but its content was cut from the pre-rebase revision of this stack. Consequences measured at the pinned heads:</p>
+<ul>
+  <li><strong>23 carried commits</strong> re-cut from lane A (11 patch-identical; the rest drifted by the dropped review-response commits and base-gap contamination). A merge simulation of #2776 against #2181's head conflicts in <strong>20 files</strong>.</li>
+  <li><strong>Schema fork:</strong> the TQ tree kept the old v5/min-3 ladder that #2180/#2181's heads deliberately collapsed to v1 — its version comments no longer describe what will merge.</li>
+  <li><strong>It pre-dates merged terminal attribution:</strong> no <code>terminal.py</code>, no <code>response_id</code> on <code>TokenEntry</code> (moved to the staging layer's <code>CallRecord</code>), and #2776 re-implements the witnesses join on <code>CallRecord</code> — two parallel terminal-attribution implementations would coexist in a merged tree. One owner must be chosen.</li>
+  <li><strong>RL #3837</strong> installs Gym's <code>StagingSink</code> inside the vLLM worker, fetches miss-prefixes from TQ (<code>fetch_prefix_token_ids</code>), and forwards only token-free custody (<code>ng_capture</code> with staging-chain keys) over HTTP. It pins Gym submodule SHA <code>d9ad9d2e</code> — an older #2278-line cut whose staging surface is wire-identical to #2776 except one error-string line wrap. Merging #2180/#2181 cannot move that pin; the pin's problem is staleness (its <code>.gitmodules</code> claims <code>branch = main</code>, which is currently fiction).</li>
+</ul>
+
+<h2 id="order">Recommended merge order</h2>
+<ol>
+  <li><strong>Fix the #2181 schema stamp</strong> (delta entries → version 2, ceiling 2) — two constants plus a cross-version test.</li>
+  <li><strong>Decide the two #2180 yield regressions</strong> (legacy-record masking; compaction masking) and the fingerprint-module duplication; add the release note for the custom-sink startup break.</li>
+  <li><strong>Merge #2180, then #2181</strong> — conflict-free against <code>main@f7bca4ddc</code>; review-complete otherwise.</li>
+  <li><strong>Rebase #2774–#2776</strong> onto the new main: drop the 23 carried commits, adopt schema v1, restore <code>TokenEntry.response_id</code>, and make the staging attribution delegate to (or explicitly supersede) <code>main</code>'s terminal join.</li>
+  <li><strong>Repoint RL #3837's submodule pin</strong> to the rebased #2776 head — its imports are confined to the wire-stable staging surface — then land the TQ lane bottom-up, and #3837 last.</li>
+</ol>
+
+<div class="verdict warn">
+  <strong>Consequence for the reviewer.</strong> Nothing in either PR can put wrong tokens into a training row — every uncertain path masks or fails loudly, and that property was re-verified, not assumed. The costs of merging as-is are different: one silent <em>cross-version</em> corruption path behind a default-off flag (#2181, two-constant fix), and two silent <em>yield</em> cliffs (#2180) that will read as "capture stopped producing samples" after a rolling upgrade or under compaction. Fix the first; decide the second two on purpose; then merge in stack order.
+</div>
+
+<p class="small">Analysis pinned at 2026-08-28. Heads verified against the GitHub refs at analysis time; if any PR is force-pushed after this date, the code links may no longer describe the open revision.</p>
+
+</div>
+</body>
+</html>
