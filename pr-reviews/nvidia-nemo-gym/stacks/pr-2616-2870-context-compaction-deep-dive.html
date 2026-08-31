@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How Gym context compaction reaches NeMo-RL training</title>
+  <script>
+    (() => {
+      try {
+        if (localStorage.getItem("engineering-notes-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {}
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #20262f;
+      --border: #30363d;
+      --text: #e6edf3;
+      --dim: #9aa4af;
+      --accent: #58a6ff;
+      --diagram-ok: #5bc0eb;
+      --diagram-problem: #ffb000;
+      --diagram-alt: #d98bc3;
+      --diagram-neutral: #c7ced8;
+      --code-bg: #11161d;
+      --shadow: rgba(0, 0, 0, 0.26);
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --surface-2: #eaeef2;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --dim: #59636e;
+      --accent: #0969da;
+      --diagram-ok: #005a8d;
+      --diagram-problem: #9a4d00;
+      --diagram-alt: #7a3e6d;
+      --diagram-neutral: #4b5563;
+      --code-bg: #f1f3f5;
+      --shadow: rgba(31, 35, 40, 0.12);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.62 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+    a:focus-visible, button:focus-visible { outline: 3px solid var(--diagram-problem); outline-offset: 3px; }
+    .wrap { width: min(980px, calc(100% - 32px)); margin: 0 auto; padding: 54px 0 90px; }
+    .theme-toggle {
+      position: fixed;
+      top: 14px;
+      right: 14px;
+      z-index: 10;
+      min-height: 42px;
+      padding: 8px 13px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: 0 3px 12px var(--shadow);
+      cursor: pointer;
+    }
+    h1 { margin: 0 0 12px; max-width: 850px; font-size: clamp(2rem, 5vw, 3.45rem); line-height: 1.06; letter-spacing: -0.035em; }
+    h2 { margin: 64px 0 14px; font-size: clamp(1.45rem, 3vw, 2rem); line-height: 1.2; }
+    h3 { margin: 30px 0 9px; font-size: 1.15rem; }
+    p { margin: 0 0 14px; }
+    .lede { max-width: 820px; color: var(--dim); font-size: 1.12rem; }
+    .provenance {
+      margin: 22px 0;
+      padding: 14px 16px;
+      border-left: 4px solid var(--diagram-alt);
+      background: var(--surface);
+      overflow-wrap: anywhere;
+    }
+    .sha { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.88em; }
+    .answer {
+      margin: 28px 0;
+      padding: 22px;
+      border: 2px solid var(--diagram-ok);
+      border-radius: 12px;
+      background: var(--surface);
+      box-shadow: 0 8px 30px var(--shadow);
+    }
+    .answer strong { color: var(--diagram-ok); }
+    .answer .limit { color: var(--diagram-problem); font-weight: 750; }
+    .figure {
+      margin: 24px 0;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+      overflow-x: auto;
+      box-shadow: 0 4px 18px var(--shadow);
+    }
+    .figure figcaption { padding: 13px 16px 0; font-weight: 750; }
+    .figure-note { padding: 0 16px 14px; color: var(--dim); font-size: 0.93rem; }
+    svg { display: block; min-width: 760px; width: 100%; height: auto; }
+    svg text { fill: var(--text); font-family: ui-sans-serif, system-ui, sans-serif; }
+    svg .small { font-size: 13px; fill: var(--dim); }
+    svg .label { font-size: 15px; font-weight: 700; }
+    svg .box { fill: var(--surface-2); stroke: var(--diagram-neutral); stroke-width: 2; }
+    svg .active { stroke: var(--diagram-ok); stroke-width: 3; }
+    svg .warning { stroke: var(--diagram-problem); stroke-width: 3; stroke-dasharray: 8 5; }
+    svg .related { stroke: var(--diagram-alt); stroke-width: 3; stroke-dasharray: 7 6; fill: none; }
+    svg .flow { stroke: var(--diagram-ok); stroke-width: 2.5; fill: none; marker-end: url(#arrow-blue); }
+    svg .flow-alt { stroke: var(--diagram-alt); stroke-width: 2.5; fill: none; marker-end: url(#arrow-purple); }
+    svg .flow-warn { stroke: var(--diagram-problem); stroke-width: 2.5; stroke-dasharray: 7 5; fill: none; marker-end: url(#arrow-orange); }
+    svg a text { text-decoration: underline; }
+    .toc { display: flex; flex-wrap: wrap; gap: 9px; margin: 26px 0 0; }
+    .toc a { padding: 7px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); text-decoration: none; }
+    .callout, .card {
+      padding: 17px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+    .callout { border-left: 4px solid var(--diagram-problem); }
+    .stack { display: grid; gap: 15px; margin: 20px 0; }
+    .layer { position: relative; padding: 20px 20px 20px 66px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    .layer::before {
+      content: attr(data-step);
+      position: absolute;
+      left: 19px;
+      top: 20px;
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 2px solid var(--diagram-ok);
+      border-radius: 50%;
+      font-weight: 800;
+    }
+    .layer + .layer::after { content: "↓ follow-up"; position: absolute; top: -24px; left: 16px; color: var(--dim); font-size: 0.82rem; }
+    .badges { display: flex; flex-wrap: wrap; gap: 7px; margin: 8px 0 12px; }
+    .badge { padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--dim); font-size: 0.82rem; }
+    .badge.ok { border-color: var(--diagram-ok); color: var(--diagram-ok); }
+    .badge.warn { border-color: var(--diagram-problem); color: var(--diagram-problem); }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    code { padding: 0.12em 0.32em; border-radius: 4px; background: var(--code-bg); }
+    pre { margin: 14px 0; padding: 16px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg); font-size: 0.9rem; line-height: 1.5; }
+    .compare {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin: 16px 0;
+    }
+    .compare > div { padding: 16px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
+    .compare .before { border-top: 4px dashed var(--diagram-problem); }
+    .compare .after { border-top: 4px solid var(--diagram-ok); }
+    .status-list { list-style: none; padding: 0; margin: 10px 0; }
+    .status-list li { position: relative; padding: 7px 0 7px 28px; }
+    .status-list li::before { position: absolute; left: 0; font-weight: 800; }
+    .yes::before { content: "✓"; color: var(--diagram-ok); }
+    .no::before { content: "×"; color: var(--diagram-problem); }
+    .partial::before { content: "△"; color: var(--diagram-alt); }
+    .ledger { width: 100%; border-collapse: collapse; min-width: 760px; }
+    .ledger th, .ledger td { padding: 11px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+    .ledger th { background: var(--surface-2); }
+    .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 9px; }
+    .muted { color: var(--dim); }
+    .key { font-weight: 750; color: var(--diagram-alt); }
+    footer { margin-top: 64px; padding-top: 22px; border-top: 1px solid var(--border); color: var(--dim); }
+    @media (max-width: 700px) {
+      .wrap { width: min(100% - 22px, 980px); padding-top: 70px; }
+      .compare { grid-template-columns: 1fr; }
+      .theme-toggle { top: 10px; right: 10px; }
+      .layer { padding-left: 58px; }
+    }
+    @media print {
+      .theme-toggle { display: none; }
+      body { background: #fff; color: #111; }
+      .figure, .answer, .card, .layer { box-shadow: none; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <button class="theme-toggle" type="button" aria-label="Switch color theme">Use light theme</button>
+  <main class="wrap">
+    <h1>How Gym context compaction reaches NeMo-RL training</h1>
+    <p class="lede">A maintainer’s map of Gym <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2616">#2616</a>, its contract cleanup in <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2870">#2870</a>, and the public NeMo-RL consumer in <a href="https://github.com/NVIDIA-NeMo/RL/pull/3910">RL #3910</a>.</p>
+
+    <div class="provenance">
+      <div><strong>Gym #2616</strong> — merged foundation, head <a class="sha" href="https://github.com/NVIDIA-NeMo/Gym/commit/ea02bc5de0493522bf13254f60a95f75818dd0c1">ea02bc5de0493522bf13254f60a95f75818dd0c1</a></div>
+      <div><strong>Gym #2870</strong> — open follow-up, head <a class="sha" href="https://github.com/NVIDIA-NeMo/Gym/commit/aa800c065317bafd08fde4161274cfe9759583e9">aa800c065317bafd08fde4161274cfe9759583e9</a></div>
+      <div><strong>NeMo-RL #3910</strong> — open declared consumer, head <a class="sha" href="https://github.com/NVIDIA-NeMo/RL/commit/fd287d0df510da4abfd655b114c63a799d71b4a9">fd287d0df510da4abfd655b114c63a799d71b4a9</a></div>
+      <div class="muted">Snapshot: 2026-08-31. All claims and links use public sources pinned to these revisions.</div>
+    </div>
+
+    <section class="answer" aria-labelledby="answer-title">
+      <h2 id="answer-title" style="margin-top:0">Answer first</h2>
+      <p><strong>#2616 supplies the missing trace semantics.</strong> It keeps an append-only logical history, compacts only the next model-facing view, records exact generation evidence, and marks every intentional prompt rewrite.</p>
+      <p><strong>#2870 supplies the usable wire contract.</strong> Verified and verification-skipped rollouts now return the same bounded <code>rollout_trace_contract</code> plus digest-backed <code>model_call_metadata</code>.</p>
+      <p><strong>NeMo-RL #3910 consumes that contract on the legacy GRPO driver paths.</strong> It validates each digest, splits a logical rollout into physical traces, computes one logical GRPO advantage, projects it to every physical row, and supports both synchronous GRPO and the older async replay path.</p>
+      <p class="limit">The exact NeMo-RL #3910 checkout is not runnable with this feature yet. Its Gym submodule still points to <code>c3bac963</code>, a revision from before <code>simple_agent_with_compaction</code> existed. The code is wire-compatible with #2870, but the dependency pin is not.</p>
+      <p class="limit">It is not compatible with NeMo-RL’s SingleController / TransferQueue path at this revision. SingleController requires <code>data_plane.enabled=true</code>, while #3910 explicitly rejects physical-trace training when that flag is true.</p>
+      <p class="limit">It also does not remove token IDs or generation logprobs from Gym’s exported <code>/run</code> payload. #2870 removes their second copy from <code>completion_evidence</code>; the canonical arrays remain on ordinary response output items and still cross the Gym → NeMo-RL boundary.</p>
+    </section>
+
+    <figure class="figure">
+      <figcaption>Figure 1 — The verified relationship is foundation → contract cleanup → downstream consumer</figcaption>
+      <svg viewBox="0 0 920 420" role="img" aria-labelledby="topology-title topology-desc">
+        <title id="topology-title">Relationship among the two Gym pull requests and the NeMo-RL consumer</title>
+        <desc id="topology-desc">PR 2616 is merged. PR 2870 follows it and is open. NeMo-RL PR 3910 explicitly depends on PR 2870 and is open.</desc>
+        <defs>
+          <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="var(--diagram-ok)"/></marker>
+          <marker id="arrow-purple" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="var(--diagram-alt)"/></marker>
+          <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="var(--diagram-problem)"/></marker>
+        </defs>
+        <rect class="box active" x="55" y="56" width="250" height="112" rx="12"/>
+        <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2616"><text class="label" x="76" y="87">Gym #2616 · MERGED</text></a>
+        <text x="76" y="116">Agent, history, policies, evidence</text>
+        <text class="small" x="76" y="143">ea02bc5de049 · foundation</text>
+
+        <rect class="box active" x="335" y="56" width="250" height="112" rx="12"/>
+        <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2870"><text class="label" x="356" y="87">Gym #2870 · OPEN</text></a>
+        <text x="356" y="116">One canonical transport contract</text>
+        <text class="small" x="356" y="143">aa800c065317 · one-commit follow-up</text>
+
+        <path class="related" d="M305 112 L335 112" marker-end="url(#arrow-purple)"/>
+        <text class="small" x="307" y="98">follow-up</text>
+
+        <rect class="box warning" x="615" y="56" width="250" height="112" rx="12"/>
+        <a href="https://github.com/NVIDIA-NeMo/RL/pull/3910"><text class="label" x="636" y="87">NeMo-RL #3910 · OPEN</text></a>
+        <text x="636" y="116">Validate and train physical traces</text>
+        <text class="small" x="636" y="143">fd287d0df510 · code ready, pin stale</text>
+        <path class="flow-alt" d="M585 112 L615 112"/>
+        <text class="small" x="572" y="98">contract dependency</text>
+
+        <rect class="box active" x="105" y="246" width="300" height="104" rx="12"/>
+        <text class="label" x="126" y="278">Legacy sync + async GRPO</text>
+        <text x="126" y="307">data_plane.enabled = false</text>
+        <text class="small" x="126" y="333">#3910 adds both integrations</text>
+        <path class="flow" d="M724 168 C710 220 470 214 405 274"/>
+
+        <rect class="box warning" x="515" y="246" width="300" height="104" rx="12"/>
+        <text class="label" x="536" y="278">SingleController + TransferQueue</text>
+        <text x="536" y="307">data_plane.enabled = true</text>
+        <text class="small" x="536" y="333">explicitly rejected by #3910</text>
+        <path class="flow-warn" d="M755 168 C770 205 764 222 737 246"/>
+
+        <line x1="62" y1="382" x2="106" y2="382" class="flow"/>
+        <text class="small" x="116" y="387">implemented path</text>
+        <line x1="264" y1="382" x2="308" y2="382" class="related"/>
+        <text class="small" x="318" y="387">follow-up / dependency</text>
+        <line x1="510" y1="382" x2="554" y2="382" class="flow-warn"/>
+        <text class="small" x="564" y="387">unsupported boundary</text>
+      </svg>
+      <p class="figure-note">The two Gym PRs are related sequential work, not a currently stacked branch chain. The cross-repository dependency is stated in the public body of RL #3910.</p>
+    </figure>
+
+    <nav class="toc" aria-label="Page sections">
+      <a href="#worked-example">Worked example</a>
+      <a href="#pr2616">#2616 mechanics</a>
+      <a href="#pr2870">#2870 contract</a>
+      <a href="#nemo-rl">NeMo-RL path</a>
+      <a href="#compatibility">Compatibility</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#questions">Review questions</a>
+    </nav>
+
+    <section id="worked-example">
+      <h2>One rollout, two physical traces</h2>
+      <p>Use one small two-call rollout. The first model call sees prompt tokens <code>[101, 102]</code> and samples <code>[201]</code>. Compaction rewrites the second prompt to <code>[101, 301]</code>, which is not a prefix continuation of <code>[101, 102, 201]</code>.</p>
+      <pre>logical rollout: rollout-7
+
+call 1
+  prompt_token_ids     = [101, 102]
+  generation_token_ids = [201]
+  generation_log_probs = [-0.2]
+  segment_index        = 0
+
+rewrite before call 2
+  boundary event       = rewrite-2
+
+call 2
+  prompt_token_ids     = [101, 301]
+  generation_token_ids = [202]
+  generation_log_probs = [-0.3]
+  segment_index        = 1</pre>
+      <p>Gym exports both output items, two metadata records, and one boundary event. Each metadata record contains a digest of its output item’s three canonical arrays. NeMo-RL recomputes that digest, checks the declared rewrite against token and media continuity, and creates <code>rollout-7:trace-000000</code> plus <code>rollout-7:trace-000001</code>.</p>
+
+      <figure class="figure">
+        <figcaption>Figure 2 — Values move from one logical rollout to two training rows</figcaption>
+        <svg viewBox="0 0 920 510" role="img" aria-labelledby="trace-title trace-desc">
+          <title id="trace-title">End-to-end value trace</title>
+          <desc id="trace-desc">Gym captures canonical arrays and metadata. NeMo-RL checks the digest and boundary, then makes two physical training rows that share one logical advantage.</desc>
+          <defs>
+            <marker id="arrow-blue-2" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="var(--diagram-ok)"/></marker>
+            <marker id="arrow-purple-2" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="var(--diagram-alt)"/></marker>
+          </defs>
+          <rect class="box active" x="34" y="52" width="245" height="158" rx="12"/>
+          <a href="https://github.com/NVIDIA-NeMo/Gym/blob/aa800c065317bafd08fde4161274cfe9759583e9/responses_api_agents/simple_agent_with_compaction/compaction/session.py#L94-L108"><text class="label" x="54" y="81">Gym transport</text></a>
+          <text x="54" y="112">output[0] arrays + digest D1</text>
+          <text x="54" y="140">output[1] arrays + digest D2</text>
+          <text x="54" y="168">boundary_events = [rewrite-2]</text>
+          <text class="small" x="54" y="194">one rollout_trace_contract</text>
+
+          <rect class="box active" x="337" y="52" width="245" height="158" rx="12"/>
+          <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/environments/nemo_gym.py#L1210-L1329"><text class="label" x="357" y="81">NeMo-RL ingestion</text></a>
+          <text x="357" y="112">recompute D1 and D2</text>
+          <text x="357" y="140">compare prompt prefixes</text>
+          <text x="357" y="168">match rewrite-2 to call 2</text>
+          <text class="small" x="357" y="194">fail closed on disagreement</text>
+
+          <rect class="box active" x="640" y="52" width="245" height="158" rx="12"/>
+          <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/environments/nemo_gym_trace.py#L162-L262"><text class="label" x="660" y="81">Physical trace plan</text></a>
+          <text x="660" y="112">trace-000000 owns call 1</text>
+          <text x="660" y="140">trace-000001 owns call 2</text>
+          <text x="660" y="168">inferred boundaries = 0</text>
+          <text class="small" x="660" y="194">arrays are not copied into plan</text>
+
+          <path d="M279 132 L337 132" stroke="var(--diagram-ok)" stroke-width="3" fill="none" marker-end="url(#arrow-blue-2)"/>
+          <path d="M582 132 L640 132" stroke="var(--diagram-ok)" stroke-width="3" fill="none" marker-end="url(#arrow-blue-2)"/>
+
+          <rect class="box active" x="116" y="304" width="290" height="132" rx="12"/>
+          <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/algorithms/physical_trace_training.py#L37-L76"><text class="label" x="136" y="335">Logical GRPO computation</text></a>
+          <text x="136" y="368">reward → one advantage A7</text>
+          <text x="136" y="397">ownership remains rollout-7</text>
+          <text class="small" x="136" y="422">before physical-row expansion</text>
+
+          <rect class="box active" x="514" y="304" width="290" height="132" rx="12"/>
+          <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/experience/trace_batch_materialization.py#L380-L665"><text class="label" x="534" y="335">Training batch</text></a>
+          <text x="534" y="368">row 0 = trace-000000 + A7</text>
+          <text x="534" y="397">row 1 = trace-000001 + A7</text>
+          <text class="small" x="534" y="422">padding follows expansion</text>
+
+          <path d="M760 210 C755 257 655 268 650 304" stroke="var(--diagram-alt)" stroke-width="3" fill="none" marker-end="url(#arrow-purple-2)"/>
+          <path d="M406 370 L514 370" stroke="var(--diagram-ok)" stroke-width="3" fill="none" marker-end="url(#arrow-blue-2)"/>
+          <text class="small" x="426" y="356">project A7 by parent index</text>
+
+          <rect x="39" y="468" width="14" height="14" fill="none" stroke="var(--diagram-ok)" stroke-width="3"/>
+          <text class="small" x="62" y="480">validated value path</text>
+          <line x1="230" y1="475" x2="270" y2="475" stroke="var(--diagram-alt)" stroke-width="3"/>
+          <text class="small" x="280" y="480">logical-to-physical ownership</text>
+        </svg>
+        <p class="figure-note">The trace planner intentionally keeps only boundaries and ownership. The large token and logprob tensors remain authoritative in the message logs that later become training rows.</p>
+      </figure>
+    </section>
+
+    <section id="pr2616">
+      <h2>Layer 1 — #2616 adds semantic compaction without erasing logical history</h2>
+      <div class="stack">
+        <article class="layer" data-step="1">
+          <h3 style="margin-top:0"><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2616">Gym #2616</a>: agent-owned state and exact evidence</h3>
+          <div class="badges"><span class="badge ok">merged</span><span class="badge">opt-in agent</span><span class="badge">vLLM adapter</span></div>
+          <p>The new <code>simple_agent_with_compaction</code> owns the entire mechanism. Existing <code>simple_agent</code> and shared Gym request models are not changed by this layer.</p>
+        </article>
+      </div>
+
+      <h3>1. The semantic history is the durable truth</h3>
+      <p><code>ContextCompactionSession</code> creates one <code>SemanticHistory</code> per rollout, appends initial context and seed observations, then selects either a rolling <code>HistoryController</code> or a <code>TurnChunkedHistoryController</code>. See the pinned <a href="https://github.com/NVIDIA-NeMo/Gym/blob/ea02bc5de0493522bf13254f60a95f75818dd0c1/responses_api_agents/simple_agent_with_compaction/compaction/session.py#L263-L307">session constructor</a>.</p>
+      <p>The model-facing request is a materialized view. Model output is also appended to the full semantic history after successful evidence capture, so compaction does not make the logical rollout incomplete. The session exposes the complete append-order output through <a href="https://github.com/NVIDIA-NeMo/Gym/blob/ea02bc5de0493522bf13254f60a95f75818dd0c1/responses_api_agents/simple_agent_with_compaction/compaction/session.py#L329-L334"><code>output_items</code></a>.</p>
+
+      <h3>2. Append compatibility is based on the last generation’s exact tokens</h3>
+      <p>When the next materialized view is append-compatible, the session constructs <code>required_prefix_token_ids</code> from the previous prompt plus sampled tokens. That happens in <a href="https://github.com/NVIDIA-NeMo/Gym/blob/ea02bc5de0493522bf13254f60a95f75818dd0c1/responses_api_agents/simple_agent_with_compaction/compaction/session.py#L336-L352"><code>_prepare_once</code></a>. The dedicated vLLM model adapter accepts that field and refuses to reconstruct missing training evidence with a later tokenization request; see <a href="https://github.com/NVIDIA-NeMo/Gym/blob/ea02bc5de0493522bf13254f60a95f75818dd0c1/responses_api_models/vllm_model_with_compaction/app.py#L52-L71">the adapter’s fail-closed path</a>.</p>
+
+      <h3>3. Rewrites become explicit boundary events</h3>
+      <p>A recency policy can remove old images or reasoning blocks. A turn-chunked controller freezes one compacted base for several actions, then opens another chunk. It records the eligible action IDs and completion evidence IDs when finalizing a chunk; see <a href="https://github.com/NVIDIA-NeMo/Gym/blob/ea02bc5de0493522bf13254f60a95f75818dd0c1/responses_api_agents/simple_agent_with_compaction/compaction/controller.py#L294-L358">chunk acknowledgement and finalization</a>. A non-prefix-compatible next view advances the segment and carries a boundary event, rather than pretending that one flat physical sequence still exists.</p>
+
+      <h3>4. Guard tokenization is advisory; generation evidence is authoritative</h3>
+      <p>Optional guards can measure total tokens, active images, and projected vision tokens before a call. A chunk may close early and recompact once. The accepted model response still supplies the authoritative prompt IDs, generated IDs, and logprobs. <a href="https://github.com/NVIDIA-NeMo/Gym/blob/ea02bc5de0493522bf13254f60a95f75818dd0c1/responses_api_agents/simple_agent_with_compaction/compaction/session.py#L388-L477">Guard admission</a> and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/ea02bc5de0493522bf13254f60a95f75818dd0c1/responses_api_agents/simple_agent_with_compaction/compaction/session.py#L489-L528">successful response recording</a> are separate stages.</p>
+
+      <div class="callout">
+        <strong>Maintenance cost:</strong> #2616 introduces a substantial agent-local protocol: semantic unit lineage, content-addressed media, policy decisions, chunk records, guard outcomes, completion evidence, and model identity contracts. The isolation protects ordinary agents, but consumers must still agree on the exported subset.
+      </div>
+      <div class="callout" style="margin-top:14px">
+        <strong>“Bounded” describes duplication, not total rollout size.</strong> The transport drops validation-only copies, but complete logical output, unique media assets, lineage, chunks, boundaries, and one metadata record per call remain. Prompt-token arrays on successive output items can also grow with accumulated context. Recency only bounds configured image groups and reasoning blocks; tool results and ordinary text still need optional total-token guards.
+      </div>
+    </section>
+
+    <section id="pr2870">
+      <h2>Layer 2 — #2870 makes verification status irrelevant to trace encoding</h2>
+      <div class="stack">
+        <article class="layer" data-step="2">
+          <h3 style="margin-top:0"><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2870">Gym #2870</a>: one transport shape</h3>
+          <div class="badges"><span class="badge warn">open</span><span class="badge">one commit</span><span class="badge">breaking rename</span></div>
+          <p>This layer follows #2616 after merge. It intentionally replaces the recently added names and discriminators instead of preserving aliases.</p>
+        </article>
+      </div>
+
+      <div class="compare">
+        <div class="before">
+          <h3 style="margin-top:0">Before #2870</h3>
+          <p><strong>Verification runs:</strong> <code>context_compaction_contract</code> has <code>schema_version: 3</code>; output is bounded and uses <code>model_call_metadata</code>. The direct parent’s <a href="https://github.com/NVIDIA-NeMo/Gym/blob/c8940a2d152eeac7efb62b9b1c03461b4d9adb8e/responses_api_agents/simple_agent_with_compaction/app.py#L536-L606">return branch</a> makes the split explicit.</p>
+          <p><strong>Verification skipped:</strong> the same field has <code>schema_version: 2</code>; the response retains full <code>completion_evidence</code>, <code>agent_input</code>, and <code>seed_obs</code>.</p>
+          <p>Consumers therefore branch on a reward-control decision to decode the rollout trace.</p>
+        </div>
+        <div class="after">
+          <h3 style="margin-top:0">After #2870</h3>
+          <p>Both cases expose <code>rollout_trace_contract</code> with no lifecycle <code>schema_version</code>, <code>mode</code>, or <code>format</code>.</p>
+          <p>Both cases use the bounded <code>model_call_metadata</code> representation.</p>
+          <p>Only the actual verifier request receives full <code>completion_evidence</code>.</p>
+        </div>
+      </div>
+
+      <p>The key implementation boundary is now explicit. <a href="https://github.com/NVIDIA-NeMo/Gym/blob/aa800c065317bafd08fde4161274cfe9759583e9/responses_api_agents/simple_agent_with_compaction/compaction/session.py#L113-L138"><code>ContextCompactedResponse</code></a> is the rich internal/verifier model. <a href="https://github.com/NVIDIA-NeMo/Gym/blob/aa800c065317bafd08fde4161274cfe9759583e9/responses_api_agents/simple_agent_with_compaction/compaction/session.py#L128-L168"><code>ContextCompactedTransportResponse</code> and <code>build_transport_response</code></a> remove <code>agent_input</code>, <code>seed_obs</code>, and <code>completion_evidence</code>, project image payloads out of output content, and replace each observed completion with bounded metadata.</p>
+      <p>This is specifically an agent <code>/run</code> transport guarantee. The compaction agent’s direct <code>/v1/responses</code> self-call still constructs the rich response before <code>run</code> decides whether to send it to the verifier and then projects it for the caller.</p>
+
+      <h3>What the digest does—and does not do</h3>
+      <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/aa800c065317bafd08fde4161274cfe9759583e9/responses_api_agents/simple_agent_with_compaction/compaction/session.py#L68-L109"><code>ModelCallMetadata.from_observed</code></a> omits three arrays from the sidecar and computes <code>generation_evidence_digest</code> over them:</p>
+      <pre>{
+  "prompt_token_ids": observed.prompt_token_ids,
+  "sampled_token_ids": observed.sampled_token_ids,
+  "sampled_logprobs": observed.sampled_logprobs
+}</pre>
+      <p>The digest prevents the small metadata record from silently drifting away from the arrays. It does not replace the arrays. They remain as <code>prompt_token_ids</code>, <code>generation_token_ids</code>, and <code>generation_log_probs</code> on the trainable output item. The new README says this directly in the <a href="https://github.com/NVIDIA-NeMo/Gym/blob/aa800c065317bafd08fde4161274cfe9759583e9/responses_api_agents/simple_agent_with_compaction/README.md#L10-L20">rollout trace evidence section</a>.</p>
+
+      <h3>The verifier still sees full evidence</h3>
+      <p><a href="https://github.com/NVIDIA-NeMo/Gym/blob/aa800c065317bafd08fde4161274cfe9759583e9/responses_api_agents/simple_agent_with_compaction/app.py#L553-L579"><code>run</code></a> sends the rich model response to <code>/verify</code> when verification is enabled. Only after reward processing does <a href="https://github.com/NVIDIA-NeMo/Gym/blob/aa800c065317bafd08fde4161274cfe9759583e9/responses_api_agents/simple_agent_with_compaction/app.py#L588-L603">the common return path</a> build the transport response. When verification is skipped, there is no verifier call, but the same transport projection is returned.</p>
+    </section>
+
+    <section id="nemo-rl">
+      <h2>How NeMo-RL #3910 consumes the unified contract</h2>
+      <p>RL #3910 is not merely compatible by name. Its final commit changes ingestion from the old contract to <code>rollout_trace_contract</code>, and its PR body explicitly says it must not merge before Gym #2870.</p>
+
+      <h3>1. Gym remains the generation-evidence boundary</h3>
+      <p>NeMo-RL reads caller-owned rollout and group IDs, validates them against the contract, counts trainable output items, and requires one metadata record per call. It then recomputes the digest from each output item’s canonical arrays. See <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/environments/nemo_gym.py#L1123-L1239">contract and digest validation</a>.</p>
+
+      <h3>2. The planner rejects undeclared discontinuities</h3>
+      <p><a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/environments/nemo_gym_trace.py#L68-L282"><code>build_rollout_trace_plan</code></a> validates token/logprob types and lengths, media IDs, call identity, append compatibility, boundary use, segment identity, and rollout ownership. In strict mode a prompt rewrite without a matching boundary is an error. A boundary where no rewrite occurred is also an error.</p>
+
+      <h3>3. Ingestion reconstructs canonical physical message logs</h3>
+      <p>For each trace start, NeMo-RL resets <code>seen_token_ids</code>, then converts newly seen prompt tokens into a non-trainable user message and sampled tokens into a trainable assistant message. The canonical arrays are popped from the raw output item during this conversion; see <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/environments/nemo_gym.py#L1340-L1427">physical-log reconstruction</a>.</p>
+
+      <h3>4. Logical reward semantics survive physical expansion</h3>
+      <p><a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/algorithms/physical_trace_training.py#L37-L76">GRPO advantage computation</a> happens once per logical rollout. <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/experience/trace_batch_materialization.py#L380-L665">Batch preparation</a> validates complete comparison groups and rollout ownership, creates one row per physical trace, projects the same logical advantage to each row’s eligible action tokens, and only then pads to data-parallel × microbatch divisibility.</p>
+
+      <h3>5. Both legacy training loops are wired</h3>
+      <p>The synchronous loop calls the physical-trace preparation helper before ordinary flattening at <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/algorithms/grpo.py#L3390-L3420">the sync data-processing stage</a>. The older asynchronous loop does the same at <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/algorithms/grpo.py#L5224-L5255">its data-processing stage</a>, with extra replay-group identity and policy-version checks in <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/experience/trace_replay.py#L80-L250"><code>trace_replay</code></a>.</p>
+    </section>
+
+    <section id="compatibility">
+      <h2>Compatibility with NeMo-RL v2 architecture</h2>
+      <ul class="status-list">
+        <li class="yes"><strong>Gym #2870 contract ↔ RL #3910 ingestion:</strong> field names, digest construction, identity checks, and boundary semantics line up.</li>
+        <li class="no"><strong>RL #3910 checkout as pinned:</strong> its Gym gitlink is still <code>c3bac963</code>, which has no compaction agent or unified trace contract.</li>
+        <li class="yes"><strong>Legacy synchronous GRPO:</strong> physical rows are prepared inside <code>grpo_train</code>.</li>
+        <li class="yes"><strong>Legacy asynchronous GRPO:</strong> replay preserves complete logical groups and policy provenance before physical expansion.</li>
+        <li class="partial"><strong>Ordinary non-compacted rollout:</strong> it remains on the existing path; physical materialization activates only when a rollout contains more than one physical trace.</li>
+        <li class="no"><strong>SingleController:</strong> no integration is added to <code>single_controller.py</code>.</li>
+        <li class="no"><strong>TransferQueue/data plane:</strong> split physical traces are rejected when <code>data_plane.enabled=true</code>.</li>
+        <li class="no"><strong>“Token IDs/logprobs off the Gym path”:</strong> not achieved; canonical arrays still travel in the Gym response.</li>
+      </ul>
+
+      <figure class="figure">
+        <figcaption>Figure 3 — The architectural contradiction that blocks SingleController</figcaption>
+        <svg viewBox="0 0 920 390" role="img" aria-labelledby="compat-title compat-desc">
+          <title id="compat-title">SingleController and physical trace configuration requirements conflict</title>
+          <desc id="compat-desc">SingleController requires data plane enabled. Physical trace training rejects data plane enabled. Therefore no configuration can satisfy both.</desc>
+          <defs>
+            <marker id="arrow-orange-3" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="var(--diagram-problem)"/></marker>
+          </defs>
+          <rect class="box active" x="55" y="70" width="330" height="122" rx="12"/>
+          <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/algorithms/single_controller_utils/setup.py#L864-L920"><text class="label" x="78" y="102">SingleController setup</text></a>
+          <text x="78" y="135">requires data_plane.enabled = true</text>
+          <text x="78" y="165">“built on the TransferQueue data plane”</text>
+
+          <rect class="box warning" x="535" y="70" width="330" height="122" rx="12"/>
+          <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/algorithms/physical_trace_training.py#L110-L181"><text class="label" x="558" y="102">Physical-trace validator</text></a>
+          <text x="558" y="135">requires data_plane.enabled = false</text>
+          <text x="558" y="165">rejects “data-plane/TQ training path”</text>
+
+          <path d="M385 132 L535 132" stroke="var(--diagram-problem)" stroke-width="3" stroke-dasharray="8 5" fill="none" marker-end="url(#arrow-orange-3)"/>
+          <text class="label" x="425" y="116">cannot meet both</text>
+
+          <rect class="box" x="221" y="254" width="478" height="76" rx="12"/>
+          <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/data_plane/schema.py#L25-L58"><text class="label" x="246" y="284">TransferQueue’s registered rows are already flat tensors</text></a>
+          <text class="small" x="246" y="311">input_ids · generation_logprobs · token_mask · sample_mask · later deltas</text>
+
+          <line x1="57" y1="362" x2="100" y2="362" stroke="var(--diagram-ok)" stroke-width="3"/>
+          <text class="small" x="110" y="367">required setup invariant</text>
+          <line x1="318" y1="362" x2="361" y2="362" stroke="var(--diagram-problem)" stroke-width="3" stroke-dasharray="8 5"/>
+          <text class="small" x="371" y="367">explicit incompatibility</text>
+        </svg>
+        <p class="figure-note">This is not a vague missing test. It is an explicit pair of mutually exclusive runtime guards at the pinned RL #3910 revision.</p>
+      </figure>
+
+      <h3>Why TransferQueue needs a separate design</h3>
+      <p>SingleController registers a long-lived TransferQueue partition before concurrent producers begin. Its schema contains flat <code>input_ids</code>, <code>generation_logprobs</code>, masks, rewards, and later policy deltas; see <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/data_plane/schema.py#L25-L58"><code>SC_ROLLOUT_SCHEMA_FIELDS</code></a>. The first write stores tensor rows and sample metadata through <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/data_plane/column_io.py#L143-L224"><code>kv_first_write</code></a>.</p>
+      <p>Compaction changes the row cardinality after rollout: one logical rollout can become two or more physical rows, while GRPO comparison groups and rewards remain logical. A TransferQueue implementation therefore needs an explicit decision about when expansion happens, how sample IDs map logical parents to physical children, which controller metadata owns that map, and how replay/checkpoint recovery treats the group atomically. #3910 implements those decisions only in in-process <code>BatchedDataDict</code> preparation.</p>
+
+      <h3>What “remove token IDs and logprobs from the Gym path” would require</h3>
+      <p>The current contract assumes that Gym is the authority for the exact prompt seen by each model call. NeMo-RL verifies a digest against arrays carried in that same response. Removing those arrays from the Gym boundary requires another publicly defined authority: for example, a generation-side or TransferQueue record keyed by immutable call IDs, with Gym transporting only those IDs, boundary metadata, media ordering, and digests. The consumer would then join the records before trace planning and prove that the joined arrays match Gym’s digest.</p>
+      <p>Neither Gym PR implements that join. RL #3910 also reads the arrays directly from Gym output at <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/environments/nemo_gym.py#L1210-L1239">ingestion</a>. The accurate conclusion is “validation-only duplication removed,” not “token evidence removed from Gym.”</p>
+    </section>
+
+    <section id="evidence">
+      <h2>Evidence ledger</h2>
+      <div class="table-scroll">
+        <table class="ledger">
+          <thead><tr><th>Claim</th><th>Revision and command/evidence</th><th>Observed</th><th>Scope</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>#2870 defines one bounded return shape</td>
+              <td>Gym <span class="sha">aa800c065317</span>; focused unit test <a href="https://github.com/NVIDIA-NeMo/Gym/blob/aa800c065317bafd08fde4161274cfe9759583e9/responses_api_agents/simple_agent_with_compaction/tests/test_app.py#L635-L759"><code>test_run_returns_one_trace_envelope...</code></a></td>
+              <td>The test parametrizes verification on/off, requires <code>ContextCompactedTransportResponse</code> in both cases, verifies the digest, and checks that only the verifier payload contains full completion evidence.</td>
+              <td>Independently reproduced: 2 parameterizations passed at the exact #2870 head. The corresponding 2 base parameterizations passed at the commit’s direct parent and demonstrated the two old shapes.</td>
+            </tr>
+            <tr>
+              <td>Two discontinuous calls form two physical traces</td>
+              <td>RL <span class="sha">fd287d0df510</span>; direct CPU reproduction of <code>build_rollout_trace_plan</code> with calls <code>[101,102]+[201]</code> and <code>[101,301]+[202]</code>, plus boundary <code>rewrite-2</code></td>
+              <td><code>physical_trace_count=2</code>, <code>declared_boundary_count=1</code>, <code>inferred_boundary_count=0</code>; both calls start a trace.</td>
+              <td>Independently reproduced planner behavior. It does not prove the HTTP or training loop.</td>
+            </tr>
+            <tr>
+              <td>SingleController/TQ is unsupported</td>
+              <td>RL <span class="sha">fd287d0df510</span>; static guards in <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/algorithms/single_controller_utils/setup.py#L910-L920">SingleController setup</a> and <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/nemo_rl/algorithms/physical_trace_training.py#L166-L181">physical-trace validation</a></td>
+              <td>The first requires data plane enabled; the second rejects it. <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/tests/unit/algorithms/test_grpo.py#L780-L799">A unit case</a> asserts the rejection.</td>
+              <td>Conclusive for this revision.</td>
+            </tr>
+            <tr>
+              <td>Physical rows receive logical advantages and padding</td>
+              <td>RL <span class="sha">fd287d0df510</span>; source plus focused tests in <a href="https://github.com/NVIDIA-NeMo/RL/blob/fd287d0df510da4abfd655b114c63a799d71b4a9/tests/unit/experience/test_trace_batch_materialization.py">test_trace_batch_materialization.py</a></td>
+              <td>Source validates parent ownership, group completeness, tensor alignment, and fully masked padding after expansion.</td>
+              <td>The focused real postprocessor test passed locally and emitted two physical logs. Full training was not independently run.</td>
+            </tr>
+            <tr>
+              <td>RL #3910’s dependency pin is incompatible</td>
+              <td>RL <span class="sha">fd287d0df510</span>; <a href="https://github.com/NVIDIA-NeMo/RL/tree/fd287d0df510da4abfd655b114c63a799d71b4a9/3rdparty/Gym-workspace/Gym">Gym submodule gitlink</a></td>
+              <td><code>git ls-tree</code> reports <code>c3bac96314a59f28b896f597eb9845d175bb0252</code>. That Gym revision has no <code>simple_agent_with_compaction</code> path.</td>
+              <td>Independently reproduced and merge-blocking until the pin contains #2870.</td>
+            </tr>
+            <tr>
+              <td>Public author validation</td>
+              <td><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2616">Gym #2616 body</a>, <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2870">Gym #2870 body</a>, and <a href="https://github.com/NVIDIA-NeMo/RL/pull/3910">RL #3910 body</a></td>
+              <td>Authors report focused tests and deterministic integration runs. #2616’s public CI shows eight passing checks; #2870 currently exposes lint, copyright, secrets, and DCO checks but no public behavior suite.</td>
+              <td>Author-provided public evidence. The deterministic harness is not public, so the complete integration is not independently replayable.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Independently reproduced command</h3>
+      <pre>python - &lt;&lt;'PY'
+from nemo_rl.environments.nemo_gym_trace import build_rollout_trace_plan
+
+calls = [
+    {
+        "turn_id": 1, "completion_id": "c1", "action_id": "a1",
+        "prompt_token_ids": [101, 102], "sampled_token_ids": [201],
+        "sampled_logprobs": [-0.2], "media_ids": [],
+        "expected_append_compatible": False, "segment_index": 0,
+        "context_epoch": 0, "segment_id": "seg-0",
+        "compaction_event_id": None, "rollout_id": "rollout-7",
+    },
+    {
+        "turn_id": 2, "completion_id": "c2", "action_id": "a2",
+        "prompt_token_ids": [101, 301], "sampled_token_ids": [202],
+        "sampled_logprobs": [-0.3], "media_ids": [],
+        "expected_append_compatible": False, "segment_index": 1,
+        "context_epoch": 1, "segment_id": "seg-1",
+        "compaction_event_id": "rewrite-2", "rollout_id": "rollout-7",
+    },
+]
+plan = build_rollout_trace_plan(
+    rollout_id="rollout-7",
+    calls=calls,
+    boundary_events=[{"event_id": "rewrite-2", "applies_to_step": 2}],
+    media_assets={},
+    strict=True,
+)
+print(plan["physical_trace_ids"])
+print(plan["checks"])
+PY</pre>
+      <pre>['rollout-7:trace-000000', 'rollout-7:trace-000001']
+{'ok': True, 'model_call_count': 2, 'physical_trace_count': 2,
+ 'declared_boundary_count': 1, 'inferred_boundary_count': 0}</pre>
+      <h3>Focused base/head test commands</h3>
+      <p>After creating isolated environments from public pinned dependencies, these commands reached the changed behavior:</p>
+      <pre># Gym #2870 direct parent c8940a2d
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -p no:cacheprovider -q \
+  responses_api_agents/simple_agent_with_compaction/tests/test_app.py::\
+TestApp::test_run_preserves_authority_contract_with_optional_resource_verification
+# 2 passed
+
+# Gym #2870 head aa800c06
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -p no:cacheprovider -q \
+  responses_api_agents/simple_agent_with_compaction/tests/test_app.py::\
+TestApp::test_run_returns_one_trace_envelope_with_optional_resource_verification
+# 2 passed
+
+# NeMo-RL #3910 head fd287d0d
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -p no:cacheprovider -q \
+  tests/unit/environments/test_nemo_gym.py::\
+test_nemo_gym_postprocess_builds_exact_compacted_physical_logs
+# 1 passed</pre>
+      <p>The Gym comparison demonstrates the behavior change: the parent emits schema v3 metadata after verification but schema v2 full completion evidence when verification is skipped; the head returns one bounded digest-backed shape in both cases. The NeMo-RL test executes the real postprocessor with a synthetic payload and produces two physical token logs around a declared rewrite. It does not prove live HTTP interoperability or a training step.</p>
+      <p class="muted" style="margin-top:12px">Local test attempts are reported only at the dependency level. Machine paths, infrastructure identifiers, and other non-public environment details are intentionally omitted.</p>
+    </section>
+
+    <section id="questions">
+      <h2>Review questions that remain</h2>
+      <article class="card">
+        <h3 style="margin-top:0">1. Which merged Gym revision will RL #3910 pin?</h3>
+        <p>This is a concrete merge blocker, not an architectural preference. The pinned RL head still references Gym <code>c3bac963</code>, which predates the compaction agent. The PR must update its gitlink to a merged Gym commit containing #2870, then rerun the exact integration at that combined revision.</p>
+      </article>
+      <article class="card" style="margin-top:14px">
+        <h3 style="margin-top:0">2. Is SingleController a merge requirement or a planned follow-up?</h3>
+        <p>The current implementation cannot run there. If SingleController is the target production architecture, reviewers need a public design for logical-to-physical sample IDs, TransferQueue schema changes, replay-group atomicity, checkpoint metadata, and where expansion occurs. A regression should run a compacted Gym rollout through <code>run_grpo_single_controller</code> with <code>data_plane.enabled=true</code>.</p>
+      </article>
+      <article class="card" style="margin-top:14px">
+        <h3 style="margin-top:0">3. Where should exact generation arrays live long term?</h3>
+        <p>#2870 removes duplicate arrays but leaves the originals on Gym output. If the architectural goal is to keep token IDs and logprobs entirely out of the Gym transport, the producer and consumer need a durable join key and a failure rule for missing, duplicated, stale, or digest-mismatched generation-side records.</p>
+      </article>
+      <article class="card" style="margin-top:14px">
+        <h3 style="margin-top:0">4. Can the exact merged-Gym integration be replayed publicly?</h3>
+        <p>RL #3910 declares a hard dependency on #2870 and says the Gym dependency must be updated after merge. The strongest end-to-end validation uses a harness that is not in either public PR. Before merge, a public or CI-contained deterministic fixture should demonstrate the exact #2870 wire payload entering #3910 and producing the expected physical training rows.</p>
+      </article>
+      <article class="card" style="margin-top:14px">
+        <h3 style="margin-top:0">5. Is an unversioned public contract intentional beyond this rollout?</h3>
+        <p>Removing versions that represented internal lifecycle stages is correct. But an unversioned, <code>extra="forbid"</code> wire model makes any future required field a coordinated breaking change. Reviewers should decide whether the field name itself is the compatibility discriminator or whether a genuine protocol revision mechanism is still needed.</p>
+      </article>
+      <article class="card" style="margin-top:14px">
+        <h3 style="margin-top:0">6. Which generation-contract fields must NeMo-RL enforce?</h3>
+        <p>Gym’s <a href="https://github.com/NVIDIA-NeMo/Gym/blob/aa800c065317bafd08fde4161274cfe9759583e9/responses_api_agents/simple_agent_with_compaction/compaction/history.py#L487-L521">generation contract</a> exports component identities, incomplete reasons, and a <code>training_eligible</code> signal. Other metadata adds processor fingerprints, policy spans, and evidence source. RL #3910 validates the canonical-array digest and trace continuity but does not enforce every exported provenance field. Reviewers should document which fields are informative and which are required to reject training.</p>
+      </article>
+    </section>
+
+    <section>
+      <h2>Practical review order</h2>
+      <ol>
+        <li>Accept or reject the #2870 wire contract first: one field name, one transport shape, canonical-array digest binding.</li>
+        <li>Review RL ingestion against that exact contract: identities, digest, media order, and boundary validation.</li>
+        <li>Review logical-to-physical semantics: one reward and advantage per rollout, one or more physical training rows.</li>
+        <li>Decide whether legacy sync/async support is enough. If SingleController is required, treat the TransferQueue work as missing functionality rather than incidental follow-up polish.</li>
+        <li>Only then assess the larger #2616 policy and history machinery, because its exported trace contract is what constrains every downstream path.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Bottom line</h2>
+      <p>#2616 and #2870 form a coherent Gym-side design: semantic history remains complete, physical rewrites are explicit, exact generation arrays stay authoritative, and #2870 makes the exported envelope independent of verification. RL #3910 contains a credible consumer for the legacy synchronous and asynchronous GRPO drivers, and focused ingestion tests pass.</p>
+      <p>The exact RL head is not yet integrated because its Gym submodule pin predates both compaction contracts. That pin must move to a merged revision containing #2870 before the public PR can be tested as a complete checkout.</p>
+      <p>For the v2 architecture named in the question, compatibility is incomplete. SingleController is TransferQueue-based, and the public consumer PR deliberately blocks that route. The token/logprob optimization is also narrower than “off the Gym path”: duplicate validation evidence is gone, but canonical token IDs and logprobs still travel through Gym and are consumed directly by NeMo-RL.</p>
+    </section>
+
+    <footer>
+      <p>Public-source deep dive generated from pinned GitHub revisions. No private code, runs, infrastructure, or metrics are included.</p>
+    </footer>
+  </main>
+  <script>
+    (() => {
+      const button = document.querySelector(".theme-toggle");
+      const update = () => {
+        const light = document.documentElement.dataset.theme === "light";
+        button.textContent = light ? "Use dark theme" : "Use light theme";
+        button.setAttribute("aria-pressed", String(light));
+      };
+      button.addEventListener("click", () => {
+        const light = document.documentElement.dataset.theme !== "light";
+        if (light) document.documentElement.dataset.theme = "light";
+        else delete document.documentElement.dataset.theme;
+        try {
+          localStorage.setItem("engineering-notes-theme", light ? "light" : "dark");
+        } catch {}
+        update();
+      });
+      update();
+    })();
+  </script>
+</body>
+</html>
