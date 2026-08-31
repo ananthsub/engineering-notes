@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>External token staging: the contract is strong, the integration still has two correctness gaps</title>
+  <script>
+    (() => {
+      try {
+        if (localStorage.getItem("engineering-notes-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {}
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface2: #1d2530;
+      --border: #30363d;
+      --text: #e6edf3;
+      --dim: #9aa4af;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --red: #f85149;
+      --purple: #bc8cff;
+      --code: #111820;
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --surface2: #eef2f6;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --dim: #59636e;
+      --accent: #0969da;
+      --green: #1a7f37;
+      --yellow: #9a6700;
+      --red: #cf222e;
+      --purple: #8250df;
+      --code: #f0f3f6;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.62 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1040px; margin: 0 auto; padding: 40px 22px 80px; }
+    h1 { max-width: 900px; margin: 0 0 14px; font-size: clamp(2rem, 5vw, 3.3rem); line-height: 1.06; letter-spacing: -0.04em; }
+    h2 { margin: 64px 0 16px; font-size: clamp(1.55rem, 3vw, 2.1rem); line-height: 1.2; }
+    h3 { margin: 28px 0 8px; font-size: 1.12rem; }
+    p { margin: 10px 0 16px; }
+    a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+    code {
+      padding: 0.15em 0.35em;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--code);
+      color: var(--text);
+      font: 0.9em ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    pre {
+      overflow: auto;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--code);
+      font: 0.86rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    .theme {
+      position: fixed;
+      z-index: 10;
+      top: 14px;
+      right: 14px;
+      min-width: 112px;
+      padding: 9px 12px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .eyebrow { color: var(--purple); font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.78rem; }
+    .lede { max-width: 900px; font-size: 1.18rem; color: var(--dim); }
+    .answer {
+      margin: 26px 0;
+      padding: 18px 20px;
+      border-left: 4px solid var(--yellow);
+      border-radius: 0 9px 9px 0;
+      background: var(--surface);
+      font-size: 1.06rem;
+    }
+    .answer strong { color: var(--yellow); }
+    .toc, .callout {
+      margin: 26px 0;
+      padding: 18px 20px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+    .toc ol { columns: 2; margin: 8px 0 0; padding-left: 22px; }
+    .toc li { break-inside: avoid; margin: 5px 0; }
+    figure {
+      margin: 26px 0;
+      padding: 18px;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    figcaption { margin-top: 14px; color: var(--dim); font-size: 0.92rem; }
+    .trace { min-width: 850px; display: flex; align-items: stretch; gap: 8px; }
+    .trace-step { flex: 1; min-width: 128px; padding: 12px; border: 1px solid var(--border); border-top: 3px solid var(--accent); border-radius: 9px; background: var(--surface2); font-size: 0.82rem; }
+    .trace-step b { display: block; margin-bottom: 6px; color: var(--accent); }
+    .trace-arrow { align-self: center; color: var(--accent); font-size: 1.2rem; }
+    .lanes { min-width: 830px; display: grid; grid-template-columns: 135px 1fr; gap: 14px 18px; align-items: center; }
+    .lane-label { color: var(--dim); font-weight: 750; }
+    .flow { display: flex; align-items: stretch; gap: 8px; }
+    .node { flex: 1; min-width: 112px; padding: 10px; border: 1px solid var(--border); border-top: 3px solid var(--green); border-radius: 8px; background: var(--surface2); font-size: 0.8rem; }
+    .node strong { display: block; font-size: 0.92rem; }
+    .node.open { border-top-color: var(--yellow); }
+    .arrow { align-self: center; color: var(--green); font-size: 1.2rem; }
+    .cross-edge { grid-column: 2; padding: 8px 12px; border: 1px dashed var(--purple); border-radius: 8px; color: var(--purple); text-align: center; font-size: 0.86rem; }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .card { padding: 17px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+    .card h3 { margin-top: 0; }
+    .finding { margin: 18px 0; padding: 18px; border: 1px solid var(--border); border-left: 5px solid var(--yellow); border-radius: 9px; background: var(--surface); }
+    .finding.blocker { border-left-color: var(--red); }
+    .finding.good { border-left-color: var(--green); }
+    .finding h3 { margin-top: 0; }
+    .severity { display: inline-block; margin-right: 7px; padding: 2px 8px; border-radius: 999px; background: var(--red); color: white; font-size: 0.74rem; font-weight: 800; text-transform: uppercase; }
+    .severity.warn { background: var(--yellow); color: #111; }
+    .severity.good { background: var(--green); }
+    .impact, .small { color: var(--dim); }
+    .table-wrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--border); border-radius: 10px; }
+    table { width: 100%; min-width: 760px; border-collapse: collapse; }
+    th, td { padding: 11px 12px; border-bottom: 1px solid var(--border); vertical-align: top; text-align: left; }
+    th { background: var(--surface2); }
+    tr:last-child td { border-bottom: 0; }
+    details.provenance { margin: 18px 0 0; }
+    details.provenance summary { cursor: pointer; color: var(--accent); }
+    details.provenance ul { columns: 2; padding-left: 22px; }
+    footer { margin-top: 70px; padding-top: 22px; border-top: 1px solid var(--border); color: var(--dim); }
+    @media (max-width: 700px) {
+      main { padding: 28px 15px 64px; }
+      .theme { position: static; float: right; margin: 0 0 14px 14px; }
+      .toc ol, details.provenance ul { columns: 1; }
+      .cards { grid-template-columns: 1fr; }
+      h2 { margin-top: 48px; }
+    }
+  </style>
+</head>
+<body>
+  <button class="theme" type="button" aria-label="Toggle color theme">Light theme</button>
+  <main>
+    <div class="eyebrow">Public code review · snapshot 31 August 2026</div>
+    <h1>External token staging: the contract is strong, the integration still has two correctness gaps</h1>
+    <p class="lede">A cross-repository review of <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2872">Gym #2872</a>, its token-capture ancestry, and the active <a href="https://github.com/NVIDIA-NeMo/RL/pull/3837">NeMo RL #3837</a> integration through TransferQueue and SingleController.</p>
+
+    <div class="answer"><strong>Verdict: request changes on the current integration path.</strong> Gym #2872 introduces a carefully separated, fail-closed custody protocol and materially reuses the existing token-capture lineage and terminal-attribution machinery. The out-of-tree seam is credible. But RL #3837 has two reproducible correctness defects: deferred routed-expert finalization bypasses Gym’s terminal cumulative-hash check, and checkpoint restore leaves new replay-buffer ownership arrays empty, causing removal after restore to fail. The worker capture lock also serializes every synchronous staging write. Finally, RL validates against a synthetic Gym revision rather than the current #2872 head, so the pair is not yet one reproducible source contract.</div>
+
+    <nav class="toc" aria-label="Page contents">
+      <strong>Read in this order</strong>
+      <ol>
+        <li><a href="#system">What changed</a></li>
+        <li><a href="#stack">Stack and compatibility boundary</a></li>
+        <li><a href="#correctness">Correctness findings</a></li>
+        <li><a href="#performance">Performance implications</a></li>
+        <li><a href="#extensibility">Extensibility and reuse</a></li>
+        <li><a href="#understandability">Understandability</a></li>
+        <li><a href="#validation">Validation evidence</a></li>
+        <li><a href="#questions">Reviewer questions</a></li>
+      </ol>
+    </nav>
+
+    <section id="system">
+      <h2>What changed: tokens move once, custody metadata moves end to end</h2>
+      <p>The original Gym capture path keeps complete token records in Gym-owned storage. The external-staging mode splits that responsibility. The inference worker owns the exact token delta and writes it to a framework-provided sink. Gym admits each call, records a token-free custody row, attributes a terminal call, and seals a receipt. The training framework fetches the staged deltas and verifies that the receipt, snapshots, parent graph, chained hashes, and terminal whole-sequence hash all agree.</p>
+
+      <h3>One two-call rollout</h3>
+      <pre>call A (text root)
+  prompt IDs       [10, 20]
+  generated IDs    [30]
+  staged delta     [10, 20, 30]   mask [0, 0, 1]
+  custody row      key=A, parent=None, prev=0, delta=3, cumulative=3
+
+call B (continues A)
+  authorized prefix [10, 20, 30]
+  generated IDs     [40, 50]
+  staged delta      [40, 50]      mask [1, 1]
+  custody row       key=B, parent=A, prev=3, delta=2, cumulative=5
+
+sealed terminal B → verified training row
+  token IDs         [10, 20, 30, 40, 50]
+  token mask        [0,  0,  1,  1,  1]</pre>
+      <p>TransferQueue stores the two staged deltas. Gym’s ledger stores the keys, lengths, parent edge, versions, and hashes but not these token arrays. The finalizer follows <code>B → A</code>, reverses that ancestry, and accepts the five-token row only when the staged bytes reproduce the ledger’s link hashes and B’s whole-sequence hash.</p>
+
+      <figure>
+        <div class="trace">
+          <div class="trace-step"><b>1 · Admit</b>Gym resolves the parent from exact lineage evidence and authorizes either a text root or token prefix.</div>
+          <div class="trace-arrow">→</div>
+          <div class="trace-step"><b>2 · Generate</b>The engine uses the authorized prefix and emits exact prompt IDs, generated IDs, logprobs, and optional extras.</div>
+          <div class="trace-arrow">→</div>
+          <div class="trace-step"><b>3 · Stage</b>The worker computes deltas and hashes, then synchronously writes one durable record to TransferQueue.</div>
+          <div class="trace-arrow">→</div>
+          <div class="trace-step"><b>4 · Custody</b>Gym receives only commit coordinates and appends a token-free ledger row.</div>
+          <div class="trace-arrow">→</div>
+          <div class="trace-step"><b>5 · Seal</b>Terminal witnesses select one ancestry and the control route returns a receipt.</div>
+          <div class="trace-arrow">→</div>
+          <div class="trace-step"><b>6 · Rebuild</b>RL fetches staged rows, verifies them, publishes canonical training rows, and commits the replay slot.</div>
+        </div>
+        <figcaption>The important trust split: TransferQueue holds token bytes; Gym holds custody evidence; the finalizer joins the two and should accept a row only when both agree.</figcaption>
+      </figure>
+
+      <div class="cards">
+        <div class="card"><h3>Correct ownership direction</h3><p>The heavy arrays stay next to the trainer’s data plane. Gym no longer has to relay training tokens through the agent/environment path.</p></div>
+        <div class="card"><h3>Fail-closed call lifecycle</h3><p>A staging failure returns <code>capture_failed</code> coordinates rather than pretending custody succeeded. Capture failure does not fail the model completion itself.</p></div>
+        <div class="card"><h3>Integrity has two layers</h3><p>Per-link chain hashes establish ordered ancestry. A terminal cumulative hash anchors the rebuilt whole sequence and catches a chain that is internally self-consistent but not the sequence the worker claimed.</p></div>
+        <div class="card"><h3>Legacy behavior remains opt-in safe</h3><p>External staging is a server configuration mode. The complete-record capture path remains the default and is not replaced.</p></div>
+      </div>
+    </section>
+
+    <section id="stack">
+      <h2>Stack and compatibility boundary</h2>
+      <figure>
+        <div class="lanes">
+          <div class="lane-label">Merged Gym base</div>
+          <div class="flow">
+            <div class="node"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2124">#2124</a></strong>capture exact tokens</div><div class="arrow">→</div>
+            <div class="node"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2125">#2125</a></strong>chain calls</div><div class="arrow">→</div>
+            <div class="node"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2126">#2126</a></strong>safe delivery</div><div class="arrow">→</div>
+            <div class="node"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2180">#2180</a></strong>resolve parents</div><div class="arrow">→</div>
+            <div class="node"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2181">#2181</a></strong>exact prefix input</div>
+          </div>
+          <div></div><div class="cross-edge">#2872 reuses capture context, lineage, fingerprints, and terminal witnesses; it adds an external custody/storage contract.</div>
+          <div class="lane-label">Open integration</div>
+          <div class="flow">
+            <div class="node open"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2872">Gym #2872</a></strong>external staging + ledger<div>head c5dccdb</div></div><div class="arrow">⇄</div>
+            <div class="node open"><strong><a href="https://github.com/NVIDIA-NeMo/RL/pull/3837">RL #3837</a></strong>TQ sink + SC finalizer<div>head 1c9fa8c</div></div>
+          </div>
+        </div>
+        <figcaption>#2278 is the earlier draft integration layer. The current review follows the active #2872 ↔ #3837 path, not the historical branch shape.</figcaption>
+      </figure>
+
+      <div class="finding blocker">
+        <h3><span class="severity">Release blocker</span>RL does not pin the current Gym PR head</h3>
+        <p>RL #3837 pins Gym commit <code>8e983c571ff09e8f20c45bcf7f501469854d54fa</code>. Its own commit message describes that revision as the earlier #2872 tree plus a separately cherry-picked strict-tool stripping fix. The current Gym #2872 head is <code>c5dccdb6125e2931da0a01c26417b38493e76556</code>. A direct diff is non-empty: the current head narrows SWE-agent integration and differs in response-converter behavior.</p>
+        <p class="impact"><strong>Impact.</strong> The compatibility PR is not validating the exact code proposed by #2872. A merge or later rebase can silently select one side of the bespoke combination. Put the required strict-tool fix and narrowing changes in #2872, then pin #3837 to that exact public head and rerun the cross-repository tests.</p>
+      </div>
+    </section>
+
+    <section id="correctness">
+      <h2>Correctness findings</h2>
+
+      <div class="finding blocker">
+        <h3><span class="severity">High</span>Deferred routed-expert finalization omits the terminal cumulative-hash check</h3>
+        <p>Gym’s canonical verifier recomputes every staged digest, validates the manifest graph, re-derives the chain hash for each link, then compares the rebuilt terminal sequence with <code>cumulative_hash</code>. See <a href="https://github.com/NVIDIA-NeMo/Gym/blob/c5dccdb6125e2931da0a01c26417b38493e76556/nemo_gym/token_id_capture/staging/rebuild.py#L261-L382">the canonical verifier</a>, especially its chain and terminal checks.</p>
+        <p>RL’s deferred-route mode instead calls its own <a href="https://github.com/NVIDIA-NeMo/RL/blob/1c9fa8c6678cb3ce764c76c1e6cbc126475f118e/nemo_rl/experience/blackbox_finalizer.py#L99-L202"><code>_linearize_metadata_only</code></a>. That copy validates graph shape and mask order, but it does not recompute chain hashes, does not check the terminal cumulative hash, and does not reject an empty training row. The dispatch between the two paths is visible in <a href="https://github.com/NVIDIA-NeMo/RL/blob/1c9fa8c6678cb3ce764c76c1e6cbc126475f118e/nemo_rl/experience/blackbox_finalizer.py#L410-L423"><code>finalize_rollout</code></a>.</p>
+        <pre>same malformed receipt, same staged token deltas
+
+standard path:
+  valid = false
+  reason = rebuild_failed:cumulative_hash_mismatch
+
+deferred routed-expert path:
+  valid = true
+  tokens = [10, 20, 30]</pre>
+        <p class="impact"><strong>Impact.</strong> Enabling the performance optimization weakens the custody contract and can accept a sequence the terminal worker hash does not authorize. This is a security-like integrity boundary even if the expected failure source is accidental corruption.</p>
+        <p><strong>Fix.</strong> Do not maintain a second linearizer. Extend Gym’s verifier with an option or callback that verifies extras metadata without materializing route bytes, while preserving all common receipt, digest, graph, chain, terminal, and mask invariants. Add one parametrized corruption suite that must produce identical accept/reject results in direct and deferred modes.</p>
+      </div>
+
+      <div class="finding blocker">
+        <h3><span class="severity">High</span>Checkpoint restore breaks replay-buffer parallel-array invariants</h3>
+        <p><code>TQReplayBuffer.reserve</code> appends to all parallel arrays, including <code>_rollout_ids_list</code> and <code>_staging_keys_list</code>. <code>remove</code> indexes the staging-key list, and <code>_delete_slot</code> deletes from both. But <a href="https://github.com/NVIDIA-NeMo/RL/blob/1c9fa8c6678cb3ce764c76c1e6cbc126475f118e/nemo_rl/algorithms/async_utils/replay_buffer.py#L1168-L1307"><code>load_state_dict</code></a> restores only the older arrays and group IDs.</p>
+        <pre>after restoring one ready group:
+  len(meta_list)          = 1
+  len(_rollout_ids_list)  = 0
+  len(_staging_keys_list) = 0
+
+await remove([0], remove_in_dp=False)
+  IndexError: list index out of range</pre>
+        <p class="impact"><strong>Impact.</strong> A resumed run can fail as soon as the train pump consumes or evicts a restored group. Staging ownership is also absent from the serialized checkpoint, so simply appending <code>None</code> would prevent the crash but would not preserve deferred-route cleanup responsibility.</p>
+        <p><strong>Fix.</strong> Add rollout IDs and staging keys to the checkpoint schema, validate them during preflight, restore every parallel array atomically, and test save → load → consume as well as save → load → stale eviction in capture mode. If old checkpoints are supported, define an explicit migration policy for missing ownership fields.</p>
+      </div>
+
+      <div class="finding good">
+        <h3><span class="severity good">Confirmed</span>Mixed weight versions reject as configured</h3>
+        <p>A focused check with a terminal chain spanning versions 1 and 99 produced <code>mixed_weight_versions:1..99</code> under the <code>reject</code> policy. The implementation computes min/max across the manifest after rebuild. This is conservative and prevents mixed-policy trajectories from entering training when rejection is requested.</p>
+      </div>
+
+      <div class="finding good">
+        <h3><span class="severity good">Confirmed</span>The main verifier has the right invariant ordering</h3>
+        <p>The canonical path validates schema versions and poison state before reading semantics, requires a one-to-one ordered snapshot set, compares every custody field, recomputes digest inputs, validates the full manifest graph, selects only terminal ancestry, derives chain hashes in order, and finally checks the terminal whole-sequence anchor. This is a strong fail-closed design, and the terminal-only cumulative hash avoids quadratic rehashing.</p>
+      </div>
+    </section>
+
+    <section id="performance">
+      <h2>Performance implications</h2>
+      <div class="finding">
+        <h3><span class="severity warn">Medium</span>One worker capture object serializes every staging write</h3>
+        <p>Gym’s <a href="https://github.com/NVIDIA-NeMo/Gym/blob/c5dccdb6125e2931da0a01c26417b38493e76556/nemo_gym/token_id_capture/staging/capture.py#L97-L208"><code>complete_call</code></a> holds the same <code>threading.Lock</code> while calling the external <code>StagingSink.stage</code>. RL’s <a href="https://github.com/NVIDIA-NeMo/RL/blob/1c9fa8c6678cb3ce764c76c1e6cbc126475f118e/nemo_rl/data_plane/tq_token_sink.py#L126-L180">TQ sink</a> is synchronous and waits for a data-plane acknowledgement, so lock hold time includes tensor construction, TransferQueue submission, and network/actor latency.</p>
+        <pre>synthetic sink latency: 50 ms
+four concurrent complete_call operations: ~207 ms
+expected if independent: ~50–60 ms
+observed behavior: approximately 4× serialization</pre>
+        <p class="impact"><strong>Impact.</strong> If a serving worker handles concurrent requests, staging throughput is capped at one write per worker. Tail latency from a slow TQ write blocks unrelated rollouts. The protocol already says blocking implementations must be moved off an event loop, but it does not say that all calls will be globally serialized.</p>
+        <p><strong>Fix choices.</strong> Make sink thread safety part of the protocol and keep the lock only around the single-shot completion claim; or use keyed/per-rollout synchronization if the sink needs ordering only within a rollout. Benchmark with realistic TQ actor latency and concurrent engine requests before choosing.</p>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Cost center</th><th>Expected behavior</th><th>Review</th></tr></thead>
+          <tbody>
+            <tr><td>Gym data plane</td><td>No raw training-token arrays in ledger or control response</td><td>Meaningful reduction in duplicate heavy transport.</td></tr>
+            <tr><td>Worker hashing</td><td>One delta chain hash plus one cumulative sequence hash per call</td><td>Cumulative hash is O(sequence length) per call. Multi-turn generation still rehashes the growing prompt at each call.</td></tr>
+            <tr><td>Final verification</td><td>Digest per row, chain hash per delta, one terminal cumulative hash</td><td>Linear in staged bytes; the terminal-only anchor is the right optimization.</td></tr>
+            <tr><td>Routed experts</td><td>Optional deferred materialization at policy consumption</td><td>Useful memory/transport optimization, but currently pays with duplicated verification logic and weaker integrity.</td></tr>
+            <tr><td>Finalizer pool</td><td>Blocking TQ work outside generation hot path</td><td>Architecturally sound; metrics separate rollout, tensorization, put, and cleanup costs.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="extensibility">
+      <h2>Out-of-tree adapters and code reuse</h2>
+      <p>The core seam is deliberately small. <a href="https://github.com/NVIDIA-NeMo/Gym/blob/c5dccdb6125e2931da0a01c26417b38493e76556/nemo_gym/token_id_capture/staging/protocols.py#L30-L88"><code>StagingSink</code>, <code>StagingSource</code>, <code>WeightVersionProvider</code>, and <code>CaptureAdapter</code></a> use Python protocols and plain records. Gym does not import TransferQueue. The adapter owns only engine extraction and prefix attachment; the capture object owns admission, lifecycle, normalization, hashing, staging, and failure coordinates.</p>
+
+      <div class="cards">
+        <div class="card"><h3>Good: storage inversion</h3><p>An external framework implements <code>stage</code> and <code>fetch</code> without modifying Gym. Opaque staging keys keep the custody ledger storage-neutral.</p></div>
+        <div class="card"><h3>Good: engine inversion</h3><p>A non-vLLM engine can implement four extraction methods while inheriting the same digest and lifecycle semantics.</p></div>
+        <div class="card"><h3>Constraint: synchronous boundary</h3><p>Adapters and sinks are intentionally synchronous. Async serving hosts must explicitly move blocking work off their event loop, and concurrency semantics should be documented.</p></div>
+        <div class="card"><h3>Constraint: install shape</h3><p>The serving layer must expose <code>install_token_capture(capture)</code>. That is small, but an out-of-tree implementation still needs a host shim.</p></div>
+      </div>
+
+      <h3>Reuse scorecard</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Concern</th><th>Reuse result</th><th>Assessment</th></tr></thead>
+          <tbody>
+            <tr><td>Capture context and parent resolution</td><td>Existing context, lineage, and fingerprints extended</td><td>Good reuse; avoids a second admission model.</td></tr>
+            <tr><td>Terminal attribution</td><td>Consolidated onto the existing witness engine</td><td>Strong improvement over the earlier duplicate staging attribution module.</td></tr>
+            <tr><td>File/lock plumbing</td><td>Custody ledger shares rollout validation and token-store lock</td><td>Good consolidation and fewer synchronization concepts.</td></tr>
+            <tr><td>Wire/integrity vocabulary</td><td>Central records, versions, reason codes, golden vectors</td><td>Good foundation for independent implementations.</td></tr>
+            <tr><td>Final linearization</td><td>RL duplicates the canonical algorithm for deferred routes</td><td>Not acceptable: this is where the strongest correctness gap appears.</td></tr>
+            <tr><td>Replay checkpoint schema</td><td>Older schema extended incompletely</td><td>Ownership fields need first-class serialization, not side arrays omitted on restore.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="understandability">
+      <h2>Code understandability</h2>
+      <p>Gym’s new package is easiest to understand as four layers: immutable wire records, canonical digest functions, one worker lifecycle, and one verifier. That separation is effective. The names <code>CaptureAdmission</code>, <code>StagedCallRecord</code>, <code>CommitCoords</code>, <code>RolloutManifest</code>, and <code>RolloutReceipt</code> describe the custody transition clearly.</p>
+      <p>The cross-repository system is harder to reason about because state is represented in several parallel forms: Gym ledger records, TQ staging rows, finalizer requests, canonical TQ rows, replay-buffer slots, and optional route plans. The PR descriptions are unusually thorough, but correctness should not depend on readers keeping duplicate algorithms and parallel arrays mentally synchronized.</p>
+      <div class="callout">
+        <strong>Recommended simplification.</strong> Treat Gym’s <code>verify_and_linearize</code> as the only accept/reject authority. Expose a verified chain plan containing token spans and digest-checked extras references. RL can then choose direct or deferred route materialization after verification without reimplementing custody semantics. Separately, replace replay-buffer parallel arrays with one slot dataclass so save, load, reserve, commit, and remove operate on the same state object.
+      </div>
+    </section>
+
+    <section id="validation">
+      <h2>Validation evidence and limits</h2>
+      <p>The review pinned public heads, compared the RL-pinned Gym revision against #2872, inspected the custody and TQ boundaries, and ran focused dependency-light reproductions for each behavioral claim. The two high-severity failures were reproduced directly against the reviewed revisions. The lock result used four concurrent calls and a deterministic 50 ms sink.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Claim</th><th>Result</th><th>Why it matters</th></tr></thead>
+          <tbody>
+            <tr><td>Canonical verifier rejects wrong terminal cumulative hash</td><td>Pass: rejected</td><td>Confirms expected custody contract.</td></tr>
+            <tr><td>Deferred-route path rejects the same corruption</td><td>Fail: accepted</td><td>Confirms mode-dependent integrity bypass.</td></tr>
+            <tr><td>Restored replay group can be removed</td><td>Fail: <code>IndexError</code></td><td>Confirms resume lifecycle break.</td></tr>
+            <tr><td>Mixed weight-version reject policy</td><td>Pass: rejected 1..99</td><td>Confirms conservative staleness handling.</td></tr>
+            <tr><td>Concurrent staging writes overlap</td><td>Fail: ~207 ms for four × 50 ms</td><td>Confirms global worker serialization.</td></tr>
+            <tr><td>Current hosted checks</td><td>Gym lint/copyright/secrets/DCO pass; RL metadata checks pass</td><td>No public end-to-end result currently demonstrates the exact #2872-head + #3837-head pair.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small">A broad local Gym suite was not used as evidence because the available environment had an unrelated OpenAI package API mismatch. Some RL tests requiring the optional Gym package were likewise unavailable in that environment. The report therefore distinguishes direct focused reproductions from hosted checks and does not claim a full-suite pass.</p>
+
+      <details class="provenance">
+        <summary>Pinned public revisions used for this review</summary>
+        <ul>
+          <li>Gym #2124: <code>90cde043cb1e081d66bdff669e793d0eab542e16</code></li>
+          <li>Gym #2125: <code>dd4498f13b0a51d46554022fdd602922338e1830</code></li>
+          <li>Gym #2126: <code>247167e85f7d0c2c3a817195c9e022b1f32e069a</code></li>
+          <li>Gym #2180: <code>c703db40b65fc619092cf2a5d6537cb9c591fb65</code></li>
+          <li>Gym #2181: <code>88e5903f5e083ac791af498c692a223d4c6f5dcc</code></li>
+          <li>Gym #2278: <code>d9ad9d2e693cc1378b89e14147ed41e67cf9f1e0</code></li>
+          <li>Gym #2872: <code>c5dccdb6125e2931da0a01c26417b38493e76556</code></li>
+          <li>RL #3837: <code>1c9fa8c6678cb3ce764c76c1e6cbc126475f118e</code></li>
+          <li>RL-pinned Gym: <code>8e983c571ff09e8f20c45bcf7f501469854d54fa</code></li>
+        </ul>
+      </details>
+    </section>
+
+    <section id="questions">
+      <h2>Questions to resolve before merge</h2>
+      <ol>
+        <li>Can deferred routed-expert mode call one Gym-owned verifier and receive a verified route-span plan, eliminating <code>_linearize_metadata_only</code>?</li>
+        <li>What is the checkpoint contract for staging ownership? Must deferred route fragments survive restart until policy consumption, and how are older checkpoints migrated?</li>
+        <li>Is <code>StagingSink.stage</code> required to be thread-safe? If not, what ordering guarantee requires a worker-global lock rather than rollout-scoped synchronization?</li>
+        <li>Which exact Gym commit is intended to merge with RL #3837? Can #2872 absorb the strict-tool fix so the compatibility PR pins the public head rather than a synthetic commit?</li>
+        <li>Which end-to-end test exercises save → restart → restored group consumption with token capture and deferred routed experts enabled together?</li>
+      </ol>
+      <div class="callout"><strong>Suggested merge gate.</strong> Fix and regression-test both high-severity defects, align the Gym pin exactly, and publish one end-to-end SingleController run that enables external staging, checkpoint/resume, and deferred routed experts. The lock can be a documented follow-up only if measured TQ concurrency shows it is not on the critical throughput path.</div>
+    </section>
+
+    <footer>
+      Reviewed from public GitHub source and checks at the pinned revisions above. This report evaluates the active integration path; open pull requests may change after this snapshot.
+    </footer>
+  </main>
+  <script>
+    const button = document.querySelector(".theme");
+    const syncLabel = () => {
+      button.textContent = document.documentElement.dataset.theme === "light" ? "Dark theme" : "Light theme";
+    };
+    button.addEventListener("click", () => {
+      const light = document.documentElement.dataset.theme === "light";
+      if (light) {
+        delete document.documentElement.dataset.theme;
+        localStorage.setItem("engineering-notes-theme", "dark");
+      } else {
+        document.documentElement.dataset.theme = "light";
+        localStorage.setItem("engineering-notes-theme", "light");
+      }
+      syncLabel();
+    });
+    syncLabel();
+  </script>
+</body>
+</html>
