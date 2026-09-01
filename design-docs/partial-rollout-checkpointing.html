@@ -123,7 +123,7 @@ tr:last-child td { border-bottom: none; }
 <h3>System constraints</h3>
 <ul>
   <li><b>Gym must commit before the global checkpoint is published.</b> A slow rollout therefore cannot block checkpointing indefinitely.</li>
-  <li><b>Generated data remains in <code>TransferQueue</code>.</b> Generation workers synchronously stage token, mask, and log-probability deltas before acknowledging each call. The Gym model server records token-free references and never receives token arrays.</li>
+  <li><b>Durable checkpoint token state remains in <code>TransferQueue</code>.</b> A published checkpoint refers to token, mask, and log-probability data that is already present in the matching <code>TransferQueue</code> snapshot. Gym checkpoint artifacts store references and integrity metadata rather than token arrays. An inference backend may still require inline prefix tokens when a call is dispatched; prefix delivery is separate from durable custody.</li>
   <li><b>Recovery starts from the latest published checkpoint.</b> Gym keeps server state in memory and serializes it only during a checkpoint commit. After an unplanned crash, NeMo-RL re-dispatches any later in-flight work from its input.</li>
   <li><b>One leased <code>SingleController</code> dispatches rollouts and coordinates checkpoints.</b> A second controller cannot run concurrently.</li>
   <li><b>The design must support tens of thousands of live executions.</b> Shared-filesystem metadata operations cannot grow linearly with the number of rollouts.</li>
@@ -640,6 +640,34 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <p>Checkpoint-time cost is proportional to live state. Prepare waits for accepted operations, copies agent and resources state into a frozen set, and commit writes that set to disk. The current prototype writes one JSON file per agent boundary and resources snapshot and copies per-rollout lineage files before publishing each component manifest. That is appropriate for validating correctness, but tens of thousands of live rollouts may create excessive shared-filesystem metadata traffic. Archive shards and a member index are a later storage optimization; they are not implemented by this PR stack.</p>
 <div class="card"><h3>Normal-path cleanup still needs a production pass</h3><p>The prototype retains completed agent execution objects, per-session resource lock objects, and each model limiter's set of seen attempts for the life of the server process. Those collections make checkpoint membership and stale-attempt fencing easy to validate, but their memory follows total attempts rather than only live attempts. Before enabling checkpointing for long-lived services or very large batches, the stack needs explicit retirement rules that preserve tombstones and required lineage while releasing completed execution payloads and unused locks.</p></div>
 
+<h3>Prefix custody is common, but prefix delivery differs by inference backend</h3>
+<p>Hashes and lineage keys identify and authenticate a token prefix, but they are not an inference prompt. A backend must obtain the actual token IDs before it can prefill the next model call. The vLLM capture path can send a <code>TransferQueue</code> staging chain to a generation worker because that worker can read the referenced rows. The Megatron Inference integration in <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2823">Gym #2823</a> cannot do that today, so its capture handler sends <code>required_prefix_token_ids</code> inline.</p>
+<div class="tbl"><table>
+<tr><th>Backend path</th><th>Current prefix custody and delivery</th><th>Checkpoint consequence</th></tr>
+<tr><td>vLLM worker staging</td><td>The worker stages each completed call in <code>TransferQueue</code>. Gym records a token-free staging chain. A child call sends that chain back to a worker, which fetches and verifies the prefix.</td><td>The restored Gym ledger can continue referring to the restored <code>TransferQueue</code> rows. The worker needs no inline token array from Gym.</td></tr>
+<tr><td>Megatron Inference deferred ledger</td><td>Megatron keeps the finished generation record in its metadata ledger. Gym #2823 records the ledger request UID and also retains cumulative token IDs in its private lineage file so the next child call can receive them inline. <a href="https://github.com/NVIDIA-NeMo/RL/pull/3869">NeMo-RL #3869</a> fetches the finished records and stages them in <code>TransferQueue</code> only after the rollout finishes.</td><td>A rollout-end flush is too late for an in-flight checkpoint. Before a checkpoint can publish, NeMo-RL must detach or fetch the active Megatron prefix, stage it in <code>TransferQueue</code>, and give Gym the resulting durable coordinate.</td></tr>
+</table></div>
+
+<div class="card"><h3>Make the delivery representation explicit</h3>
+<pre>prefix: InlinePrefix | StagedPrefix | None
+
+InlinePrefix:
+  kind: "inline"
+  token_ids: [...]
+  cumulative_hash: "..."
+
+StagedPrefix:
+  kind: "staged"
+  staging_chain: [...]
+  cumulative_hash: "..."</pre>
+<p>A root call has no prefix. A child call has exactly one representation. An inline prefix carries exactly <code>prev_len</code> token IDs and no staging chain. A staged prefix carries a nonempty staging chain and no token array. Both retain the same <code>parent_call_id</code>, <code>prev_len</code>, parent chain hash, and cumulative token hash. This replaces the current implicit contract in <code>CaptureAdmission</code>, where <code>required_prefix_token_ids</code> and <code>staging_chain</code> are independent optional fields and can both be populated.</p></div>
+
+<div class="card"><h3>Do not store both forms as competing custody records</h3>
+<p>Persisting cumulative token arrays and a staging chain for the same prefix creates two possible sources of truth. The forms can disagree, and repeatedly storing the cumulative array makes storage grow quadratically across a long multi-turn rollout. The durable ledger should record one authoritative custody location. Prefix delivery can then adapt that location to the backend: vLLM dereferences a staged chain itself, while an RL-side prefix materializer can fetch the same chain and send inline tokens to Megatron Inference.</p></div>
+
+<div class="card"><h3>Megatron checkpoint recovery needs more than the schema change</h3>
+<p>The explicit prefix union is a localized wire-contract cleanup. Continuing an unfinished Megatron generation is a larger cross-repository change. Megatron Inference needs a cut operation for an active request rather than only a finished-request ledger record. NeMo-RL must stage that cut in <code>TransferQueue</code> before the global checkpoint is published. During restore, either Megatron gains a <code>TransferQueue</code> prefix source or NeMo-RL materializes the staged prefix and sends it inline before prefill. The current rollout-end <code>flush_token_capture()</code> path does not provide this checkpoint-time behavior.</p></div>
+
 <h3>Failure handling is fail-closed</h3>
 <div class="tbl"><table>
 <tr><th>Failure</th><th>Observed behavior</th><th>Safe next action</th></tr>
@@ -761,6 +789,8 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <tr><td><code>POST …/model-checkpoint/commit</code> / <code>restore</code></td><td>export and install the token-free custody ledger; typed results carry counts, manifest digest, tombstones, and source attempts</td><td><span class="pill pr">PR #2941</span></td></tr>
 <tr><td>call-id echo</td><td><code>x-ng-model-call-id</code> response header on capture routes — the boundary join key</td><td><span class="pill pr">PR #2941</span></td></tr>
 <tr><td>capture middleware + custody ledger</td><td>call-id minting, token-free custody rows, rollout manifests, terminal attribution</td><td><span class="pill exists">exists</span> <span class="pill pr">PR</span></td></tr>
+<tr><td>backend-specific prefix delivery</td><td><code>CaptureAdmission</code> carries exactly one of an inline token prefix or a staged <code>TransferQueue</code> chain. Backend handlers declare which form they accept and reject an unsupported or ambiguous child-call prefix.</td><td><span class="pill new">contract cleanup</span></td></tr>
+<tr><td>Megatron prefix materialization</td><td>At checkpoint time, detach or fetch each active Megatron prefix, stage it in <code>TransferQueue</code>, and record the durable coordinate in Gym. On restore, materialize that coordinate into inline token IDs unless Megatron gains direct staged-prefix support.</td><td><span class="pill new">Gym + RL + MInf</span></td></tr>
 </table></div>
 
 <h3>Gym agent server</h3>
@@ -887,6 +917,8 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <ol>
 <li>Merge unconditional rollout and attempt identity propagation.</li>
 <li>Merge the worker-owned token staging, model custody ledger, terminal attribution, and NeMo-RL finalizer stack.</li>
+<li>Make inline and staged prefix delivery explicit and mutually exclusive. Preserve one integrity contract while allowing vLLM to fetch a staging chain and Megatron Inference to receive inline tokens.</li>
+<li>For Megatron checkpoint support, add an active-prefix cut and checkpoint-time <code>TransferQueue</code> flush. The existing rollout-end deferred-ledger flush is not a checkpoint boundary.</li>
 <li>Add the <code>NemoGym</code> live-execution registry and checkpoint participant methods. In this milestone every nonterminal execution restores as <code>fresh_dispatch</code>.</li>
 <li>Add service-wide policy model admission, including multi-worker coordination, bounded drain, capture-ledger commit and restore, and call-root tombstones.</li>
 <li>Checkpoint <code>TransferQueue</code> after RL-side finalizers quiesce, then reconcile restored model manifests against the restored staging rows.</li>
