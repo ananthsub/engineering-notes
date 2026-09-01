@@ -185,7 +185,7 @@
   <button class="theme-toggle" type="button" aria-label="Switch color theme">Use light theme</button>
   <main class="wrap">
     <h1>Gym #2616: reconciling compaction, lineage capture, and TransferQueue</h1>
-    <p class="lede">A maintainer’s map of two Gym mechanisms that currently stop at different server boundaries: request-time token lineage from <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2180">#2180</a>/<a href="https://github.com/NVIDIA-NeMo/Gym/pull/2181">#2181</a>, and agent-owned context compaction from <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2616">#2616</a>/<a href="https://github.com/NVIDIA-NeMo/Gym/pull/2870">#2870</a>. It then gives a concrete reconciliation for NeMo-RL SingleController and TransferQueue.</p>
+    <p class="lede">A maintainer’s map of request-time token lineage from Gym <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2180">#2180</a>/<a href="https://github.com/NVIDIA-NeMo/Gym/pull/2181">#2181</a>, agent-owned context compaction from <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2616">#2616</a>/<a href="https://github.com/NVIDIA-NeMo/Gym/pull/2870">#2870</a>, and the implemented SingleController/TQ capture backbone in <a href="https://github.com/NVIDIA-NeMo/RL/pull/3837">RL #3837</a>. It isolates the remaining compaction-specific integration.</p>
 
     <div class="provenance">
       <div><strong>Gym #2180</strong> — merged request-time lineage, head <a class="sha" href="https://github.com/NVIDIA-NeMo/Gym/commit/c703db40b65fc619092cf2a5d6537cb9c591fb65">c703db40b65fc619092cf2a5d6537cb9c591fb65</a></div>
@@ -194,19 +194,19 @@
       <div><strong>Gym #2870</strong> — open follow-up, head <a class="sha" href="https://github.com/NVIDIA-NeMo/Gym/commit/aa800c065317bafd08fde4161274cfe9759583e9">aa800c065317bafd08fde4161274cfe9759583e9</a></div>
       <div><strong>Gym merged-state reproduction</strong> — main snapshot <a class="sha" href="https://github.com/NVIDIA-NeMo/Gym/commit/02d978f7625e5a69f3cf72dc4d1a37a0614ba6d5">02d978f7625e5a69f3cf72dc4d1a37a0614ba6d5</a></div>
       <div><strong>Gym #2278</strong> — open worker-custody design, head <a class="sha" href="https://github.com/NVIDIA-NeMo/Gym/commit/d9ad9d2e693cc1378b89e14147ed41e67cf9f1e0">d9ad9d2e693cc1378b89e14147ed41e67cf9f1e0</a></div>
-      <div><strong>NeMo-RL #3456</strong> — open TransferQueue staging consumer, head <a class="sha" href="https://github.com/NVIDIA-NeMo/RL/commit/60f4569a10240d4abb0d2b8f776380e018bbbebf">60f4569a10240d4abb0d2b8f776380e018bbbebf</a></div>
+      <div><strong>NeMo-RL #3837</strong> — open SingleController/TQ implementation, head <a class="sha" href="https://github.com/NVIDIA-NeMo/RL/commit/14dde627ad62426beeeddb148b5f089595adb022">14dde627ad62426beeeddb148b5f089595adb022</a>; supersedes #3456</div>
       <div><strong>NeMo-RL #3910</strong> — open physical-trace consumer, refreshed head <a class="sha" href="https://github.com/NVIDIA-NeMo/RL/commit/7b706e9a19c4a1c28a8abc1e5e5e7612d1154904">7b706e9a19c4a1c28a8abc1e5e5e7612d1154904</a></div>
-      <div class="muted">Snapshot refreshed: 2026-08-31. The proposed reconciliation below is analysis, not behavior implemented by these PRs.</div>
+      <div class="muted">Snapshot corrected: 2026-09-01. #3837 implements the SingleController/TQ baseline. The proposed portion is only the compaction-aware extension above that baseline.</div>
     </div>
 
     <section class="answer" aria-labelledby="answer-title">
       <h2 id="answer-title" style="margin-top:0">Answer first</h2>
       <p><strong>Current Gym has two correct but disconnected truths.</strong> The model server’s merged lineage path proves whether a request is an exact token continuation. The compaction agent knows whether it intentionally rewrote context. A rewrite is therefore correctly <code>UNRESOLVED</code> at the model server even though the agent knows it is logically related.</p>
       <p><strong>The fix is not to weaken lineage verification.</strong> Each call needs two edges: a <em>logical parent</em> for reward and terminal ancestry, and an optional <em>physical parent</em> for exact-prefix token continuity. Compaction preserves the first and clears the second.</p>
-      <p><strong>Finalization must join the two views.</strong> It selects one rewarded logical path, partitions that path whenever the physical edge is absent, verifies each physical segment independently, and emits ordinary flat tensor rows. It does not send a forest to the trainer.</p>
-      <p><strong>TransferQueue can carry the result without becoming graph-shaped.</strong> The inference worker stages one digest-bound call record per model call in a staging partition. A SingleController finalizer later publishes one flat training row per physical segment under one logical rollout group.</p>
+      <p><strong>RL #3837 already implements the SingleController/TQ backbone.</strong> The inference worker stages one digest-bound call record per model call, Gym custodies a token-free ledger, metadata-only finalizer actors verify one terminal chain, and canonical rows are published to the TQ training partition.</p>
+      <p><strong>The remaining change is compaction-aware fan-out.</strong> #3837 currently produces one <code>FinalizedRollout</code> row per rollout and asserts that canonical <code>sample_ids == rollout_ids</code>. Compaction requires that finalizer to select one rewarded logical path, partition it at physical discontinuities, and publish multiple flat child rows under one logical rollout group.</p>
       <p class="limit">A fully black-box harness cannot reveal why an unresolved request occurred. The gateway can observe a token discontinuity, but it cannot generally distinguish compaction from retries, branches, or auxiliary calls. Exact full-rollout recovery therefore requires an explicit parent receipt, a protocol-native parent ID, or a narrowly qualified single-flight inference rule.</p>
-      <p class="limit">The current PRs do not implement this join. RL #3910 still rejects <code>data_plane.enabled=true</code>, Gym #2278 still models one physical <code>parent_call_id</code>, and its finalizer returns one <code>LinearizedRow</code>.</p>
+      <p class="limit">#3837 does not yet implement that compaction join. It calls Gym’s one-chain <code>verify_and_linearize</code>, returns one canonical row, and preserves one-to-one rollout/sample identity. RL #3910 implements multi-physical-row semantics separately but still rejects <code>data_plane.enabled=true</code>.</p>
     </section>
 
     <figure class="figure">
@@ -246,10 +246,10 @@
         <text class="small" x="76" y="472">explicitly rejects data_plane.enabled=true</text>
 
         <rect class="box active" x="501" y="365" width="365" height="112" rx="12"/>
-        <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2278"><text class="label" x="523" y="395">Gym #2278 + RL #3456 · TQ staging</text></a>
-        <text x="523" y="425">worker stages exact call deltas in TQ</text>
-        <text x="523" y="451">Gym ledger stores token-free coordinates</text>
-        <text class="small" x="523" y="472">models one terminal physical chain</text>
+        <a href="https://github.com/NVIDIA-NeMo/RL/pull/3837"><text class="label" x="523" y="395">RL #3837 · SC/TQ capture path</text></a>
+        <text x="523" y="425">worker staging + Gym custody + finalizers</text>
+        <text x="523" y="451">publishes canonical rows into TQ</text>
+        <text class="small" x="523" y="472">one rollout → one physical row today</text>
 
         <path class="related" d="M365 314 C290 338 230 342 230 365" marker-end="url(#arrow-purple)"/>
         <path class="related" d="M555 314 C630 338 690 342 690 365" marker-end="url(#arrow-purple)"/>
@@ -307,11 +307,12 @@ required unified record
   segment_id              = stable physical-trace identity
   compaction_event_id      = authorization for a rewrite boundary</pre>
       <p>Gym #2278 demonstrates why this distinction matters. Its <a href="https://github.com/NVIDIA-NeMo/Gym/blob/d9ad9d2e693cc1378b89e14147ed41e67cf9f1e0/nemo_gym/token_id_capture/staging/records.py#L233-L281"><code>CallRecord</code></a> has one <code>parent_call_id</code>: a parent requires <code>token_in</code>; no parent requires a <code>text</code> root. Its <a href="https://github.com/NVIDIA-NeMo/Gym/blob/d9ad9d2e693cc1378b89e14147ed41e67cf9f1e0/nemo_gym/token_id_capture/staging/rebuild.py#L184-L199">terminal walk</a> follows that same field and returns one contiguous row. That is sufficient before compaction but cannot express “logically follows C2, physically starts S1.”</p>
+      <p>RL #3837 carries that one-chain contract into SingleController. <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/blackbox_finalizer.py#L242-L257"><code>finalize_rollout</code></a> verifies and linearizes one main chain into one <code>FinalizedRollout</code>. Group publication later <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/blackbox_finalizer.py#L724-L736">asserts <code>sample_ids == rollout_ids</code></a>. The compaction extension must deliberately replace this one-to-one invariant with deterministic physical child IDs.</p>
     </section>
 
     <section id="reconciliation">
       <h2>Step-by-step reconciliation: one call crosses four ownership boundaries</h2>
-      <p>This is a proposed cumulative design. Solid blue arrows reuse implemented behavior. Dashed orange arrows and boxes are the missing integration.</p>
+      <p>This is an extension of RL #3837, not a replacement. #3837 already reserves rollout IDs, stages exact call deltas, fetches Gym receipts, runs metadata-only finalizer actors, publishes canonical rows, and commits replay slots. Solid blue arrows reuse that implementation. Dashed orange arrows and boxes are the compaction-specific additions.</p>
       <figure class="figure">
         <figcaption>Figure 2 — Proposed serving and finalization sequence</figcaption>
         <svg viewBox="0 0 920 1080" role="img" aria-labelledby="reconcile-title reconcile-desc">
@@ -384,6 +385,9 @@ required unified record
         </svg>
         <p class="figure-note">The agent never asserts that C3 physically extends C2. It only authenticates the logical rewrite. The model server and worker remain responsible for exact observed tokens and prefix proof.</p>
       </figure>
+      <div class="callout">
+        <strong>Exact delta above #3837:</strong> add the per-request transition in steps 2 and 5; add logical-parent custody to the receipt; change step 8 from one physical terminal chain to logical-path partitioning; and change step 9 from one <code>rollout_id</code> row to deterministic <code>rollout_id:trace:N</code> child rows committed as one logical group.
+      </div>
 
       <h3>Why finalization, specifically?</h3>
       <p>Before the rollout ends, the agent does not know the rewarded terminal call. The model server does not know which served response the harness kept. The inference worker knows exact tokens but not semantic compaction policy. The SingleController finalizer is the first component that can fence the attempt, select terminal ancestry, join the three evidence sets, publish every child row, and retire staging only after durable acceptance.</p>
@@ -393,6 +397,7 @@ required unified record
     <section id="blackbox">
       <h2>What changes when the agent harness is a black box?</h2>
       <p>The gateway still sees every model request and response. It can prove physical continuity from engine-observed tokens. What it cannot generally observe is the semantic reason for a discontinuity or which earlier branch the black box intended to continue.</p>
+      <p>RL #3837 already handles a different black-box problem: it uses Gym’s terminal attribution and receipt to choose the main chain without sending token tensors through the agent. Its <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/blackbox_finalizer.py#L242-L257">finalizer</a> then verifies that one physical chain. This does not recover a logical predecessor when compaction intentionally makes the next request physically parentless.</p>
       <figure class="figure">
         <figcaption>Figure 3 — Black-box recovery has a hard information boundary</figcaption>
         <svg viewBox="0 0 920 610" role="img" aria-labelledby="blackbox-title blackbox-desc">
@@ -652,27 +657,29 @@ publish [S0, S1] as two rows owned by logical rollout R7</pre>
     </section>
 
     <section id="compatibility">
-      <h2>TransferQueue integration: two partitions, one logical reservation</h2>
+      <h2>TransferQueue integration: extend #3837’s one-row finalizer</h2>
       <ul class="status-list">
+        <li class="yes"><strong>SingleController token capture:</strong> #3837 implements worker-side TQ staging, Gym ledger custody, metadata-only finalizer actors, canonical TQ publication, and replay-slot commit.</li>
+        <li class="yes"><strong>Token IDs/logprobs off the Gym agent path:</strong> #3837’s capture mode moves exact token deltas through the external TQ staging sink rather than the agent response.</li>
+        <li class="partial"><strong>Current #3837 cardinality:</strong> one receipt becomes one <code>FinalizedRollout</code>, and canonical sample IDs must equal logical rollout IDs.</li>
+        <li class="no"><strong>Compaction-aware #3837 finalization:</strong> it does not select logical ancestry across a physical rewrite or publish multiple physical children for one rollout.</li>
         <li class="yes"><strong>Gym #2870 contract ↔ RL #3910 ingestion:</strong> field names, digest construction, identity checks, and boundary semantics line up.</li>
         <li class="no"><strong>RL #3910 checkout as pinned:</strong> its refreshed Gym gitlink remains <code>c3bac963</code>, which has no compaction agent or unified trace contract.</li>
         <li class="yes"><strong>Legacy synchronous and asynchronous GRPO:</strong> #3910 expands logical rollouts into physical rows in process.</li>
-        <li class="no"><strong>SingleController:</strong> no physical-trace integration is added to the SingleController path.</li>
-        <li class="no"><strong>TransferQueue/data plane:</strong> refreshed #3910 still rejects split physical traces when <code>data_plane.enabled=true</code>.</li>
-        <li class="partial"><strong>Worker-owned token staging:</strong> Gym #2278 and RL #3456 already stage exact per-call token deltas in TransferQueue, but their ledger describes one contiguous terminal chain.</li>
+        <li class="no"><strong>#3910 → #3837 integration:</strong> refreshed #3910 still rejects split physical traces when <code>data_plane.enabled=true</code>.</li>
         <li class="no"><strong>General black-box compaction:</strong> no current contract recovers a logical parent across an opaque rewrite.</li>
       </ul>
 
       <figure class="figure">
-        <figcaption>Figure 5 — The current configuration contradiction</figcaption>
+        <figcaption>Figure 5 — Why #3910 cannot simply be inserted into #3837</figcaption>
         <svg viewBox="0 0 920 390" role="img" aria-labelledby="compat-title compat-desc">
-          <title id="compat-title">SingleController and physical trace configuration requirements conflict</title>
-          <desc id="compat-desc">SingleController requires data plane enabled. Physical trace training rejects data plane enabled. Therefore no configuration can satisfy both.</desc>
+          <title id="compat-title">SingleController and the separate physical trace consumer have conflicting configuration requirements</title>
+          <desc id="compat-desc">SingleController and PR 3837 require the data plane. PR 3910 physical trace training rejects the data plane. Therefore the PR 3910 materializer cannot be reused unchanged.</desc>
           <defs>
             <marker id="arrow-orange-5" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="var(--diagram-problem)"/></marker>
           </defs>
           <rect class="box active" x="55" y="70" width="330" height="122" rx="12"/>
-          <a href="https://github.com/NVIDIA-NeMo/RL/blob/7b706e9a19c4a1c28a8abc1e5e5e7612d1154904/nemo_rl/algorithms/single_controller_utils/setup.py#L868-L929"><text class="label" x="78" y="102">SingleController setup</text></a>
+          <a href="https://github.com/NVIDIA-NeMo/RL/pull/3837"><text class="label" x="78" y="102">SingleController + #3837</text></a>
           <text x="78" y="135">requires data_plane.enabled = true</text>
           <text x="78" y="165">“built on the TransferQueue data plane”</text>
 
@@ -693,11 +700,11 @@ publish [S0, S1] as two rows owned by logical rollout R7</pre>
           <line x1="318" y1="362" x2="361" y2="362" stroke="var(--diagram-problem)" stroke-width="3" stroke-dasharray="8 5"/>
           <text class="small" x="371" y="367">explicit incompatibility</text>
         </svg>
-        <p class="figure-note">This remains true at refreshed #3910 head <code>7b706e9a…</code>. The focused fail-closed test passed locally, including its <code>data-plane</code> parameterization.</p>
+        <p class="figure-note">#3837 proves that SingleController/TQ token capture exists. This contradiction only says #3910’s in-process physical-row materializer cannot be wired into that path unchanged.</p>
       </figure>
 
-      <h3>The unified TQ shape</h3>
-      <p>TransferQueue does not need a forest schema. It needs two clearly separated lifecycles. The capture-staging partition holds untrusted per-call evidence keyed by <code>rollout_id/model_call_id</code>. The canonical rollout partition holds verified physical training rows keyed by deterministic trace IDs.</p>
+      <h3>The compaction-aware extension to #3837</h3>
+      <p>#3837 already supplies both TQ partitions and the finalizer actor boundary. Its capture-staging partition holds per-call evidence keyed by <code>rollout_id/model_call_id</code>. Its canonical rollout partition receives one verified row per rollout. The extension changes only the finalizer’s lineage model and output cardinality.</p>
       <figure class="figure">
         <figcaption>Figure 6 — Proposed TransferQueue publication: graph in the finalizer, flat rows in the queue</figcaption>
         <svg viewBox="0 0 920 620" role="img" aria-labelledby="tq-title tq-desc">
@@ -714,15 +721,15 @@ publish [S0, S1] as two rows owned by logical rollout R7</pre>
           <rect class="box" x="298" y="86" width="226" height="55" rx="7"/><text x="316" y="109">R7/C2 · token_in</text><text class="small" x="316" y="129">parent=C1 · newly added delta</text>
           <rect class="box warning" x="64" y="160" width="210" height="55" rx="7"/><text x="82" y="183">R7/C3 · text root</text><text class="small" x="82" y="203">logical parent=C2 · segment S1</text>
           <rect class="box" x="298" y="160" width="226" height="55" rx="7"/><text x="316" y="183">R7/C4 · token_in</text><text class="small" x="316" y="203">parent=C3 · newly added delta</text>
-          <a href="https://github.com/NVIDIA-NeMo/RL/blob/60f4569a10240d4abb0d2b8f776380e018bbbebf/nemo_rl/data_plane/tq_token_sink.py#L122-L278"><text class="small" x="580" y="112">Existing #3456 primitive:</text><text class="small" x="580" y="134">TQTokenSink.stage()</text></a>
+          <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/data_plane/tq_token_sink.py#L126-L278"><text class="small" x="580" y="112">Implemented by #3837:</text><text class="small" x="580" y="134">TQTokenSink.stage()</text></a>
           <text class="small" x="580" y="164">one acknowledged write</text><text class="small" x="580" y="184">before model response</text>
 
-          <path d="M295 238 L295 308" stroke="var(--diagram-problem)" stroke-width="3" stroke-dasharray="7 5" fill="none" marker-end="url(#arrow-orange-tq)"/>
-          <path d="M725 238 L725 308" stroke="var(--diagram-problem)" stroke-width="3" stroke-dasharray="7 5" fill="none" marker-end="url(#arrow-orange-tq)"/>
+          <path d="M295 238 L295 308" stroke="var(--diagram-ok)" stroke-width="3" fill="none" marker-end="url(#arrow-blue-tq)"/>
+          <path d="M725 238 L725 308" stroke="var(--diagram-ok)" stroke-width="3" fill="none" marker-end="url(#arrow-blue-tq)"/>
           <rect class="box warning" x="171" y="309" width="578" height="104" rx="12"/>
-          <text class="label" x="197" y="340">2 · SingleController finalizer owns the graph</text>
-          <text x="197" y="369">join agent logical manifest + Gym token-free ledger + staged rows</text>
-          <text x="197" y="395">select terminal path C1→C2→C3→C4; partition at C2 | C3</text>
+          <text class="label" x="197" y="340">2 · Extend #3837’s existing finalizer actor</text>
+          <text x="197" y="369">existing: verify one Gym receipt against staged rows</text>
+          <text x="197" y="395">add: logical path C1→C2→C3→C4; partition at C2 | C3</text>
 
           <path d="M460 413 L460 470" stroke="var(--diagram-problem)" stroke-width="3" stroke-dasharray="7 5" fill="none" marker-end="url(#arrow-orange-tq)"/>
           <text class="label" x="40" y="481">3 · CANONICAL ROLLOUT PARTITION</text>
@@ -731,10 +738,11 @@ publish [S0, S1] as two rows owned by logical rollout R7</pre>
           <rect class="box" x="506" y="517" width="350" height="50" rx="7"/><text x="524" y="539">sample_id=R7:trace:1 · segment S1</text><text class="small" x="524" y="557">flat input_ids, logprobs, token_mask, advantage A7</text>
           <text class="small" x="40" y="608">Group descriptor: logical_rollout_id=R7 · trace_count=2 · ready only after both child rows are durable</text>
         </svg>
-        <p class="figure-note">Gym sees opaque staging coordinates rather than token arrays. The finalizer is the only component that needs graph-shaped metadata; existing TQ tensor fields remain flat.</p>
+        <p class="figure-note">Blue is already implemented by #3837. Orange is the required one-to-many publication after compaction-aware partitioning. Existing TQ tensor fields remain flat.</p>
       </figure>
 
       <h3>Required controller semantics</h3>
+      <p>#3837 already implements reservation, finalizer dispatch, canonical publication, replay commit, abort, and staging cleanup. The compaction work must generalize those lifecycle operations from one row per rollout to one logical owner with a dynamic number of physical children.</p>
       <ol>
         <li><strong>One logical reservation, dynamic child count.</strong> The reservation begins before rollout. Finalization determines <code>trace_count</code> after terminal-path selection.</li>
         <li><strong>Deterministic child identities.</strong> Use keys such as <code>R7:trace:0</code> and <code>R7:trace:1</code>. Store <code>logical_rollout_id</code>, <code>trace_index</code>, <code>trace_count</code>, and <code>segment_id</code> as tags or metadata.</li>
@@ -743,11 +751,11 @@ publish [S0, S1] as two rows owned by logical rollout R7</pre>
         <li><strong>Logical scheduler accounting.</strong> Optimizer tensors use the physical row count; scheduler progress and comparison-group completeness use the logical rollout count.</li>
         <li><strong>Conditional retirement.</strong> Clear staged call rows only after canonical child publication succeeds. Keep poisoned, incomplete, or digest-invalid evidence for diagnosis.</li>
       </ol>
-      <p>The existing TQ API is already row-shape-agnostic: <a href="https://github.com/NVIDIA-NeMo/RL/blob/7b706e9a19c4a1c28a8abc1e5e5e7612d1154904/nemo_rl/data_plane/column_io.py#L150-L216"><code>kv_first_write</code></a> accepts caller-minted sample IDs and optional tags. The missing work is the SingleController group lifecycle and the segment-aware finalizer, not a graph tensor format.</p>
+      <p>#3837’s <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/blackbox_finalizer.py#L692-L756">group publisher</a> already packs rows, writes them to TQ, and returns <code>KVBatchMeta</code>. The key change is to remove its <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/blackbox_finalizer.py#L724-L727">one-to-one sample-ID assertion</a> in favor of a durable logical-to-physical child map. Replay accounting and advantage computation must continue to count logical rollouts even though training tensors count physical rows.</p>
 
-      <h3>What “remove token IDs and logprobs from the Gym agent path” requires</h3>
-      <p>RL #3456 already demonstrates the heavy-data hop: <a href="https://github.com/NVIDIA-NeMo/RL/blob/60f4569a10240d4abb0d2b8f776380e018bbbebf/nemo_rl/data_plane/tq_token_sink.py#L122-L278"><code>TQTokenSink.stage</code></a> writes exact token, mask, and logprob deltas before acknowledging the model call. Gym #2278’s model-server ledger carries only digest-bound commit coordinates and response identity.</p>
-      <p>The unified path should use that custody boundary. The compaction agent returns semantic output, terminal identity, segment metadata, and logical edges. It does not return canonical token arrays. The finalizer fetches those arrays from TQ, verifies them against the Gym ledger, and only then creates physical rows.</p>
+      <h3>#3837 already removes heavy token evidence from the Gym agent path</h3>
+      <p><a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/data_plane/tq_token_sink.py#L126-L278"><code>TQTokenSink.stage</code></a> writes exact token, mask, and logprob deltas before acknowledging the model call. Gym’s model-server ledger carries digest-bound commit coordinates and response identity. The <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/finalizer_actor.py#L43-L50">finalizer request is metadata-only</a>.</p>
+      <p>The compaction extension should preserve that custody boundary. The agent adds only logical parent and rewrite metadata. The finalizer fetches canonical arrays from TQ, verifies them against the Gym ledger, partitions the selected logical path, and emits physical child rows.</p>
     </section>
 
     <section id="evidence">
@@ -775,10 +783,22 @@ publish [S0, S1] as two rows owned by logical rollout R7</pre>
               <td>Independently reproduced at the refreshed head. It does not prove live HTTP interoperability.</td>
             </tr>
             <tr>
-              <td>SingleController/TQ is unsupported</td>
+              <td>#3837 implements SingleController/TQ token capture</td>
+              <td>RL <span class="sha">14dde627ad62</span>; <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/data_plane/tq_token_sink.py#L126-L278">external staging sink</a>, <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/finalizer_actor.py#L43-L50">metadata-only request</a>, and <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/blackbox_finalizer.py#L692-L756">canonical publication</a></td>
+              <td>Exact call deltas move through a TQ staging partition; finalizer actors verify receipts and publish canonical training rows.</td>
+              <td>Verified from pinned public source. #3837’s runtime validation is author-provided; it was not independently rerun for this update.</td>
+            </tr>
+            <tr>
+              <td>#3837 remains one physical row per rollout</td>
+              <td>RL <span class="sha">14dde627ad62</span>; <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/blackbox_finalizer.py#L62-L75"><code>FinalizedRollout</code></a>, <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/blackbox_finalizer.py#L242-L257">one-chain linearization</a>, and <a href="https://github.com/NVIDIA-NeMo/RL/blob/14dde627ad62426beeeddb148b5f089595adb022/nemo_rl/experience/blackbox_finalizer.py#L724-L727">sample-ID assertion</a></td>
+              <td>Each receipt produces one canonical row, and publication requires <code>sample_ids == rollout_ids</code>.</td>
+              <td>Conclusive for this pinned source revision; this is the precise compaction integration gap.</td>
+            </tr>
+            <tr>
+              <td>#3910’s physical-trace materializer is incompatible with TQ</td>
               <td>RL <span class="sha">7b706e9a19c4</span>; <a href="https://github.com/NVIDIA-NeMo/RL/blob/7b706e9a19c4a1c28a8abc1e5e5e7612d1154904/nemo_rl/algorithms/single_controller_utils/setup.py#L868-L929">SingleController setup</a> and <a href="https://github.com/NVIDIA-NeMo/RL/blob/7b706e9a19c4a1c28a8abc1e5e5e7612d1154904/nemo_rl/algorithms/physical_trace_training.py#L166-L184">physical-trace validation</a></td>
               <td>The first requires data plane enabled; the second rejects it. The focused fail-closed parametrization passed locally.</td>
-              <td>Conclusive for refreshed #3910.</td>
+              <td>Conclusive for refreshed #3910. It does not mean SingleController token capture itself is unsupported; #3837 implements that baseline separately.</td>
             </tr>
             <tr>
               <td>Physical rows receive logical advantages and padding</td>
@@ -794,8 +814,8 @@ publish [S0, S1] as two rows owned by logical rollout R7</pre>
             </tr>
             <tr>
               <td>Public author validation</td>
-              <td><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2616">Gym #2616 body</a>, <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2870">Gym #2870 body</a>, and <a href="https://github.com/NVIDIA-NeMo/RL/pull/3910">RL #3910 body</a></td>
-              <td>Authors report focused tests and deterministic integration runs. #2616’s public CI shows eight passing checks; #2870 currently exposes lint, copyright, secrets, and DCO checks but no public behavior suite.</td>
+              <td><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2616">Gym #2616 body</a>, <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2870">Gym #2870 body</a>, <a href="https://github.com/NVIDIA-NeMo/RL/pull/3837">RL #3837 body</a>, and <a href="https://github.com/NVIDIA-NeMo/RL/pull/3910">RL #3910 body</a></td>
+              <td>Authors report focused tests and integration runs. #3837 reports a SingleController capture test arm and broad unit coverage. #2616’s public CI shows eight passing checks; #2870 currently exposes lint, copyright, secrets, and DCO checks but no public behavior suite.</td>
               <td>Author-provided public evidence. The deterministic harness is not public, so the complete integration is not independently replayable.</td>
             </tr>
           </tbody>
@@ -876,8 +896,8 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -p no:cacheprovider -q \
         <p>A general black box does not expose enough information to recover logical ancestry across a rewrite. Reviewers should choose among a required parent receipt, protocol-native parent ID, a documented single-flight-only inference mode, or fail-closed masking. Completion order must not silently become lineage for concurrent or branching harnesses.</p>
       </article>
       <article class="card" style="margin-top:14px">
-        <h3 style="margin-top:0">4. What makes a logical TQ group ready and recoverable?</h3>
-        <p>One rollout can produce a dynamic number of physical child rows. The controller needs a durable group descriptor, deterministic child IDs, expected child count, and a readiness transition after every child write. Checkpoint and replay recovery must restore the group atomically rather than exposing a partial set of traces.</p>
+        <h3 style="margin-top:0">4. How will #3837’s group lifecycle represent physical children?</h3>
+        <p>#3837 already reserves rollouts, dispatches finalizer actors, publishes canonical rows, commits finalized replay slots, and cleans staging. Compaction adds a dynamic number of child rows per rollout. The extension needs deterministic child IDs and an expected child count, while preserving #3837’s all-or-nothing group commit and cleanup ordering.</p>
       </article>
       <article class="card" style="margin-top:14px">
         <h3 style="margin-top:0">5. Which merged Gym revision will RL #3910 pin?</h3>
@@ -896,7 +916,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -p no:cacheprovider -q \
         <li>Define the per-request transition contract that carries #2616’s logical compaction intent to the model server.</li>
         <li>Separate logical and physical parent fields in the capture ledger and staged records.</li>
         <li>Make finalization select terminal logical ancestry and return an ordered list of verified physical rows.</li>
-        <li>Add the SingleController logical-group lifecycle over TQ child rows.</li>
+        <li>Extend #3837’s existing SingleController finalizer and replay lifecycle from one row per rollout to deterministic physical child rows.</li>
         <li>Qualify black-box behavior explicitly; do not infer general lineage from request order.</li>
         <li>Then update #3910’s Gym pin and run one cumulative integration fixture.</li>
       </ol>
@@ -907,7 +927,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -p no:cacheprovider -q \
       <p>The two Gym mechanisms should remain separate authorities. #2180/#2181 decides whether exact tokens continue. #2616/#2870 decides whether a semantic rewrite was intentional. A unified call record must preserve both decisions instead of weakening either one.</p>
       <p>The finalizer builds the forest only long enough to select one terminal logical path. It then partitions that path into ordinary linear physical traces. TransferQueue stores those flat rows and one logical group descriptor; the trainer never consumes an arbitrary graph.</p>
       <p>For cooperative agents, an authenticated per-call transition supplies the missing join. For black-box agents, a parent receipt or equivalent protocol field is required for exact recovery. Without one, the safe behavior is masking or terminal-segment-only training.</p>
-      <p>This is still proposed work. Refreshed RL #3910 remains a legacy in-process consumer with an explicit data-plane rejection, while Gym #2278 and RL #3456 provide the worker-owned TQ staging primitives that the unified finalizer can reuse.</p>
+      <p>The TQ backbone is not proposed work: RL #3837 already implements worker staging, Gym custody, metadata-only finalizer actors, canonical publication, and replay commit for one physical row per rollout. The proposal is the narrower compaction delta: dual lineage, logical-path partitioning, and one-to-many child-row publication. RL #3910 provides the physical-row reward semantics but cannot be inserted unchanged because it explicitly rejects the data plane.</p>
     </section>
 
     <footer>
