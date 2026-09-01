@@ -96,19 +96,21 @@ tr:last-child td { border-bottom: none; }
 <button class="themetoggle" id="themetoggle" type="button">◐ light</button>
 <div class="wrap">
 
-<div class="eyebrow">Architecture decision · 27 August 2026</div>
+<div class="eyebrow">Architecture decision · 1 September 2026</div>
 <h1>Partial-rollout checkpointing for NeMo-RL and NeMo Gym</h1>
-<div class="meta">owner ansubramania · proposed architecture · self-contained HTML, inline CSS/JS/SVG</div>
+<div class="meta">owner ansubramania · Gym API prototype and companion NeMo-RL design · self-contained HTML, inline CSS/JS/SVG</div>
 
-<p class="lede">NeMo-RL's <code>SingleController</code> publishes one checkpoint only after the policy trainer, <code>TransferQueue</code>, the rollout registry, and NeMo Gym have saved compatible state. NeMo Gym participates as one checkpoint unit, but its actor coordinates state across agent, model, and resources servers. The design keeps generated tokens in <code>TransferQueue</code> and stores only token-free references in Gym.</p>
+<p class="lede">The Gym PR stack exposes the server-side APIs needed to pause new work, preserve completed agent turns and environment mutations, commit component-owned state, restore it under a replacement attempt, and reject late requests from the abandoned attempt. Companion NeMo-RL changes will assign durable rollout identities and call these APIs in checkpoint order. Generated tokens remain in <code>TransferQueue</code>; Gym stores only the references needed to join an agent boundary to those token rows.</p>
 
 <nav class="tabs" id="tabs" aria-label="Sections">
   <button data-tab="inv" class="on">Requirements</button>
+  <button data-tab="state">State model</button>
   <button data-tab="ov">Overview</button>
   <button data-tab="rt">Runtime</button>
   <button data-tab="pp">Prepare</button>
   <button data-tab="sv">Save</button>
   <button data-tab="rs">Restore</button>
+  <button data-tab="trade">Why this design</button>
   <button data-tab="api">APIs</button>
   <button data-tab="impl">Implementations</button>
   <button data-tab="mrg">Merge sequence</button>
@@ -134,10 +136,10 @@ tr:last-child td { border-bottom: none; }
 <h3>Admission and quiescence</h3>
 <div class="inv"><b>Closing a gate and testing admission happen atomically.</b><p>The <code>AdmissionLimiter</code> grants a capacity permit only while the gate accepts work. Closing the gate atomically rejects or parks new callers. A caller waiting for capacity holds no permit and does not count as in flight. An admitted request remains in flight until its response and required custody updates are durable.</p></div>
 <div class="inv"><b>Only policy model servers pause in the first milestone.</b><p>Token-capture checkpointing first closes admission only on policy model-server instances backed by NeMo-RL generation workers. Stateless resources servers and verifiers retain no checkpoint state and do not need an admission API. Stateful-resources support later closes admission on those resources-server instances as well. Judge and simulator model-server instances remain open so accepted tools and verifiers can finish. Startup validation rejects environment traffic that targets a policy instance.</p></div>
-<div class="inv"><b>A model-server pause covers every FastAPI worker process.</b><p>A pause request routed to one Uvicorn worker cannot close admission for the other workers that share the service port. Each multi-worker model-server instance therefore has one service-level admission coordinator and a distinct control URL. The proposed implementation starts a companion control process before the Uvicorn worker pool and gives the workers a local Unix-domain socket address. Each spawned worker registers with the coordinator, watches checkpoint-state updates, applies them to its in-process admission middleware, and reports acknowledgements and local request counts. The coordinator reports <code>paused</code> only after every registered live worker has acknowledged the checkpoint ID and the sum of their in-flight counts is zero. A missing worker is an error, not an implicit zero. This pause does not stop generation workers; it prevents new policy calls while already accepted generations reach their durable custody boundary. Multi-worker resources servers use the same service-level pattern.</p></div>
-<div class="inv"><b>Accepted operations can finish nested calls.</b><p>The drain blocks only new top-level operations. A nested request remains admissible when it carries the lease of an accepted operation. This rule lets a tool call its simulator and a verifier call its judge while the system drains.</p></div>
-<div class="inv"><b>Agents park instead of waiting behind a closed gate.</b><p>A closed gate returns <code>409 checkpoint_parked</code> to a caller that can park. The agent records <code>next_operation</code> and stops at that boundary. It checks the park flag before every model call, tool call, and verification call. Only callers that cannot park remain as blocked waiters.</p></div>
-<div class="inv"><b>The deadline policy decides what happens to unfinished rollouts.</b><p><code>deadline_policy</code> defines how prepare handles a rollout that cannot reach a recoverable boundary before the absolute deadline. The proposed default is <code>restart_safe_rollouts</code>: fence the old attempt, tombstone its abandoned model-call roots, discard its agent and environment state, record <code>fresh_dispatch</code>, and continue the checkpoint. This action is allowed only when the affected state can be discarded completely. A tool with non-transactional external effects, a shared mutable runtime, or any component that cannot prove restart safety causes the global checkpoint to abort. The prepare response reports restarted rollouts and their blocking operations explicitly.</p></div>
+<div class="inv"><b>A model-server pause must cover every FastAPI worker process.</b><p>A pause request routed to one Uvicorn worker cannot close admission for the other workers that share the service port. The PR stack implements and tests a service-level coordinator protocol over a Unix-domain socket. Workers apply coordinator state and report acknowledgements plus local in-flight counts. The coordinator reports <code>paused</code> only after every expected worker has acknowledged the checkpoint ID and the summed count is zero. Production startup and control-URL routing are not wired yet, so a configured multi-worker server reports <code>unmanaged</code> and NeMo-RL must refuse checkpointing through it. Single-worker servers are the supported first integration.</p></div>
+<div class="inv"><b>Prepare parks whitebox agents before it closes dependent servers.</b><p><code>POST /ng-control/v1/agent-checkpoint/prepare</code> changes active runs to <code>park_requested</code>. Each run finishes its current turn, records an <code>AgentBoundaryRecord</code>, and blocks on an in-memory event. NeMo-RL closes policy-model admission and prepares resources state only after the agent prepare call succeeds. Judge and simulator model instances remain open while the current turn finishes. This order avoids using a <code>409 checkpoint_parked</code> response as normal whitebox control flow.</p></div>
+<div class="inv"><b>Resources mutations finish before state export.</b><p>The resources middleware serializes mutations for each rollout attempt with an <code>asyncio.Lock</code>. Resources prepare closes admission, acquires each live session's lock, and exports that session after any accepted mutation releases the lock. New mutations receive <code>409 resources_admission_closed</code>. The first integration does not propagate admission leases or expose separate resources-admission routes.</p></div>
+<div class="inv"><b>The RL deadline policy decides what happens to unfinished rollouts.</b><p><code>deadline_policy</code> is a proposed NeMo-RL policy for a rollout that cannot reach a recoverable boundary before the absolute deadline. The default should restart only attempts whose partial state can be discarded completely. The Gym stack can retire an agent attempt and abort matching model requests. It cannot yet cancel one blocked resources mutation by rollout identity. Until that API exists, a stateful resources timeout aborts the global checkpoint. A tool with non-transactional external effects, shared mutable state, or any component that cannot prove restart safety must always abort the checkpoint rather than claim a continuation.</p></div>
 
 <h3>Ordering</h3>
 <div class="inv"><b>Generation workers stay available during prepare.</b><p>Accepted generations must finish staging their output before Gym can drain. Pausing workers earlier would deadlock prepare. NeMo-RL may pause, checkpoint, or refit workers only after Gym commits and before the final resume.</p></div>
@@ -147,13 +149,130 @@ tr:last-child td { border-bottom: none; }
 
 <h3>Durability and publication</h3>
 <div class="inv"><b><code>TransferQueue</code> snapshots are content-addressed.</b><p>Each snapshot uses a fresh path and is restored by the digest recorded in the checkpoint. An interrupted save therefore cannot damage an earlier checkpoint. Restore selects the newest published checkpoint by checkpoint ID, not filesystem modification time.</p></div>
-<div class="inv"><b>Components stream state into archive shards.</b><p>A component serializes frozen state directly into compressed shards. A member index maps each rollout to its shard, byte offset, and length. The shared filesystem never receives one file per rollout. Published archives are immutable, and retention removes complete checkpoints rather than individual shards.</p></div>
+<div class="inv"><b>Components publish immutable manifests after their payloads.</b><p>The current prototype writes one JSON payload per parked agent boundary or resources snapshot and copies token-free lineage files, then writes a digest-bearing manifest last. This makes torn writes and corrupt restore input detectable. It is not the final format for tens of thousands of live rollouts. Archive shards with a member index can replace the per-rollout files later without changing the checkpoint APIs or state machine.</p></div>
 <div class="inv"><b>Control operations are idempotent and fenced.</b><p>Every actor method and control endpoint carries <code>checkpoint_id</code> and an absolute deadline. Repeating a phase for the same checkpoint returns the recorded result. A stale checkpoint ID cannot reopen traffic or replace files. A short-held mutex in the <code>NemoGym</code> actor protects checkpoint phase changes and snapshots of the live-execution registry. It prevents two checkpoint IDs from preparing concurrently, prevents commit, abort, restore, and resume from racing, and rejects invalid transitions such as commit before prepared. The actor releases the mutex before waiting for servers to drain so <code>checkpoint_progress</code> and <code>abort_checkpoint</code> remain callable during a long prepare.</p></div>
 
 <h3>Restore</h3>
 <div class="inv"><b>NeMo-RL chooses one recovery action for each execution.</b><p>An execution is already complete, resumes from an agent boundary, resumes from a full runtime snapshot, or starts again from its input. An execution marked <code>transferred_to_rl</code> cannot also have a continuation. The restored NeMo-RL registry decides whether work completed or failed. Gym does not make that decision.</p></div>
 <div class="inv"><b>Restore verifies state before dispatch.</b><p>Restore installs model lineage first, resources sessions under the new attempt second, and agent continuations last. Before dispatch begins, it checks every selected continuation against the restored <code>TransferQueue</code> rows. A missing row changes that rollout to a fresh dispatch. Generation workers must also report the expected policy version and pass health checks.</p></div>
 <div class="inv"><b>An opaque harness requires a full runtime snapshot.</b><p>A filesystem snapshot, sandbox identifier, or provider descriptor cannot restore an opaque harness by itself. A resumable snapshot includes the harness process tree and memory, the egress relay's pending requests and cached responses, and a provider compatibility fingerprint. At the prepare deadline, the runtime may freeze a forwarded but unfinished request as <em>pending reissue</em>. Restore tombstones the abandoned server-side call and sends a new request through the relay.</p></div>
+</section>
+
+<section class="tab" id="tab-state">
+<h2>A rollout does not have one global state enum</h2>
+<p>The implementation deliberately separates three kinds of state. NeMo-RL owns whether a logical rollout still needs a result. The agent server owns where one <code>/run</code> attempt is executing. Each Gym server owns the phase of the current checkpoint transaction. Treating these as one enum would create impossible combinations: for example, an agent can be running after boundary 4 while boundary 4 is already safe to save, and a resources server can be checkpoint-prepared while the model server is still draining an accepted generation.</p>
+
+<h3>Logical rollout and attempt identity</h3>
+<figure>
+<svg viewBox="0 0 940 220" role="img" aria-label="Logical rollout state diagram from pending through an active attempt to completion or replacement after a checkpoint.">
+  <defs><marker id="state-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+  <g fill="none" stroke="var(--border)" stroke-width="1.5">
+    <rect x="20" y="30" width="145" height="54" rx="8"/><rect x="220" y="30" width="180" height="54" rx="8"/>
+    <rect x="470" y="30" width="180" height="54" rx="8"/><rect x="745" y="30" width="170" height="54" rx="8"/>
+    <rect x="470" y="140" width="180" height="54" rx="8" stroke="var(--diagram-problem)" stroke-dasharray="5 3"/>
+  </g>
+  <g fill="var(--text)" font-size="13" text-anchor="middle">
+    <text x="92" y="53" font-weight="700">Pending</text><text x="92" y="70" font-size="11" fill="var(--dim)">owned by NeMo-RL</text>
+    <text x="310" y="53" font-weight="700">Attempt N active</text><text x="310" y="70" font-size="11" fill="var(--dim)">one logical rollout ID</text>
+    <text x="560" y="53" font-weight="700">Result transferred</text><text x="560" y="70" font-size="11" fill="var(--dim)">terminal for recovery</text>
+    <text x="830" y="53" font-weight="700">Complete or failed</text><text x="830" y="70" font-size="11" fill="var(--dim)">RL disposition</text>
+    <text x="560" y="163" font-weight="700">Attempt N+1 active</text><text x="560" y="180" font-size="11" fill="var(--dim)">continue or start again</text>
+  </g>
+  <g stroke="var(--accent)" stroke-width="2" marker-end="url(#state-ah)">
+    <line x1="165" y1="57" x2="215" y2="57"/><line x1="400" y1="57" x2="465" y2="57"/><line x1="650" y1="57" x2="740" y2="57"/>
+    <path d="M400 68 C440 95, 450 160, 465 166" fill="none"/><path d="M650 166 C710 166, 710 86, 745 70" fill="none" stroke-dasharray="5 3"/>
+  </g>
+  <g fill="var(--dim)" font-size="10.5" text-anchor="middle">
+    <text x="190" y="48">dispatch</text><text x="432" y="48">/run returns</text><text x="695" y="48">RL accepts result</text>
+    <text x="438" y="125">restore chooses a continuation</text><text x="438" y="139">or a fresh dispatch</text>
+    <text x="730" y="146">later result</text>
+  </g>
+</svg>
+</figure>
+<p><code>rollout_id</code> identifies the logical work across failures. <code>attempt_index</code> identifies one execution of that work. Restore never reactivates attempt N. It installs state for attempt N+1 and tombstones attempt N, so delayed HTTP requests from the old process receive <code>409 stale_attempt</code> instead of mutating restored state.</p>
+
+<h3>Agent execution state</h3>
+<figure>
+<svg viewBox="0 0 940 250" role="img" aria-label="Agent execution states: running, park requested, parked, completed, and retired.">
+  <defs><marker id="agent-state-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+  <g fill="none" stroke="var(--border)" stroke-width="1.5">
+    <rect x="35" y="35" width="165" height="56" rx="8" stroke="var(--diagram-ok)"/>
+    <rect x="285" y="35" width="180" height="56" rx="8" stroke="var(--diagram-problem)" stroke-dasharray="5 3"/>
+    <rect x="555" y="35" width="165" height="56" rx="8" stroke="var(--diagram-alt)"/>
+    <rect x="765" y="155" width="145" height="56" rx="8"/>
+    <rect x="315" y="155" width="145" height="56" rx="8"/>
+  </g>
+  <g fill="var(--text)" font-size="13" text-anchor="middle">
+    <text x="117" y="58" font-weight="700">Running</text><text x="117" y="76" font-size="11" fill="var(--dim)">may have a prior boundary</text>
+    <text x="375" y="58" font-weight="700">Park requested</text><text x="375" y="76" font-size="11" fill="var(--dim)">finishing current turn</text>
+    <text x="637" y="58" font-weight="700">Parked</text><text x="637" y="76" font-size="11" fill="var(--dim)">boundary is saveable</text>
+    <text x="837" y="178" font-weight="700">Completed</text><text x="837" y="196" font-size="11" fill="var(--dim)">not checkpointed</text>
+    <text x="387" y="178" font-weight="700">Retired</text><text x="387" y="196" font-size="11" fill="var(--dim)">task cancelled and fenced</text>
+  </g>
+  <g stroke="var(--accent)" stroke-width="2" marker-end="url(#agent-state-ah)" fill="none">
+    <line x1="200" y1="63" x2="280" y2="63"/><line x1="465" y1="63" x2="550" y2="63"/>
+    <path d="M720 63 C770 63, 770 35, 742 35 C720 35, 720 110, 635 110 C545 110, 505 92, 470 75" stroke-dasharray="5 3"/>
+    <path d="M180 91 C260 145, 690 150, 765 170"/><path d="M555 82 C500 115, 470 150, 460 170"/>
+  </g>
+  <g fill="var(--dim)" font-size="10.5" text-anchor="middle">
+    <text x="240" y="53">prepare</text><text x="507" y="53">next boundary</text><text x="638" y="126">resume</text>
+    <text x="690" y="143">/run finishes or fails</text><text x="507" y="138">deadline handling</text>
+  </g>
+</svg>
+</figure>
+<p>A boundary is the completed state after a whole agent turn, not a separate execution state. While the agent is running turn 5, its boundary for turn 4 may remain available as the latest safe rollback point. Prepare changes <code>running</code> to <code>park_requested</code>. The agent finishes the current operation and commits the next boundary before it blocks on an in-memory event. No file is polled on each turn.</p>
+<p>If the deadline expires while an agent is still between boundaries, prepare fails without caching a successful result. The RL controller may retire that attempt, which cancels its task, then retry prepare. Commit includes only parked executions with a boundary. A terminal turn is not published as a continuation because its resources session has already been retired.</p>
+
+<h3>Checkpoint phase and admission state</h3>
+<figure>
+<svg viewBox="0 0 940 245" role="img" aria-label="Checkpoint control phases and model admission states.">
+  <defs><marker id="phase-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
+  <g fill="var(--text)" font-size="12" text-anchor="middle">
+    <text x="25" y="24" text-anchor="start" font-weight="700">Control fence</text>
+    <text x="25" y="148" text-anchor="start" font-weight="700">Model admission</text>
+  </g>
+  <g fill="none" stroke="var(--border)" stroke-width="1.4">
+    <rect x="25" y="40" width="110" height="42" rx="7"/><rect x="175" y="40" width="125" height="42" rx="7"/>
+    <rect x="340" y="40" width="110" height="42" rx="7"/><rect x="490" y="40" width="120" height="42" rx="7"/>
+    <rect x="650" y="40" width="165" height="42" rx="7"/><rect x="490" y="95" width="150" height="42" rx="7"/>
+    <rect x="25" y="165" width="145" height="42" rx="7" stroke="var(--diagram-ok)"/>
+    <rect x="260" y="165" width="145" height="42" rx="7" stroke="var(--diagram-problem)"/>
+    <rect x="495" y="165" width="145" height="42" rx="7" stroke="var(--diagram-alt)"/>
+  </g>
+  <g fill="var(--text)" font-size="11.5" text-anchor="middle">
+    <text x="80" y="65">idle</text><text x="237" y="65">preparing</text><text x="395" y="65">prepared</text>
+    <text x="550" y="65">committing</text><text x="732" y="65">committed_paused</text><text x="565" y="120">restored_paused</text>
+    <text x="97" y="190">accepting</text><text x="332" y="190">draining</text><text x="567" y="190">paused</text>
+  </g>
+  <g stroke="var(--accent)" stroke-width="2" marker-end="url(#phase-ah)" fill="none">
+    <line x1="135" y1="61" x2="170" y2="61"/><line x1="300" y1="61" x2="335" y2="61"/>
+    <line x1="450" y1="61" x2="485" y2="61"/><line x1="610" y1="61" x2="645" y2="61"/>
+    <path d="M815 61 C880 61, 880 20, 80 20 C45 20, 45 35, 45 40" stroke-dasharray="5 3"/>
+    <path d="M135 75 C250 120, 400 120, 485 116"/><path d="M640 116 C760 116, 850 100, 850 82" stroke-dasharray="5 3"/>
+    <line x1="170" y1="186" x2="255" y2="186"/><line x1="405" y1="186" x2="490" y2="186"/>
+    <path d="M640 186 C760 225, 160 225, 110 207" stroke-dasharray="5 3"/>
+  </g>
+  <g fill="var(--dim)" font-size="10" text-anchor="middle">
+    <text x="152" y="52">prepare</text><text x="317" y="52">drained</text><text x="468" y="52">commit</text><text x="627" y="52">durable</text>
+    <text x="300" y="114">restore from idle</text><text x="855" y="31">resume retires checkpoint ID</text>
+    <text x="212" y="176">pause</text><text x="448" y="176">last request exits</text><text x="370" y="239">resume</text>
+  </g>
+</svg>
+</figure>
+<p>The control fence is per server process and per checkpoint ID. It prevents a stale or concurrent controller from committing, restoring, or resuming the wrong transaction. Repeating the same successful operation returns its recorded result. A failed operation returns the fence to its entry phase, so the caller can retry or abandon the global checkpoint.</p>
+<p>Admission is a separate state machine. The policy model server changes from <code>accepting</code> to <code>draining</code> when prepare closes its gate. Requests already admitted remain counted until their complete HTTP response has been sent and token custody has been recorded. When that count reaches zero, the limiter changes to <code>paused</code>. New requests receive <code>409 checkpoint_parked</code>. Resume reopens admission after commit or restore.</p>
+
+<div class="card"><h3>The implemented recovery rule</h3>
+<p>A rollout can continue only when all required pieces agree: the agent has a nonterminal committed boundary, every stateful resources server has the matching session revision, the model ledger has the referenced call lineage, and NeMo-RL restores the corresponding <code>TransferQueue</code> rows. If any required piece is absent, NeMo-RL must start a replacement attempt from the original input. The Gym APIs preserve and report component state; the companion RL code chooses the final per-rollout disposition.</p></div>
+<div class="card"><h3>Prototype gaps to close before the RL integration is production-ready</h3>
+<ul>
+  <li>Wire the multi-worker coordinator into Gym process startup and route one authenticated control URL per server instance. Until then, require <code>num_workers=1</code>.</li>
+  <li>Make agent <code>retire</code> persist a tombstone even when the retired attempt has no boundary in the checkpoint. Today it cancels the task, but a delayed duplicate <code>/run</code> is not independently fenced by that retirement.</li>
+  <li>Add identity-aware cancellation or an explicit non-restartable result for a resources mutation that holds its session lock past the deadline.</li>
+  <li>Release completed execution payloads and unused lock objects without discarding the compact tombstones needed to reject stale requests.</li>
+  <li>Pack per-rollout payloads into bounded archive shards before using the format at very large rollout counts.</li>
+  <li>Implement RL-side cross-component reconciliation before dispatching any restored continuation.</li>
+</ul></div>
 </section>
 
 <section class="tab" id="tab-ov">
@@ -199,13 +318,13 @@ tr:last-child td { border-bottom: none; }
 
 <section class="tab" id="tab-pp">
 <h2>Prepare stops new work and reaches a recoverable boundary</h2>
-<p>Prepare closes admission to new policy and environment work. Accepted operations can finish, and each agent loop parks before its next operation. Generation workers remain available while accepted policy calls drain. Judge and simulator instances also remain open so accepted tools and verifiers can complete nested calls. If a rollout has not drained by the deadline, the actor discards its partial state and marks it for a fresh dispatch.</p>
+<p>The companion NeMo-RL flow first stops new <code>/run</code> dispatch and asks each whitebox agent server to prepare. Active runs finish their current turn and park after committing a boundary. It then pauses policy-model admission and prepares resources state. Generation workers, judges, and simulators remain available while the current turn finishes. If an agent misses the deadline, the prepare call fails. NeMo-RL may retire a restart-safe attempt and retry, but Gym does not silently discard it.</p>
 <div class="stepper" id="st-pp" tabindex="0"></div>
 </section>
 
 <section class="tab" id="tab-sv">
 <h2>Save publishes only a complete checkpoint</h2>
-<p>The <code>SingleController</code> stops changes to the rollout registry and <code>TransferQueue</code>, then gives the Gym actor an owned checkpoint directory. Each Gym component streams its frozen state into archive shards. The shared filesystem never receives one file per rollout. The <code>SingleController</code> publishes the global checkpoint only after every participant has committed, and Gym remains paused until an explicit resume.</p>
+<p>The <code>SingleController</code> stops changes to the rollout registry and <code>TransferQueue</code>, then gives the Gym actor an owned checkpoint directory. Each Gym component writes its frozen state under that directory and publishes a digest-bearing manifest last. The <code>SingleController</code> publishes the global checkpoint only after every participant has committed, and Gym remains paused until an explicit resume. The current prototype uses per-rollout JSON and lineage files; shard packing is a later scalability optimization.</p>
 <div class="stepper" id="st-sv" tabindex="0"></div>
 </section>
 
@@ -313,7 +432,7 @@ buildStepper("st-rt", "Runtime", ["SC / pumps","NemoGym actor","Agent server","R
   eff:"in-memory session created", fail:"orphan sandbox reaped by the label janitor"},
  {id:"R5", f:2, t:5, call:"Policy generation request",
   req:"POST /ng-rollout/{rid}-a1/training-token-capture/v1/responses\nfull conversation; header x-ng-plane: policy",
-  resp:"admission lease granted; inflight+1 (atomic AdmissionLimiter)",
+  resp:"admission ticket created; inflight+1 (atomic AdmissionLimiter)",
   eff:"request remains in flight until custody data is durable", fail:"client retries carrying the same logical request id"},
  {id:"R6", f:5, t:6, call:"Dispatch to generation worker",
   req:"POST /v1/chat/completions + ng_capture{rollout, call_id, parent, staging_chain}",
@@ -332,11 +451,11 @@ buildStepper("st-rt", "Runtime", ["SC / pumps","NemoGym actor","Agent server","R
   resp:"token-stripped response to the agent",
   eff:"call k is committed; agent may act on it", fail:"agent never saw the response; the row stands; masked or continued at restore"},
  {id:"R10", f:2, t:3, call:"Tool calls",
-  req:"POST /{tool} per call; admission lease each; stateful servers serialize per session (lock waiters are inflight)",
+  req:"POST /{tool} per call with rollout and attempt headers; stateful servers serialize mutations per session",
   resp:"tool results",
   eff:"environment effects", fail:"mid-tool crash: in-memory state is rebuilt at the checkpoint boundary; a dirtied live sandbox makes the rollout non-resumable"},
  {id:"R11", f:3, t:4, call:"Nested environment-plane model call",
-  req:"simulator or judge request carrying the parent operation's admission lease; target is never the policy instance",
+  req:"simulator or judge request targets an auxiliary model-server instance that remains open during prepare",
   resp:"model output",
   eff:"none for training: environment-plane tokens are never selected", fail:"tool surfaces a typed error, not a fabricated observation"},
  {id:"R12", f:2, t:2, call:"Operation edge",
@@ -344,7 +463,7 @@ buildStepper("st-rt", "Runtime", ["SC / pumps","NemoGym actor","Agent server","R
   resp:"(local)",
   eff:"this edge is where prepare will park the loop", fail:"—"},
  {id:"R13", f:2, t:3, call:"Verify",
-  req:"POST /verify (judge call inside, lease-propagated to the judge instance)",
+  req:"POST /verify; any judge call targets a separate auxiliary model instance",
   resp:"{reward, verifier metadata}",
   eff:"reward computed", fail:"judge failure -> typed judge_failed outcome, owned by RL policy"},
  {id:"R14", f:1, t:0, call:"Result handoff with acknowledgement",
@@ -370,38 +489,38 @@ buildStepper("st-pp", "Prepare", ["SingleController","NemoGym actor","Agent serv
   req:"while the same mutex is held: close the actor dispatch gate and snapshot membership of the live-execution registry; then release the mutex before any drain wait",
   resp:"(local)",
   eff:"no new execution can join the checkpoint set; queued-never-issued entries are classified now; progress and abort calls remain available during draining", fail:"—"},
- {id:"P4", f:1, t:2, call:"Park signal fan-out",
-  req:"POST /ng-control/v1/agent/pause_after_current {checkpoint_id, deadline} per agent instance",
-  resp:"{state: parking, active_runs}",
-  eff:"every /run loop parks before its next model call, tool call, or verification call", fail:"re-send; idempotent"},
+ {id:"P4", f:1, t:2, call:"Prepare whitebox agents",
+  req:"POST /ng-control/v1/agent-checkpoint/prepare {checkpoint_id, deadline_ts} per agent instance",
+  resp:"{state: preparing, running: 0, parked, active} after every tracked run reaches a boundary",
+  eff:"each /run finishes its current turn, commits an AgentBoundaryRecord, and blocks on an in-memory event", fail:"a nonzero running count at the deadline fails prepare; retire restart-safe attempts and retry, or abort"},
  {id:"P5", f:1, t:3, call:"Pause blackbox egress",
   req:"pause_egress {checkpoint_id} per blackbox runtime",
   resp:"{state: paused, local_pending_requests}",
   eff:"relay holds NEW harness requests locally; the harness may keep computing", fail:"re-send; idempotent"},
- {id:"P6", f:1, t:5, call:"Close admission by instance role",
-  req:"POST each service control URL .../admission/pause {checkpoint_id, deadline}\ntargets: policy model instances and all resources servers\nexcluded: judge and simulator instances; generation workers stay available",
+ {id:"P6", f:1, t:5, call:"Close policy-model admission",
+  req:"POST /ng-control/v1/model-admission/pause {checkpoint_id, deadline_ts} after whitebox agents are parked\nexcluded: judge and simulator instances; generation workers stay available",
   resp:"{state: draining, workers: {acknowledged, expected}, inflight_total, waiters_total}",
   eff:"the service coordinator publishes the closed state to every FastAPI worker; no new top-level operations enter after all workers acknowledge; accepted ones finish", fail:"a missing worker is an error; re-send is idempotent"},
  {id:"P7", f:7, t:5, call:"Accepted generations drain",
   req:"each finishes the R6-R9 path: stage -> coordinates -> custody row -> release",
   resp:"(normal operation)",
   eff:"each FastAPI worker decrements its local count after custody is durable; the service coordinator's aggregate falls toward zero", fail:"a straggler is handled at P11, never by waiting forever"},
- {id:"P8", f:4, t:6, call:"Accepted environment operations drain",
-  req:"tools and verifiers finish; nested judge and simulator calls carry the accepted parent lease",
-  resp:"(normal operation)",
-  eff:"resources in-flight count falls toward zero", fail:"a parkable caller racing a closed gate receives 409 checkpoint_parked and parks"},
+ {id:"P8", f:1, t:4, call:"Prepare resources state",
+  req:"POST /ng-control/v1/resources-checkpoint/prepare {checkpoint_id, deadline_ts}",
+  resp:"{state: prepared, sessions}",
+  eff:"new mutations are rejected; prepare acquires each per-session lock and exports state after the accepted mutation finishes", fail:"timeout or codec failure aborts this participant prepare; no partial resources manifest is published"},
  {id:"P9", f:2, t:2, call:"Loops park; completions transfer",
-  req:"each loop records next_operation and parks; rollouts already past verify stream results and transfer with handoff ACK",
+  req:"each loop records its latest completed turn and parks; rollouts already past verify stream results and transfer with handoff ACK",
   resp:"(local)",
   eff:"per-rollout state: parked | transferred_to_rl", fail:"a loop stuck mid-operation is visible at P10 with the blocking operation named"},
- {id:"P10", f:1, t:2, call:"Status long-poll until quiet or deadline",
-  req:"GET .../agent/status, .../model-admission/status, .../resources-admission/status (long-poll <= 10 s)",
-  resp:"agent: per-rollout {parked | running | mid_operation {op, target, age}}\nservers: {state, worker_acks, inflight_total, waiters_total}",
-  eff:"progress remains observable and the deadline remains enforceable", fail:"rollouts owned by a dead worker are marked for fresh dispatch instead of blocking prepare"},
+ {id:"P10", f:1, t:5, call:"Observe model drain",
+  req:"GET /ng-control/v1/model-admission/status {checkpoint_id, wait_state: paused, timeout_s}",
+  resp:"{state, inflight_total, waiters_total}; a coordinator deployment also reports worker acknowledgements",
+  eff:"the absolute deadline remains enforceable while accepted HTTP generations finish", fail:"a missing worker or deadline expiry fails prepare; it is never treated as zero in flight"},
  {id:"P11", f:1, t:4, call:"Apply the deadline policy",
-  req:"for restart-safe state: abort_inflight {rollout_id, attempt} at the blocking server; fence the attempt; mark fresh_dispatch; tombstone its call roots",
+  req:"for a restart-safe agent/model attempt: retire the agent; abort matching model requests; fence the attempt; mark fresh_dispatch; tombstone its call roots",
   resp:"{aborted}",
-  eff:"prepare continues and reports the rollouts that require fresh dispatch", fail:"non-discardable external or shared state aborts the global checkpoint"},
+  eff:"prepare can be retried after the cancelled tasks unwind", fail:"a blocked resources mutation, non-discardable external effect, or shared state aborts the global checkpoint in the current stack"},
  {id:"P12", f:1, t:3, call:"Freeze blackbox runtimes",
   req:"checkpoint_runtime {rollout, attempt, mode: full_runtime_snapshot} once that rollout has no in-flight calls, or at the deadline with the forwarded call marked pending_reissue",
   resp:"RuntimeSnapshotDescriptor {artifact_ref, digest, provider_fingerprint}",
@@ -426,9 +545,9 @@ buildStepper("st-sv", "Save", ["SingleController","TransferQueue","NemoGym actor
   resp:"(returns at S5)",
   eff:"actor phase prepared -> committing", fail:"idempotent; a repeat verifies and returns the same descriptor"},
  {id:"S4", f:2, t:3, call:"Component commit fan-out",
-  req:"POST .../checkpoint/commit {checkpoint_id, subdir} per instance\neach instance streams frozen state into tar.zst shards and a member index:\nagent runs, resources sessions, model ledger with resolution fingerprints, runtime descriptors",
+  req:"POST /ng-control/v1/{agent|resources|model}-checkpoint/commit {checkpoint_id, checkpoint_dir, deadline_ts}\ncurrent format: per-boundary JSON, per-session JSON, token-free lineage files, then one manifest per component",
   resp:"{manifest_path, digest, counts}",
-  eff:"no per-rollout files ever touch the shared filesystem", fail:"write failure -> remain paused, report; SC aborts the global checkpoint"},
+  eff:"each component manifest makes its payload set immutable and verifiable", fail:"write failure -> remain paused, report; SC aborts the global checkpoint"},
  {id:"S5", f:2, t:4, call:"Write the actor manifest last",
   req:"verify every component digest -> write live-executions.jsonl -> write gym/manifest.json -> fsync",
   resp:"Ray return: {state: committed_paused}",
@@ -502,10 +621,63 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
   eff:"the rollout returns to normal execution", fail:"covered by the runtime steps"}
 ]);
 </script>
+<section class="tab" id="tab-trade">
+<h2>Why component-owned boundaries are the default</h2>
+<p>The central constraint is not writing bytes to disk. It is choosing a point where the agent conversation, resources state, model-call lineage, and token rows describe the same completed work. The proposed APIs let each component finish the operation it understands, then freeze the state it owns. NeMo-RL coordinates those participants but does not need to understand every environment's internal representation.</p>
+
+<h3>Normal execution pays memory and synchronization costs, not checkpoint I/O</h3>
+<div class="tbl"><table>
+<tr><th>Path</th><th>Additional work during normal execution</th><th>Expected effect</th></tr>
+<tr><td>Every internal request</td><td>Read two request-scoped values and attach <code>x-ng-rollout-id</code> plus <code>x-ng-attempt-index</code>. Validate that explicit headers do not conflict with the active context.</td><td>Small fixed CPU and header overhead. No filesystem operation and no extra network round trip.</td></tr>
+<tr><td>Agent <code>/run</code></td><td>Insert one execution object into an in-memory dictionary and update it at completion. After each nonterminal turn, validate and replace one <code>AgentBoundaryRecord</code> containing output items, usage, cookie values, model-call ID, and resource revisions.</td><td>Memory grows with live rollouts and retained conversation state. Boundary construction adds serialization and copying work at turn boundaries, but no normal-path <code>fsync</code>.</td></tr>
+<tr><td>Policy model request</td><td>Parse identity headers, check admission and tombstones, create one in-memory ticket, and remove it after the ASGI response completes. Capture-enabled requests already perform the more expensive token-staging and lineage work required by the token-capture stack.</td><td>Small fixed bookkeeping cost per generation. The limiter does not add a queue or remote coordinator call on the single-worker data path.</td></tr>
+<tr><td>Stateful resources mutation</td><td>Parse identity, acquire an <code>asyncio.Lock</code> for that rollout attempt, increment a revision, and append the revision response header. Successful terminal operations unregister the session.</td><td>This is the largest semantic cost. Mutations for one session become serialized. Different sessions still run concurrently. Environments that already require ordered state changes should not lose useful parallelism.</td></tr>
+<tr><td>Server startup</td><td>Install the capabilities route and checkpoint participants. A multi-worker deployment reports <code>unmanaged</code> until the production coordinator lifecycle is wired.</td><td>No per-request cost beyond the middleware described above. Capability negotiation occurs only during startup and restore.</td></tr>
+</table></div>
+<p>Checkpoint-time cost is proportional to live state. Prepare waits for accepted operations, copies agent and resources state into a frozen set, and commit writes that set to disk. The current prototype writes one JSON file per agent boundary and resources snapshot and copies per-rollout lineage files before publishing each component manifest. That is appropriate for validating correctness, but tens of thousands of live rollouts may create excessive shared-filesystem metadata traffic. Archive shards and a member index are a later storage optimization; they are not implemented by this PR stack.</p>
+<div class="card"><h3>Normal-path cleanup still needs a production pass</h3><p>The prototype retains completed agent execution objects, per-session resource lock objects, and each model limiter's set of seen attempts for the life of the server process. Those collections make checkpoint membership and stale-attempt fencing easy to validate, but their memory follows total attempts rather than only live attempts. Before enabling checkpointing for long-lived services or very large batches, the stack needs explicit retirement rules that preserve tombstones and required lineage while releasing completed execution payloads and unused locks.</p></div>
+
+<h3>Failure handling is fail-closed</h3>
+<div class="tbl"><table>
+<tr><th>Failure</th><th>Observed behavior</th><th>Safe next action</th></tr>
+<tr><td>A participant misses the prepare deadline</td><td>The participant does not report a successful prepare. Agent executions still between boundaries are listed as running. Resources export raises instead of publishing a partial snapshot.</td><td>An agent attempt can be retired and prepare retried. A blocked stateful resources mutation has no per-attempt cancellation API in this stack, so the safe current action is to abort the global checkpoint and resume the live job.</td></tr>
+<tr><td>A component commit fails</td><td>No valid manifest is published for that component. The server remains prepared and paused. A retry after a lost response validates and returns an already-published immutable manifest.</td><td>Retry the same checkpoint ID or abort the global checkpoint. Never publish the controller checkpoint without every required component manifest.</td></tr>
+<tr><td>Restore finds a missing or corrupt file</td><td>Digest and schema validation fail before the replacement state becomes runnable. Resources restore activates the complete replacement set as one operation.</td><td>Reject that checkpoint or demote the affected rollout to fresh dispatch only when the RL-level manifest permits that disposition.</td></tr>
+<tr><td>A request from attempt N arrives after restoring N+1</td><td>Agent, model, and resources participants reject the request with <code>409 stale_attempt</code>. Model-call roots from N remain tombstoned.</td><td>Do not retry N. Route all resumed work through N+1.</td></tr>
+<tr><td>A FastAPI worker is missing during a multi-worker pause</td><td>The coordinator cannot prove that service admission is closed or that the missing worker owns no accepted requests.</td><td>Fail prepare. Never treat a missing worker as an in-flight count of zero.</td></tr>
+<tr><td>An agent reaches a terminal environment response</td><td>The resources server retires the session, and the agent does not commit that terminal point as a resumable boundary.</td><td>Use the completed result if NeMo-RL accepted it. Otherwise start a fresh attempt rather than stepping an already-terminal environment.</td></tr>
+</table></div>
+
+<h3>Alternatives and their limits</h3>
+<div class="tbl"><table>
+<tr><th>Alternative</th><th>What it simplifies</th><th>Why it is not the general solution</th></tr>
+<tr><td>Restart every unfinished rollout</td><td>No agent or resources checkpoint APIs. Only completed RL data and token rows need durability.</td><td>It loses all progress in long multi-turn and SWE rollouts. It remains a valid fallback for stateless or unsupported environments and is the first milestone's recovery behavior.</td></tr>
+<tr><td>Wait for every rollout to finish</td><td>The checkpoint contains only terminal results, so no continuation state is needed.</td><td>Checkpoint latency becomes the tail latency of the longest rollout. A hung tool or blackbox harness can block checkpoint publication indefinitely, which defeats periodic fault recovery.</td></tr>
+<tr><td>Replay the conversation and tool log</td><td>An append-only event log can be easier to inspect than snapshots.</td><td>Replay is correct only when every effect is deterministic and idempotent. Judges, simulators, external APIs, clocks, random number generators, sandboxes, and failed requests can produce different state or duplicate effects. Replay is useful only for environments that explicitly prove those properties.</td></tr>
+<tr><td>Move all live state into NeMo-RL or one database</td><td>A central service can take one database snapshot and expose one recovery API.</td><td>It puts remote writes and a shared availability dependency on every agent turn and tool mutation. It also forces the controller to understand every agent, environment, and sandbox schema. Component ownership is lost, and the central schema becomes a bottleneck for new environments.</td></tr>
+<tr><td>Pull snapshots from each server without pausing admission</td><td>No admission gates or drain protocol.</td><td>The resulting files can describe different cuts. An agent boundary may reference a resource mutation or model call that committed after another component was copied. Digests prove file integrity, not cross-component consistency.</td></tr>
+<tr><td>Snapshot the whole process or container</td><td>Opaque agent memory and native library state can be preserved without application codecs.</td><td>Process snapshots are provider- and kernel-specific and do not automatically make external HTTP calls, <code>TransferQueue</code> writes, sockets, or remote sandboxes consistent. This remains the likely extension for blackbox agents, paired with an egress relay and the same outer admission protocol.</td></tr>
+</table></div>
+
+<div class="card"><h3>Why this approach fits Gym</h3>
+<p>Gym already separates ownership across agent, model, and resources servers. The participant approach follows that boundary: shared infrastructure supplies identity, fencing, admission, manifest-last publication, and stale-attempt rejection, while each stateful implementation supplies only its codec and turn boundary. It preserves cheap drain-or-restart fallbacks, adds continuation one component at a time, and lets NeMo-RL coordinate the global checkpoint without importing environment-specific logic. The cost is more protocol surface and careful failure ordering. That cost is justified for expensive, long-running, stateful whitebox rollouts. Short stateless rollouts and opaque unsupported harnesses should continue to drain or restart.</p></div>
+
+<h3>Assumptions the controller must enforce</h3>
+<ul>
+  <li><b>Cross-component validation is an RL responsibility.</b> Gym records <code>last_committed_model_call_id</code> and <code>resource_state_revisions</code>, but it does not join them to restored model-ledger rows, resources snapshots, and <code>TransferQueue</code> rows by itself.</li>
+  <li><b>The global commit marker is outside Gym.</b> One Gym component can commit before another fails. The <code>SingleController</code> must select a checkpoint only after every required participant manifest validates.</li>
+  <li><b>Deadlines use synchronized wall clocks.</b> Every request carries one absolute <code>deadline_ts</code>. Excessive clock skew can shorten or extend a participant's effective budget.</li>
+  <li><b>Checkpoint paths identify the same storage namespace.</b> Server processes must see the controller-provided directory consistently. A remote or differently mounted worker cannot interpret a process-local path.</li>
+  <li><b>An unsuccessful mutation must not hide a committed effect.</b> The resources middleware increments revisions only for successful HTTP responses. An environment that mutates state and then returns an error needs rollback or an explicit outcome record before it can claim continuation support.</li>
+  <li><b>Completed results cross an acknowledged ownership boundary.</b> Agent checkpoints omit completed executions. NeMo-RL must durably accept the result before Gym removes it from the recoverable live set.</li>
+  <li><b>Capability discovery is necessary but not sufficient.</b> A custom whitebox agent must actually call <code>commit_boundary</code>; inheriting checkpoint routes without emitting boundaries does not make it resumable.</li>
+</ul>
+</section>
 <section class="tab" id="tab-api">
 <h2>APIs required to coordinate the checkpoint</h2>
-<p>The checkpoint API is delivered in four additive milestones. Each milestone produces a useful recovery guarantee and becomes the foundation for the next one. <span class="pill exists">Exists</span> means the behavior is on the main branch. <span class="pill proto">Prototype</span> means it exists on the session-state branch. <span class="pill pr">PR</span> means an open pull request contains the behavior. <span class="pill new">New</span> means it still needs to be built.</p>
+<p>The checkpoint API is delivered in four additive milestones. Each milestone produces a useful recovery guarantee and becomes the foundation for the next one. <span class="pill exists">Exists</span> means the behavior is on the main branch. <span class="pill pr">PR</span> means the <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2946">Gym checkpoint stack ending at #2946</a> contains the behavior. <span class="pill new">New</span> means it still needs to be built.</p>
 <p>The <code>SingleController</code> calls the <code>NemoGym</code> actor. The actor calls Gym control endpoints, and agents call resources servers. This boundary keeps checkpoint coordination out of individual rollout implementations.</p>
+<div class="card"><h3>Scope of the current Gym stack</h3><p>PRs <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2939">#2939</a> through <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2946">#2946</a> implement stable execution identity, shared fenced control contracts, single-worker policy-model admission, the multi-worker coordinator protocol and test harness, model-ledger commit and restore, whitebox agent boundaries, resources snapshots, and three environment adapters. Companion NeMo-RL orchestration is intentionally outside this stack. Production launcher wiring for the multi-worker coordinator and blackbox runtime snapshots are also outside it.</p></div>
 
 <h3>Milestone 1 — Preserve captured tokens for stateless rollouts</h3>
 <p>This milestone supports direct-answer or otherwise restartable rollouts whose resources server and verifier retain no session state. It preserves exact token rows and their model-call lineage after they reach durable custody. It does not resume inside an unfinished generation and it does not serialize an agent loop. A rollout that has not returned its result to NeMo-RL at the checkpoint boundary starts again from its original input after restore.</p>
@@ -523,8 +695,8 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <p>This milestone adds cooperative continuation for an agent loop implemented inside Gym. Resources servers and verifiers remain stateless. The agent can therefore resume between model, tool, and verification operations without requiring an environment snapshot.</p>
 <div class="tbl"><table>
 <tr><th>Owner</th><th>Additional API or mechanism</th><th>Checkpoint behavior</th></tr>
-<tr><td>Gym agent-server base</td><td><code>pause_after_current</code>, <code>status</code>, checkpoint <code>commit</code> and <code>restore</code>, <code>resume</code>, and <code>retire</code>; one active <code>/run</code> per rollout attempt.</td><td>Each active loop parks before its next model, tool, or verification operation. The server reports loops that are parked or still completing an operation.</td></tr>
-<tr><td>Whitebox agent implementation</td><td>Check the in-memory park coordinator before every operation; treat <code>409 checkpoint_parked</code> as a park signal; implement versioned <code>export_boundary</code> and restore hooks.</td><td>The checkpoint records the conversation, completed tool results, control-flow phase, and <code>next_operation</code>. Restore creates a new attempt and continues from that boundary.</td></tr>
+<tr><td>Gym agent-server base</td><td><code>prepare</code>, checkpoint <code>commit</code> and <code>restore</code>, <code>resume</code>, and <code>retire</code>; one active <code>/run</code> per rollout attempt.</td><td>Prepare requests parking and returns only when every tracked run is parked or terminal. A deadline with remaining running executions fails the call.</td></tr>
+<tr><td>Whitebox agent implementation</td><td>Commit a versioned <code>AgentBoundaryRecord</code> after each complete nonterminal turn.</td><td>The checkpoint records conversation output, usage, cookies, model-call lineage, resource revisions, and agent-specific state. Restore creates a new attempt and continues after that boundary.</td></tr>
 <tr><td>Checkpoint reconciliation</td><td>Join the agent boundary's last committed model-call ID to the restored model custody chain and <code>TransferQueue</code> rows.</td><td>A missing or mismatched token row downgrades only that rollout to <code>fresh_dispatch</code>; it never produces a continuation with incomplete training data.</td></tr>
 </table></div>
 
@@ -532,9 +704,9 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <p>This milestone adds logical environment-state recovery. It applies only to resources servers that can define a versioned session state and a safe concurrency contract. Accepted mutations drain before the server exports its frozen sessions.</p>
 <div class="tbl"><table>
 <tr><th>Owner</th><th>Additional API or mechanism</th><th>Checkpoint behavior</th></tr>
-<tr><td>Gym resources-server base</td><td>Service-wide admission <code>pause</code>, <code>status</code>, and <code>resume</code>; session registry keyed by <code>(rollout_id, attempt)</code>; checkpoint <code>commit</code> and <code>restore</code>; <code>retire</code>; stale-attempt rejection.</td><td>No new top-level mutation starts after prepare. Already accepted mutations finish, then the process freezes and exports the sessions that it owns.</td></tr>
+<tr><td>Gym resources-server base</td><td>Checkpoint <code>prepare</code>, <code>commit</code>, <code>restore</code>, and <code>resume</code>; session registry keyed by <code>(rollout_id, attempt)</code>; per-session mutation lock; stale-attempt rejection.</td><td>No new mutation starts after prepare closes admission. Prepare waits for accepted mutations by acquiring each session lock, then exports the sessions that the process owns.</td></tr>
 <tr><td>Stateful environment implementation</td><td><code>supports_session_state</code>, versioned <code>export_session_state</code> and <code>restore_session_state</code>, plus a declared concurrency mode: <code>serialized_per_session</code> or <code>transactional_parallel</code>.</td><td>Restore installs logical state under the replacement attempt before the agent continuation becomes runnable.</td></tr>
-<tr><td>Nested model calls</td><td>Operation leases and <code>x-ng-plane</code> propagation for resources operations that call judge or simulator model instances.</td><td>An accepted operation may finish its nested calls while policy-model admission is closed. Environment traffic cannot enter the policy model instance.</td></tr>
+<tr><td>Nested model calls</td><td>Resources operations call dedicated auxiliary judge or simulator model instances rather than the paused policy instance.</td><td>An accepted operation may finish its nested calls while policy-model admission is closed. The first implementation does not define admission leases.</td></tr>
 <tr><td>Deadline handling</td><td><code>deadline_policy: restart_safe_rollouts</code> plus a component capability declaring whether partial state can be discarded safely.</td><td>A restart-safe session is fenced and discarded when its operation misses the deadline. Non-transactional external effects or shared mutable state abort the global checkpoint.</td></tr>
 </table></div>
 
@@ -565,48 +737,45 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <h3>Shared Gym server infrastructure (every server)</h3>
 <div class="tbl"><table>
 <tr><th>API / mechanism</th><th>Contract</th><th>Status</th></tr>
-<tr><td><code>GET /ng-control/v1/capabilities</code></td><td>component kind, admission states, checkpoint modes, schema versions, concurrency contract, multi-process mode; setup fails on a required-capability mismatch</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>AdmissionLimiter</code></td><td>changes atomically between accepting, draining, and paused; grants capacity only while accepting; propagates leases to nested calls; parks eligible callers with <code>409 checkpoint_parked</code>; counts requests as in flight until their response and required custody updates complete</td><td><span class="pill new">new</span></td></tr>
-<tr><td>control fencing</td><td>every control route carries <code>checkpoint_id</code> and an absolute deadline; calls are idempotent by checkpoint and phase; stale checkpoint IDs are rejected; routes are authenticated and remain reachable while the data plane is paused</td><td><span class="pill new">new</span></td></tr>
-<tr><td>multi-process aggregation</td><td>a service-level coordinator owns the control URL; Uvicorn workers register through local IPC, acknowledge checkpoint-state changes, and report local counters; the coordinator aggregates worker membership and status; a server may instead declare a validated <code>num_workers=1</code> capability</td><td><span class="pill new">new</span></td></tr>
-<tr><td>checkpoint writer</td><td>streams frozen state into <code>tar.zst</code> shards and a member index that maps each rollout to a shard, offset, and length; writes through temporary names, <code>fsync</code>, and rename; returns a digest; never materializes one shared-filesystem file per rollout</td><td><span class="pill new">new</span></td></tr>
+<tr><td><code>GET /ng-control/v1/capabilities</code></td><td>component kind, admission states, checkpoint mode, schema version, concurrency contract, multi-process mode, active checkpoint ID, and current phase</td><td><span class="pill pr">PR #2940</span></td></tr>
+<tr><td><code>AdmissionLimiter</code></td><td>changes atomically between accepting, draining, and paused; rejects new policy requests with <code>409 checkpoint_parked</code>; counts accepted requests until their ASGI response finishes; fences stale attempts</td><td><span class="pill pr">PR #2940</span></td></tr>
+<tr><td>control fencing</td><td>every mutating control route carries <code>checkpoint_id</code> and an absolute deadline; successful calls are idempotent by operation; stale and concurrent checkpoint IDs are rejected; bearer-authenticated routes remain reachable while data admission is paused</td><td><span class="pill pr">PR #2940</span></td></tr>
+<tr><td>multi-process aggregation</td><td>the coordinator protocol and real two-worker test exist; production startup does not yet launch or route the coordinator, so <code>num_workers &gt; 1</code> reports <code>unmanaged</code></td><td><span class="pill pr">protocol</span> <span class="pill new">launcher wiring</span></td></tr>
+<tr><td>checkpoint writer</td><td>writes payloads through temporary names, <code>fsync</code>, and rename, then publishes a digest-bearing manifest last; the prototype uses per-rollout files</td><td><span class="pill pr">PRs #2941, #2942, #2945</span></td></tr>
 </table></div>
 
 <h3>Gym model server</h3>
 <div class="tbl"><table>
 <tr><th>API</th><th>Contract</th><th>Status</th></tr>
-<tr><td>service-level admission coordinator</td><td>One coordinator per configured model-server instance owns the control URL and worker membership. It distributes the checkpoint state to every Uvicorn worker through local IPC and aggregates acknowledgements, in-flight counts, and waiters. A control request handled by an arbitrary data-plane worker is insufficient.</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>POST …/model-admission/pause</code></td><td><code>{checkpoint_id, deadline}</code> → <code>{state: draining, workers: {acknowledged, expected}, inflight_total, waiters_total}</code>; applies only to policy model-server instances and returns after every live FastAPI worker has observed the closed gate</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>GET …/model-admission/status</code></td><td>long-poll → <code>{state, per_worker, inflight_total, waiters_total}</code>; a missing worker is reported as an error rather than counted as drained</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>POST …/model-admission/resume</code></td><td><code>{checkpoint_id}</code> → <code>{accepting, workers: {acknowledged, expected}, released_waiters}</code>; admission reopens only after every live worker installs the matching checkpoint state</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>POST …/model-admission/abort_inflight</code></td><td><code>{rollout_id, attempt}</code>; force-closes a rollout that misses the prepare deadline and tombstones its call roots</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>POST …/model-checkpoint/commit</code> / <code>restore</code></td><td>ledger export / install: token-free custody rows, rollout manifests, and the resolution fingerprints the first resumed call needs (T5)</td><td><span class="pill new">new</span></td></tr>
-<tr><td>call-id echo</td><td><code>x-ng-model-call-id</code> response header on capture routes — the boundary join key</td><td><span class="pill new">new</span></td></tr>
-<tr><td>plane + lease handling</td><td><code>x-ng-plane</code> and lease tokens evaluated inside admission</td><td><span class="pill new">new</span></td></tr>
+<tr><td>service-level admission coordinator</td><td>The local IPC protocol distributes admission state and aggregates acknowledgements and in-flight counts. Production process lifecycle and a distinct service control URL remain to be implemented.</td><td><span class="pill pr">protocol</span> <span class="pill new">production wiring</span></td></tr>
+<tr><td><code>POST …/model-admission/pause</code></td><td><code>{checkpoint_id, deadline_ts}</code> → <code>{state, inflight_total, waiters_total}</code>; applies only to authenticated policy model-server instances</td><td><span class="pill pr">PR #2941</span></td></tr>
+<tr><td><code>GET …/model-admission/status</code></td><td>optional bounded long-poll → <code>{state, inflight_total, waiters_total}</code>; coordinator mode additionally reports per-worker state</td><td><span class="pill pr">PR #2941</span></td></tr>
+<tr><td><code>POST …/model-admission/resume</code></td><td><code>{checkpoint_id, deadline_ts}</code> → accepting; valid after prepare, commit, or restore remains paused</td><td><span class="pill pr">PR #2941</span></td></tr>
+<tr><td><code>POST …/model-admission/abort_inflight</code></td><td>cancels matching ASGI tasks and tombstones <code>(rollout_id, attempt_index)</code>; the request remains counted until cancellation unwinds</td><td><span class="pill pr">PR #2941</span></td></tr>
+<tr><td><code>POST …/model-checkpoint/commit</code> / <code>restore</code></td><td>export and install the token-free custody ledger; typed results carry counts, manifest digest, tombstones, and source attempts</td><td><span class="pill pr">PR #2941</span></td></tr>
+<tr><td>call-id echo</td><td><code>x-ng-model-call-id</code> response header on capture routes — the boundary join key</td><td><span class="pill pr">PR #2941</span></td></tr>
 <tr><td>capture middleware + custody ledger</td><td>call-id minting, token-free custody rows, rollout manifests, terminal attribution</td><td><span class="pill exists">exists</span> <span class="pill pr">PR</span></td></tr>
 </table></div>
 
 <h3>Gym agent server</h3>
 <div class="tbl"><table>
 <tr><th>API</th><th>Contract</th><th>Status</th></tr>
-<tr><td><code>POST …/agent/pause_after_current</code></td><td><code>{checkpoint_id, deadline}</code> → <code>{parking, active_runs}</code>; each loop parks before its next model, tool, or verification call</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>GET …/agent/status</code></td><td>long-poll → per-rollout <code>{parked | running | mid_operation {op, target, age}}</code>; identifies which operation prevents a rollout from reaching a checkpoint boundary</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>POST …/agent-checkpoint/commit</code> / <code>restore</code></td><td>enumerate parked runs → <code>export_boundary</code> per run → archive; restore installs conversation + control fields under the attempt mapping</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>resume</code> / <code>retire</code></td><td>release parked runs / permanently fence a stale attempt</td><td><span class="pill new">new</span></td></tr>
-<tr><td>loop contract</td><td>park-flag check before every operation; <code>checkpoint_parked</code> treated as park-now; per-attempt single-flight on <code>/run</code>; resume decision table on entry</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>export_boundary</code> / restore hooks</td><td>versioned typed boundary state per agent type</td><td><span class="pill proto">prototype</span></td></tr>
+<tr><td><code>POST …/agent-checkpoint/prepare</code></td><td><code>{checkpoint_id, deadline_ts}</code>; closes new <code>/run</code> admission, requests parking, waits for tracked runs to commit a boundary, and fails if any remain between boundaries at the deadline</td><td><span class="pill pr">PR #2942</span></td></tr>
+<tr><td><code>POST …/agent-checkpoint/commit</code> / <code>restore</code></td><td>commit writes parked boundaries; restore registers each source boundary as the continuation for <code>attempt_index + 1</code> and tombstones the source attempt</td><td><span class="pill pr">PR #2942</span></td></tr>
+<tr><td><code>POST …/agent-checkpoint/resume</code> / <code>retire</code></td><td>resume releases parked tasks and reopens <code>/run</code> admission; retire cancels one task and marks it unusable</td><td><span class="pill pr">PR #2942</span></td></tr>
+<tr><td>loop contract</td><td>one active <code>/run</code> per rollout attempt; each supported agent calls <code>commit_boundary</code> after a complete nonterminal turn; the participant blocks there when prepare requested parking</td><td><span class="pill pr">PRs #2943 and #2944</span></td></tr>
+<tr><td><code>AgentBoundaryRecord</code></td><td>versioned output items, usage, last committed model-call ID, resources revisions, and agent-specific serializable state</td><td><span class="pill pr">PR #2942</span></td></tr>
 <tr><td>blackbox orchestration</td><td><code>pause_egress</code>, <code>checkpoint_runtime</code>, <code>restore_runtime</code>, <code>resume_egress</code> with endpoint remap + attempt rewrite</td><td><span class="pill new">new</span></td></tr>
 </table></div>
 
 <h3>Gym resources server base</h3>
 <div class="tbl"><table>
 <tr><th>API</th><th>Contract</th><th>Status</th></tr>
-<tr><td><code>POST …/resources-admission/pause</code> / <code>status</code> / <code>resume</code></td><td>uses the model server's gate contract and propagates the accepted parent lease to nested calls</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>POST …/resources-admission/abort_inflight</code></td><td>force-closes a tool call when its rollout misses the prepare deadline</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>POST …/resources-checkpoint/commit</code> / <code>restore</code></td><td>enumerate the frozen session registry → versioned state codec per session → archive; restore installs under the new attempt with <code>attempt_mapping_ref</code></td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>POST …/resources/retire</code></td><td><code>{rollout_id, attempt}</code> — idempotent permanent fence</td><td><span class="pill new">new</span></td></tr>
-<tr><td>session registry + concurrency contract</td><td>keys sessions by <code>(rollout_id, attempt)</code>; declares <code>serialized_per_session | transactional_parallel | stateless</code>; rejects mutations from stale attempts with HTTP 409</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>supports_session_state</code> / <code>export_session_state</code> / <code>restore_session_state</code></td><td>per-environment typed state hooks; <code>/ng-session</code> routes</td><td><span class="pill proto">prototype</span></td></tr>
+<tr><td><code>POST …/resources-checkpoint/prepare</code></td><td>closes mutation admission, acquires each session lock, calls the environment export hook, and retains one frozen <code>ResourceSnapshot</code> per live session</td><td><span class="pill pr">PR #2945</span></td></tr>
+<tr><td><code>POST …/resources-checkpoint/commit</code> / <code>restore</code></td><td>commit writes the prepared snapshot set; restore validates every file, installs the complete replacement set under <code>attempt_index + 1</code>, and tombstones source attempts</td><td><span class="pill pr">PR #2945</span></td></tr>
+<tr><td><code>POST …/resources-checkpoint/resume</code></td><td>clears the prepared snapshot set and reopens mutation admission after commit or restore</td><td><span class="pill pr">PR #2945</span></td></tr>
+<tr><td>session registry + revision</td><td>keys sessions by <code>(rollout_id, attempt_index)</code>, serializes mutations per session, adds <code>x-ng-resource-state-revision</code> to successful mutations, unregisters terminal sessions, and rejects stale attempts</td><td><span class="pill pr">PR #2945</span></td></tr>
+<tr><td>environment hooks</td><td><code>export_checkpoint_state</code> and <code>restore_checkpoint_states</code>; adapters exist for the Gymnasium base, Blackjack RNG, session counter, and Workplace Assistant DataFrames</td><td><span class="pill pr">PR #2946</span></td></tr>
 </table></div>
 
 <h3>Runtime provider and egress relay</h3>
@@ -621,9 +790,9 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <h3>ServerClient, identity, and spinup validation</h3>
 <div class="tbl"><table>
 <tr><th>Mechanism</th><th>Contract</th><th>Status</th></tr>
-<tr><td>unconditional identity propagation</td><td>carries <code>rollout_id</code> and <code>_ng_attempt_index</code> on every model, resource, and control call, independent of observability flags; uses the <code>-aN</code> path only as a transport key</td><td><span class="pill new">new</span></td></tr>
-<tr><td>plane + lease headers</td><td><code>x-ng-plane</code> set by caller role; lease tokens forwarded on nested calls</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>checkpoint_parked</code> handling</td><td>a 409 park response is a park signal, never an error</td><td><span class="pill new">new</span></td></tr>
+<tr><td>unconditional identity propagation</td><td>carries <code>rollout_id</code> and <code>_ng_attempt_index</code> on model and resources calls independent of observability flags; uses the <code>-aN</code> path only as a transport key</td><td><span class="pill pr">PR #2939</span></td></tr>
+<tr><td>plane header</td><td><code>x-ng-plane</code> identifies policy admission traffic; the first implementation does not define or propagate nested admission leases</td><td><span class="pill pr">PR #2940</span></td></tr>
+<tr><td><code>checkpoint_parked</code></td><td>the model admission middleware returns HTTP 409 to requests racing a closed gate; whitebox checkpoint ordering parks agents before model admission closes, so this is a safety rejection rather than normal loop control</td><td><span class="pill pr">PR #2940</span></td></tr>
 <tr><td>spinup validation</td><td>instance-role classification (policy vs auxiliary model instances); reject an environment-plane <code>ModelServerRef</code> targeting a policy instance when checkpointing is enabled; enumerate every instance; negotiate capabilities or fail setup</td><td><span class="pill new">new</span></td></tr>
 </table></div>
 </section>
@@ -643,7 +812,7 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <div class="card"><h3>Count summary</h3>
 <p>The audit covers 153 concrete servers: 40 agents and 113 resources servers.</p>
 <p>Among the agents, 17 need no checkpoint-specific state, 5 reconnect through a descriptor, 5 require a full runtime snapshot, and 13 restart from input. Among resources servers, 93 are stateless for checkpointing, 13 export and restore state, 3 reconnect through a descriptor, and 4 restart from input.</p>
-<p>About 34 resources servers call a judge during verification, and 2 call a simulator during environment steps. These calls do not require per-server checkpoint code. They require judge and simulator instances to remain open and nested calls to carry the accepted parent lease.</p>
+<p>About 34 resources servers call a judge during verification, and 2 call a simulator during environment steps. These calls do not require per-server checkpoint code when they target auxiliary model instances. Those instances remain open while the policy model instance is paused.</p>
 <p>Session-state hooks currently exist in <code>blackjack</code>, <code>example_session_state_mgmt</code>, and <code>workplace_assistant</code>. <code>gymnasium_agent</code> also has partial agent-side resume configuration.</p></div>
 
 <h3>Agents needing more than admission middleware (23 of 40)</h3>
@@ -722,7 +891,7 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <div class="card"><h3>Milestone 2 — Whitebox agent continuation</h3>
 <ol>
 <li>Add the agent-server in-memory park coordinator and checks before every model, tool, and verification operation.</li>
-<li>Add agent <code>pause_after_current</code>, <code>status</code>, checkpoint <code>commit</code> and <code>restore</code>, <code>resume</code>, and <code>retire</code>.</li>
+<li>Add agent checkpoint <code>prepare</code>, <code>commit</code>, <code>restore</code>, <code>resume</code>, and <code>retire</code>.</li>
 <li>Add versioned boundary export and restore to supported Gym-native agents.</li>
 <li>Reconcile the boundary's last model-call ID with model custody and restored <code>TransferQueue</code> rows before making the continuation runnable.</li>
 </ol>
@@ -733,7 +902,7 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <li>Add service-wide resources admission and multi-worker aggregation.</li>
 <li>Add the per-attempt session registry, stale-attempt fencing, retirement, and declared concurrency modes.</li>
 <li>Add versioned session-state export and restore hooks to the resources-server base and implement them in selected environments.</li>
-<li>Add operation leases for accepted resources calls that must finish nested judge or simulator requests during prepare.</li>
+<li>Require nested judge and simulator calls to use auxiliary model instances that remain available during policy-model prepare.</li>
 <li>Apply the deadline policy only to sessions whose implementation declares that its partial state and external effects can be discarded safely.</li>
 </ol>
 <p><b>Exit condition:</b> a whitebox agent and its logical environment session restore under a replacement attempt. The resources state is installed before the agent resumes.</p></div>
