@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>External token staging: the contract is strong, with one open integration correctness gap</title>
+  <title>External token staging: the updated design closes the reproduced integrity and concurrency gaps</title>
   <script>
     (() => {
       try {
@@ -158,11 +158,11 @@
 <body>
   <button class="theme" type="button" aria-label="Toggle color theme">Light theme</button>
   <main>
-    <div class="eyebrow">Public code review · snapshot 31 August 2026</div>
-    <h1>External token staging: the contract is strong, with one open integration correctness gap</h1>
+    <div class="eyebrow">Public code review · updated 2 September 2026</div>
+    <h1>External token staging: the updated design closes the reproduced integrity and concurrency gaps</h1>
     <p class="lede">A cross-repository review of <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2872">Gym #2872</a>, its token-capture ancestry, and the active <a href="https://github.com/NVIDIA-NeMo/RL/pull/3837">NeMo RL #3837</a> integration through TransferQueue and SingleController.</p>
 
-    <div class="answer"><strong>Verdict: the Gym PR is not release-blocked by the RL pin.</strong> Gym #2872 introduces a carefully separated, fail-closed custody protocol and materially reuses the existing token-capture lineage and terminal-attribution machinery. The out-of-tree seam is credible. The strict-tool fix first carried by RL’s synthetic Gym revision is now present in Gym’s own branch history at the vLLM boundary, and RL pins a public #2872 commit containing it. One reproduced RL integration defect remains open: deferred routed-expert finalization bypasses Gym’s terminal cumulative-hash check. The replay-buffer restore defect identified in the original review has since been fixed. The worker capture lock still serializes every synchronous staging write.</div>
+    <div class="answer"><strong>Verdict: no merge-blocking production defect remains in the re-reviewed scope.</strong> Gym #2872 now provides one extras-free verifier for both direct and deferred routed-expert flows, so RL no longer duplicates token linearization or skips chain and terminal cumulative-hash checks. Gym also narrows its worker lock to the single-completion claim and permits unrelated thread-safe sink writes to overlap. The exact current Gym head passes all hosted checks and 184 focused staging/ledger tests. Remaining work is contract clarity: “metadata-only” still includes token arrays, consumers perform a manual three-way join for deferred extras, and the PR body still describes the removed routed-expert splicing behavior.</div>
 
     <nav class="toc" aria-label="Page contents">
       <strong>Read in this order</strong>
@@ -240,8 +240,8 @@ sealed terminal B → verified training row
           <div></div><div class="cross-edge">#2872 reuses capture context, lineage, fingerprints, and terminal witnesses; it adds an external custody/storage contract.</div>
           <div class="lane-label">Open integration</div>
           <div class="flow">
-            <div class="node open"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2872">Gym #2872</a></strong>external staging + ledger<div>head 7f2f5ac</div></div><div class="arrow">⇄</div>
-            <div class="node open"><strong><a href="https://github.com/NVIDIA-NeMo/RL/pull/3837">RL #3837</a></strong>TQ sink + SC finalizer<div>head 14dde62</div></div>
+            <div class="node open"><strong><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2872">Gym #2872</a></strong>external staging + ledger<div>head 805de0b</div></div><div class="arrow">⇄</div>
+            <div class="node open"><strong><a href="https://github.com/NVIDIA-NeMo/RL/pull/3837">RL #3837</a></strong>TQ sink + SC finalizer<div>head 64fe139</div></div>
           </div>
         </div>
         <figcaption>#2278 is the earlier draft integration layer. The current review follows the active #2872 ↔ #3837 path, not the historical branch shape.</figcaption>
@@ -249,29 +249,32 @@ sealed terminal B → verified training row
 
       <div class="finding good">
         <h3><span class="severity good">Not blocking</span>The RL pin carries the Gym fix that ultimately landed</h3>
-        <p>The original review treated RL’s synthetic Gym commit <code>8e983c571ff09e8f20c45bcf7f501469854d54fa</code> as a release blocker because it combined the then-current #2872 tree with a separately cherry-picked strict-tool fix. That was too strong. The same semantic fix now lives in Gym’s #2872 branch at <a href="https://github.com/NVIDIA-NeMo/Gym/blob/7dea0e786f087dbee99ba9ad81e448364c5232b0/responses_api_models/vllm_model/app.py#L509-L523">the vLLM dispatch boundary</a>, where hosted-only <code>strict</code> fields are removed before engine dispatch. RL #3837 now pins public Gym commit <code>7dea0e786f087dbee99ba9ad81e448364c5232b0</code>, which contains that implementation.</p>
-        <p class="impact"><strong>Assessment.</strong> The pin can lag later #2872 head movement during active development without making the Gym PR itself unsafe to release. Final repinning remains ordinary cross-repository integration hygiene, not a release blocker for #2872.</p>
+        <p>The original review treated RL’s synthetic Gym commit <code>8e983c571ff09e8f20c45bcf7f501469854d54fa</code> as a release blocker. That was too strong. The strict-tool fix is in Gym’s current branch at <a href="https://github.com/NVIDIA-NeMo/Gym/blob/805de0b7a00548edcade39ce7765c2c9300f6838/responses_api_models/vllm_model/app.py#L509-L523">the vLLM dispatch boundary</a>. RL currently pins public Gym commit <code>b09d85fc8a3ad55eda7c33aef888b2277028d891</code>; the PR-specific token-capture files are identical to rebased Gym head <code>805de0b7a00548edcade39ce7765c2c9300f6838</code>.</p>
+        <p class="impact"><strong>Assessment.</strong> Final repinning remains routine integration hygiene, not a release blocker for #2872.</p>
       </div>
     </section>
 
     <section id="correctness">
       <h2>Correctness findings</h2>
 
-      <div class="finding blocker">
-        <h3><span class="severity">High</span>Deferred routed-expert finalization omits the terminal cumulative-hash check</h3>
-        <p>Gym’s canonical verifier recomputes every staged digest, validates the manifest graph, re-derives the chain hash for each link, then compares the rebuilt terminal sequence with <code>cumulative_hash</code>. See <a href="https://github.com/NVIDIA-NeMo/Gym/blob/c5dccdb6125e2931da0a01c26417b38493e76556/nemo_gym/token_id_capture/staging/rebuild.py#L261-L382">the canonical verifier</a>, especially its chain and terminal checks.</p>
-        <p>RL’s deferred-route mode instead calls its own <a href="https://github.com/NVIDIA-NeMo/RL/blob/1c9fa8c6678cb3ce764c76c1e6cbc126475f118e/nemo_rl/experience/blackbox_finalizer.py#L99-L202"><code>_linearize_metadata_only</code></a>. That copy validates graph shape and mask order, but it does not recompute chain hashes, does not check the terminal cumulative hash, and does not reject an empty training row. The dispatch between the two paths is visible in <a href="https://github.com/NVIDIA-NeMo/RL/blob/1c9fa8c6678cb3ce764c76c1e6cbc126475f118e/nemo_rl/experience/blackbox_finalizer.py#L410-L423"><code>finalize_rollout</code></a>.</p>
+      <div class="finding good">
+        <h3><span class="severity good">Fixed after review</span>Deferred routed-expert finalization now uses Gym’s complete integrity verifier</h3>
+        <p>The original RL deferred path maintained a second linearizer and accepted a malformed terminal cumulative hash that Gym rejected. Gym now separates the base staged snapshot from deferred extras. Its <a href="https://github.com/NVIDIA-NeMo/Gym/blob/805de0b7a00548edcade39ce7765c2c9300f6838/nemo_gym/token_id_capture/staging/rebuild.py#L240-L367"><code>verify_and_linearize</code></a> compares every receipt field, recomputes staged digests, validates the graph, re-derives every chain hash, checks the terminal cumulative hash, and returns ordered <code>ExtrasCommitment</code> values without fetching route bytes.</p>
+        <p>RL head <code>64fe13987a47042b979f2adf065cf92addadd5c0</code> calls that verifier for both modes and constructs its route plan only afterward. See <a href="https://github.com/NVIDIA-NeMo/RL/blob/64fe13987a47042b979f2adf065cf92addadd5c0/nemo_rl/experience/blackbox_finalizer.py#L216-L280">the unified finalizer flow</a> and <a href="https://github.com/NVIDIA-NeMo/RL/blob/64fe13987a47042b979f2adf065cf92addadd5c0/nemo_rl/experience/route_assembly.py#L74-L176">point-of-use extras verification</a>.</p>
         <pre>same malformed receipt, same staged token deltas
 
-standard path:
+old canonical path:
   valid = false
   reason = rebuild_failed:cumulative_hash_mismatch
 
-deferred routed-expert path:
+old deferred path:
   valid = true
-  tokens = [10, 20, 30]</pre>
-        <p class="impact"><strong>Impact.</strong> Enabling the performance optimization weakens the custody contract and can accept a sequence the terminal worker hash does not authorize. This is a security-like integrity boundary even if the expected failure source is accidental corruption.</p>
-        <p><strong>Fix.</strong> Do not maintain a second linearizer. Extend Gym’s verifier with an option or callback that verifies extras metadata without materializing route bytes, while preserving all common receipt, digest, graph, chain, terminal, and mask invariants. Add one parametrized corruption suite that must produce identical accept/reject results in direct and deferred modes.</p>
+  tokens = [10, 20, 30]
+
+updated direct and deferred paths:
+  valid = false
+  reason = rebuild_failed:cumulative_hash_mismatch</pre>
+        <p class="impact"><strong>Assessment.</strong> The performance mode no longer changes the custody checks. Route bytes remain deferred, but their digest commitments are bound into the already-verified staged records and checked when the policy consumes them.</p>
       </div>
 
       <div class="finding good">
@@ -301,15 +304,13 @@ await remove([0], remove_in_dp=False)
 
     <section id="performance">
       <h2>Performance implications</h2>
-      <div class="finding">
-        <h3><span class="severity warn">Medium</span>One worker capture object serializes every staging write</h3>
-        <p>Gym’s <a href="https://github.com/NVIDIA-NeMo/Gym/blob/c5dccdb6125e2931da0a01c26417b38493e76556/nemo_gym/token_id_capture/staging/capture.py#L97-L208"><code>complete_call</code></a> holds the same <code>threading.Lock</code> while calling the external <code>StagingSink.stage</code>. RL’s <a href="https://github.com/NVIDIA-NeMo/RL/blob/1c9fa8c6678cb3ce764c76c1e6cbc126475f118e/nemo_rl/data_plane/tq_token_sink.py#L126-L180">TQ sink</a> is synchronous and waits for a data-plane acknowledgement, so lock hold time includes tensor construction, TransferQueue submission, and network/actor latency.</p>
+      <div class="finding good">
+        <h3><span class="severity good">Fixed after review</span>Unrelated staging writes now overlap</h3>
+        <p>Gym’s <a href="https://github.com/NVIDIA-NeMo/Gym/blob/805de0b7a00548edcade39ce7765c2c9300f6838/nemo_gym/token_id_capture/staging/capture.py#L99-L213"><code>complete_call</code></a> now locks only the per-call single-completion transition. It invokes <code>StagingSink.stage</code> after releasing that lock, while still waiting for durability before returning commit coordinates. The <a href="https://github.com/NVIDIA-NeMo/Gym/blob/805de0b7a00548edcade39ce7765c2c9300f6838/nemo_gym/token_id_capture/staging/protocols.py#L19-L50">sink protocol</a> explicitly requires thread-safe implementations.</p>
         <pre>synthetic sink latency: 50 ms
-four concurrent complete_call operations: ~207 ms
-expected if independent: ~50–60 ms
-observed behavior: approximately 4× serialization</pre>
-        <p class="impact"><strong>Impact.</strong> If a serving worker handles concurrent requests, staging throughput is capped at one write per worker. Tail latency from a slow TQ write blocks unrelated rollouts. The protocol already says blocking implementations must be moved off an event loop, but it does not say that all calls will be globally serialized.</p>
-        <p><strong>Fix choices.</strong> Make sink thread safety part of the protocol and keep the lock only around the single-shot completion claim; or use keyed/per-rollout synchronization if the sink needs ordering only within a rollout. Benchmark with realistic TQ actor latency and concurrent engine requests before choosing.</p>
+four calls before: ~206 ms
+four calls after:   ~55 ms</pre>
+        <p class="impact"><strong>Assessment.</strong> This removes worker-wide head-of-line blocking without weakening single-shot completion or parent-before-child causality. A child cannot be admitted from its parent until the parent’s stage call has returned and Gym has recorded its coordinates.</p>
       </div>
 
       <div class="table-wrap">
@@ -319,7 +320,7 @@ observed behavior: approximately 4× serialization</pre>
             <tr><td>Gym data plane</td><td>No raw training-token arrays in ledger or control response</td><td>Meaningful reduction in duplicate heavy transport.</td></tr>
             <tr><td>Worker hashing</td><td>One delta chain hash plus one cumulative sequence hash per call</td><td>Cumulative hash is O(sequence length) per call. Multi-turn generation still rehashes the growing prompt at each call.</td></tr>
             <tr><td>Final verification</td><td>Digest per row, chain hash per delta, one terminal cumulative hash</td><td>Linear in staged bytes; the terminal-only anchor is the right optimization.</td></tr>
-            <tr><td>Routed experts</td><td>Optional deferred materialization at policy consumption</td><td>Useful memory/transport optimization, but currently pays with duplicated verification logic and weaker integrity.</td></tr>
+            <tr><td>Routed experts</td><td>Optional deferred materialization at policy consumption</td><td>Route bytes avoid finalizer transport while base custody checks remain shared.</td></tr>
             <tr><td>Finalizer pool</td><td>Blocking TQ work outside generation hot path</td><td>Architecturally sound; metrics separate rollout, tensorization, put, and cleanup costs.</td></tr>
           </tbody>
         </table>
@@ -346,8 +347,8 @@ observed behavior: approximately 4× serialization</pre>
             <tr><td>Terminal attribution</td><td>Consolidated onto the existing witness engine</td><td>Strong improvement over the earlier duplicate staging attribution module.</td></tr>
             <tr><td>File/lock plumbing</td><td>Custody ledger shares rollout validation and token-store lock</td><td>Good consolidation and fewer synchronization concepts.</td></tr>
             <tr><td>Wire/integrity vocabulary</td><td>Central records, versions, reason codes, golden vectors</td><td>Good foundation for independent implementations.</td></tr>
-            <tr><td>Final linearization</td><td>RL duplicates the canonical algorithm for deferred routes</td><td>Not acceptable: this is where the strongest correctness gap appears.</td></tr>
-            <tr><td>Replay checkpoint schema</td><td>Older schema extended incompletely</td><td>Ownership fields need first-class serialization, not side arrays omitted on restore.</td></tr>
+            <tr><td>Final linearization</td><td>Direct and deferred modes call Gym’s canonical verifier</td><td>Strong reuse; mode selection happens after base-row acceptance.</td></tr>
+            <tr><td>Replay checkpoint schema</td><td>Current RL restore keeps capture bookkeeping arrays aligned</td><td>The reproduced removal failure is fixed.</td></tr>
           </tbody>
         </table>
       </div>
@@ -356,25 +357,26 @@ observed behavior: approximately 4× serialization</pre>
     <section id="understandability">
       <h2>Code understandability</h2>
       <p>Gym’s new package is easiest to understand as four layers: immutable wire records, canonical digest functions, one worker lifecycle, and one verifier. That separation is effective. The names <code>CaptureAdmission</code>, <code>StagedCallRecord</code>, <code>CommitCoords</code>, <code>RolloutManifest</code>, and <code>RolloutReceipt</code> describe the custody transition clearly.</p>
-      <p>The cross-repository system is harder to reason about because state is represented in several parallel forms: Gym ledger records, TQ staging rows, finalizer requests, canonical TQ rows, replay-buffer slots, and optional route plans. The PR descriptions are unusually thorough, but correctness should not depend on readers keeping duplicate algorithms and parallel arrays mentally synchronized.</p>
+      <p>The cross-repository system is still harder to reason about because state is represented in several forms: Gym ledger records, TQ staging rows, finalizer requests, canonical TQ rows, replay-buffer slots, and optional route plans. The updated implementation removes the most dangerous duplication—the second linearizer—but leaves three clarity issues. “Metadata-only” means extras-free, not token-free: <code>StagedCallBaseSnapshot</code> still carries token IDs, masks, and logprobs. A deferred consumer joins <code>link_spans</code>, <code>extras_commitments</code>, and receipt manifest rows by call ID. Finally, <code>encode_routed_experts</code> annotates nested <code>Sequence</code> values but its validator accepts only nested lists.</p>
       <div class="callout">
-        <strong>Recommended simplification.</strong> Treat Gym’s <code>verify_and_linearize</code> as the only accept/reject authority. Expose a verified chain plan containing token spans and digest-checked extras references. RL can then choose direct or deferred route materialization after verification without reimplementing custody semantics. Separately, replace replay-buffer parallel arrays with one slot dataclass so save, load, reserve, commit, and remove operate on the same state object.
+        <strong>Recommended cleanup.</strong> Describe the verifier as “extras-free” or “base-row” rather than “metadata-only.” Consider returning one typed verified span containing call ID, staging key, carry/generation lengths, and extras commitment so out-of-tree consumers do not repeat RL’s three-way join. Align the route encoder’s annotation with the values it actually accepts. Update the PR body: it still says <code>verify_and_linearize</code> performs routed-expert splicing, which the new design intentionally removed.
       </div>
     </section>
 
     <section id="validation">
       <h2>Validation evidence and limits</h2>
-      <p>The review pinned public heads, compared the RL-pinned Gym revision against #2872, inspected the custody and TQ boundaries, and ran focused dependency-light reproductions for each behavioral claim. Both original high-severity failures were reproduced directly against the reviewed revisions; the status update then verified the replay-restore repair in the current RL source. The lock result used four concurrent calls and a deterministic 50 ms sink.</p>
+      <p>The review pinned the rebased public heads, compared the RL-pinned Gym revision against #2872, inspected the custody and TQ boundaries, and reran focused dependency-light checks. The update preserves every base-row integrity check, removes RL’s alternate linearizer, and makes unrelated sink calls concurrent. The lock comparison used four concurrent calls and a deterministic 50 ms sink.</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Claim</th><th>Result</th><th>Why it matters</th></tr></thead>
           <tbody>
             <tr><td>Canonical verifier rejects wrong terminal cumulative hash</td><td>Pass: rejected</td><td>Confirms expected custody contract.</td></tr>
-            <tr><td>Deferred-route path rejects the same corruption</td><td>Fail: accepted</td><td>Confirms mode-dependent integrity bypass.</td></tr>
+            <tr><td>Deferred-route path delegates to the same verifier</td><td>Pass: one shared call path</td><td>Eliminates the mode-dependent integrity bypass.</td></tr>
             <tr><td>Restored replay group can be removed</td><td>Originally failed with <code>IndexError</code>; current source repaired</td><td>Confirms the original defect and records its subsequent fix.</td></tr>
             <tr><td>Mixed weight-version reject policy</td><td>Pass: rejected 1..99</td><td>Confirms conservative staleness handling.</td></tr>
-            <tr><td>Concurrent staging writes overlap</td><td>Fail: ~207 ms for four × 50 ms</td><td>Confirms global worker serialization.</td></tr>
-            <tr><td>Current hosted checks</td><td>Gym lint and most unit shards pass; one server shard and dependent jobs fail. RL metadata checks pass.</td><td>No public end-to-end result currently demonstrates the final #2872-head + #3837-head pair.</td></tr>
+            <tr><td>Concurrent staging writes overlap</td><td>Pass: ~206 ms before, ~55 ms after</td><td>Confirms removal of worker-global serialization.</td></tr>
+            <tr><td>Focused current-head Gym tests</td><td>184 passed</td><td>Covers ledger, attribution, digest core, rebuild, routes, terminal selection, and worker lifecycle.</td></tr>
+            <tr><td>Current hosted checks</td><td>Gym lint, DCO, and all unit/server shards pass; RL metadata checks pass</td><td>The exact Gym head is green; a public end-to-end SingleController result is still not attached.</td></tr>
           </tbody>
         </table>
       </div>
@@ -391,24 +393,25 @@ observed behavior: approximately 4× serialization</pre>
           <li>Gym #2278: <code>d9ad9d2e693cc1378b89e14147ed41e67cf9f1e0</code></li>
           <li>Gym #2872 reviewed revision: <code>c5dccdb6125e2931da0a01c26417b38493e76556</code></li>
           <li>RL #3837 reviewed revision: <code>1c9fa8c6678cb3ce764c76c1e6cbc126475f118e</code></li>
-          <li>Gym #2872 status-update head: <code>7f2f5ac1cb97fc5056730364513461134c906943</code></li>
-          <li>RL #3837 status-update head: <code>14dde627ad62426beeeddb148b5f089595adb022</code></li>
-          <li>Current RL-pinned Gym: <code>7dea0e786f087dbee99ba9ad81e448364c5232b0</code></li>
+          <li>Gym #2872 first status-update head: <code>7f2f5ac1cb97fc5056730364513461134c906943</code></li>
+          <li>RL #3837 first status-update head: <code>14dde627ad62426beeeddb148b5f089595adb022</code></li>
+          <li>Gym #2872 re-review head: <code>805de0b7a00548edcade39ce7765c2c9300f6838</code></li>
+          <li>RL #3837 re-review head: <code>64fe13987a47042b979f2adf065cf92addadd5c0</code></li>
+          <li>Current RL-pinned Gym: <code>b09d85fc8a3ad55eda7c33aef888b2277028d891</code></li>
           <li>Historical synthetic Gym pin: <code>8e983c571ff09e8f20c45bcf7f501469854d54fa</code></li>
         </ul>
       </details>
     </section>
 
     <section id="questions">
-      <h2>Questions to resolve before merge</h2>
+      <h2>Remaining review questions</h2>
       <ol>
-        <li>Can deferred routed-expert mode call one Gym-owned verifier and receive a verified route-span plan, eliminating <code>_linearize_metadata_only</code>?</li>
-        <li>What is the checkpoint contract for staging ownership? Must deferred route fragments survive restart until policy consumption, and how are older checkpoints migrated?</li>
-        <li>Is <code>StagingSink.stage</code> required to be thread-safe? If not, what ordering guarantee requires a worker-global lock rather than rollout-scoped synchronization?</li>
-        <li>When #2872 stabilizes, which final public head should RL #3837 pin for its merge validation?</li>
-        <li>Which end-to-end test exercises save → restart → restored group consumption with token capture and deferred routed experts enabled together?</li>
+        <li>Can the PR body be updated to describe the extras-free verifier and deferred <code>ExtrasCommitment</code> flow rather than the removed routed-expert splicing behavior?</li>
+        <li>Should Gym return one typed verified extras span so each out-of-tree framework does not repeat the same manifest/span/commitment join?</li>
+        <li>Can “metadata-only” be renamed to “extras-free” or “base-row” so readers do not mistake token-bearing snapshots for token-free metadata?</li>
+        <li>Which public end-to-end test demonstrates external staging plus deferred routed experts through final policy consumption?</li>
       </ol>
-      <div class="callout"><strong>Suggested integration gate.</strong> Fix and regression-test the deferred-route integrity defect, then publish one end-to-end SingleController run that enables external staging and deferred routed experts. Repin RL to the final public Gym head as routine integration validation. The lock can be a documented follow-up only if measured TQ concurrency shows it is not on the critical throughput path.</div>
+      <div class="callout"><strong>Suggested integration gate.</strong> Repin RL to the final public Gym head and publish one end-to-end SingleController run that enables external staging and deferred routed experts. The focused correctness and concurrency defects from the original review are resolved.</div>
     </section>
 
     <footer>
