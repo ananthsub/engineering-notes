@@ -1,0 +1,781 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reproducible NeMo Gym environment images: design and migration audit</title>
+  <script>
+    (() => {
+      try {
+        if (localStorage.getItem("engineering-notes-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {}
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1f2630;
+      --border: #30363d;
+      --text: #e6edf3;
+      --dim: #9aa6b2;
+      --accent: #58a6ff;
+      --diagram-ok: #5bc0eb;
+      --diagram-problem: #ffb000;
+      --diagram-alt: #d98bc3;
+      --diagram-neutral: #c7ced8;
+      --shadow: rgba(0, 0, 0, .24);
+      --code: #111820;
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --surface-2: #eef2f6;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --dim: #59636e;
+      --accent: #0969da;
+      --diagram-ok: #005a8d;
+      --diagram-problem: #9a4d00;
+      --diagram-alt: #7a3e6d;
+      --diagram-neutral: #4b5563;
+      --shadow: rgba(31, 35, 40, .12);
+      --code: #eef2f6;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      overflow-x: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.62 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+    button, input { font: inherit; }
+    button { min-height: 42px; }
+    code {
+      padding: .12rem .34rem;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--code);
+      font: .9em/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 1rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--code);
+      font: .88rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    h1 { max-width: 850px; margin: .3rem 0 .7rem; font-size: clamp(2rem, 5vw, 3.65rem); line-height: 1.05; letter-spacing: -.04em; }
+    h2 { margin: 3.8rem 0 1rem; font-size: clamp(1.55rem, 3vw, 2.2rem); line-height: 1.18; }
+    h3 { margin: 1.5rem 0 .6rem; line-height: 1.3; }
+    p { max-width: 78ch; }
+    .wrap { width: 100%; max-width: 1012px; margin: 0 auto; padding-inline: 16px; }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg) 90%, transparent);
+      backdrop-filter: blur(12px);
+    }
+    .topbar .wrap { display: flex; align-items: center; justify-content: space-between; min-height: 58px; gap: 1rem; }
+    .brand { color: var(--text); font-weight: 700; text-decoration: none; }
+    .theme {
+      cursor: pointer;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: .45rem .8rem;
+      color: var(--text);
+      background: var(--surface);
+    }
+    .hero { padding: 4.2rem 0 2.1rem; }
+    .eyebrow { color: var(--diagram-ok); font-weight: 750; letter-spacing: .08em; text-transform: uppercase; font-size: .78rem; }
+    .lede { max-width: 850px; margin: 1rem 0; color: var(--dim); font-size: 1.18rem; }
+    .answer {
+      margin: 1.5rem 0 2rem;
+      padding: 1.1rem 1.25rem;
+      border-left: 5px solid var(--diagram-ok);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: 0 10px 32px var(--shadow);
+    }
+    .answer strong { color: var(--diagram-ok); }
+    .provenance { display: flex; flex-wrap: wrap; gap: .55rem; margin: 1.2rem 0; color: var(--dim); font-size: .88rem; }
+    .pill, .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      max-width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: .22rem .58rem;
+      background: var(--surface);
+      overflow-wrap: anywhere;
+    }
+    .badge.blocker { border-style: dashed; border-color: var(--diagram-problem); color: var(--diagram-problem); }
+    .badge.tradeoff { border-color: var(--diagram-alt); color: var(--diagram-alt); }
+    .badge.evidence { border-color: var(--diagram-ok); color: var(--diagram-ok); }
+    .workflow {
+      margin: 2rem 0;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      background: var(--surface);
+    }
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      border-bottom: 1px solid var(--border);
+    }
+    .step {
+      position: relative;
+      cursor: pointer;
+      border: 0;
+      border-right: 1px solid var(--border);
+      padding: .9rem .45rem;
+      color: var(--dim);
+      background: transparent;
+      text-align: center;
+    }
+    .step:last-child { border-right: 0; }
+    .step::after { content: ""; position: absolute; left: 18%; right: 18%; bottom: 0; height: 3px; background: transparent; }
+    .step.active { color: var(--text); font-weight: 700; background: var(--surface-2); }
+    .step.active::after { background: var(--diagram-ok); }
+    .step-num {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      margin: 0 auto .35rem;
+      border: 2px solid currentColor;
+      border-radius: 50%;
+      font-size: .8rem;
+    }
+    .step-detail { min-height: 205px; padding: 1.25rem 1.4rem; }
+    .step-detail h3 { margin-top: 0; }
+    .flowline { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; margin-top: 1rem; }
+    .node { padding: .55rem .75rem; border: 2px solid var(--diagram-neutral); border-radius: 8px; background: var(--bg); }
+    .node.active { border-color: var(--diagram-ok); }
+    .arrow { color: var(--dim); font-weight: 800; }
+    nav.toc {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem;
+      padding: 1rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+    nav.toc a { padding: .3rem .48rem; }
+    .switcher { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+    .switcher button, .filter button {
+      cursor: pointer;
+      padding: .55rem .85rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+    }
+    .switcher button.active, .filter button.active { border-color: var(--diagram-ok); box-shadow: inset 0 -3px 0 var(--diagram-ok); }
+    .mode-panel {
+      display: none;
+      padding: 1.2rem;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    .mode-panel.active { display: block; }
+    .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .card {
+      padding: 1rem 1.1rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: 0 8px 22px var(--shadow);
+    }
+    .card h3 { margin-top: 0; }
+    .card.problem { border-style: dashed; border-color: var(--diagram-problem); }
+    .card.alt { border-color: var(--diagram-alt); }
+    .card.ok { border-color: var(--diagram-ok); }
+    .compact { margin: .45rem 0; padding-left: 1.25rem; }
+    .compact li { margin: .35rem 0; }
+    .figure {
+      margin: 1.3rem 0;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    .figure figcaption { padding: .8rem 1rem; border-bottom: 1px solid var(--border); font-weight: 700; }
+    svg { display: block; min-width: 760px; width: 100%; height: auto; padding: .5rem; }
+    svg text { fill: var(--text); font-family: ui-sans-serif, system-ui, sans-serif; }
+    .svg-dim { fill: var(--dim); }
+    .svg-blue { fill: none; stroke: var(--diagram-ok); stroke-width: 3; }
+    .svg-orange { fill: none; stroke: var(--diagram-problem); stroke-width: 3; stroke-dasharray: 8 5; }
+    .svg-purple { fill: none; stroke: var(--diagram-alt); stroke-width: 3; }
+    .svg-gray { fill: none; stroke: var(--diagram-neutral); stroke-width: 2; stroke-dasharray: 2 5; }
+    .metric-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: .75rem; margin: 1rem 0; }
+    .metric { padding: 1rem; border-top: 4px solid var(--diagram-neutral); background: var(--surface); border-radius: 8px; }
+    .metric strong { display: block; font-size: 1.75rem; line-height: 1.1; }
+    .metric.blue { border-color: var(--diagram-ok); }
+    .metric.orange { border-color: var(--diagram-problem); }
+    .metric.purple { border-color: var(--diagram-alt); }
+    .method { color: var(--dim); font-size: .9rem; }
+    .estimator { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; padding: 1.2rem; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    .checks label { display: flex; gap: .65rem; align-items: flex-start; margin: .65rem 0; cursor: pointer; }
+    .checks input { width: 20px; height: 20px; accent-color: var(--diagram-ok); }
+    .estimate-result { padding: 1rem; border: 2px solid var(--diagram-ok); border-radius: 10px; background: var(--bg); }
+    .estimate-result.warn { border-style: dashed; border-color: var(--diagram-problem); }
+    .estimate-result.medium { border-color: var(--diagram-alt); }
+    .finding { margin: .8rem 0; }
+    .finding[data-hidden="true"] { display: none; }
+    .finding-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .6rem; align-items: center; }
+    .finding h3 { margin: 0; }
+    .evidence-box { margin-top: .75rem; padding: .75rem; border-left: 3px solid var(--diagram-neutral); background: var(--surface-2); font-size: .92rem; }
+    .callout { padding: 1rem 1.1rem; border: 1px dashed var(--diagram-problem); border-radius: 10px; background: var(--surface); }
+    .recommendations { counter-reset: rec; }
+    .recommendation { position: relative; margin: .85rem 0; padding: 1rem 1rem 1rem 3.5rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+    .recommendation::before {
+      counter-increment: rec;
+      content: counter(rec);
+      position: absolute;
+      left: 1rem;
+      top: 1rem;
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border: 2px solid var(--diagram-ok);
+      border-radius: 50%;
+      color: var(--diagram-ok);
+      font-weight: 800;
+    }
+    footer { margin-top: 4rem; padding: 2rem 0 3rem; border-top: 1px solid var(--border); color: var(--dim); }
+    @media (max-width: 760px) {
+      .steps { grid-template-columns: 1fr; }
+      .step { border-right: 0; border-bottom: 1px solid var(--border); text-align: left; padding-left: 3.3rem; }
+      .step-num { position: absolute; left: .8rem; top: .62rem; }
+      .compare-grid, .estimator { grid-template-columns: 1fr; }
+      .metric-row { grid-template-columns: 1fr 1fr; }
+      .hero { padding-top: 2.8rem; }
+    }
+    @media (max-width: 440px) {
+      .metric-row { grid-template-columns: 1fr; }
+      .wrap { padding-inline: 11px; }
+      .topbar .wrap { gap: .4rem; }
+      .brand { font-size: .9rem; }
+      .theme { flex: 0 0 auto; padding-inline: .65rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="wrap">
+      <a class="brand" href="#top">NeMo Gym design audit</a>
+      <button class="theme" id="theme-toggle" type="button" aria-label="Switch color theme">Theme: dark</button>
+    </div>
+  </div>
+
+  <main class="wrap" id="top">
+    <section class="hero">
+      <div class="eyebrow">Design review · 2 September 2026</div>
+      <h1>Reproducible NeMo Gym environment images</h1>
+      <p class="lede">How a resolved Gym environment becomes a lock, a packed or split image, immutable task data, and a runtime deployment—and what must change before existing servers can rely on that contract.</p>
+      <div class="answer">
+        <strong>Short answer:</strong> the lock-first design is the right boundary for platform builds, and existing server entrypoints do not need a new API. It is not yet a drop-in replacement for today’s main image. The audit reproduced two release blockers: runtime config can downgrade the no-install policy, and selected-only build contexts omit sibling source required by many existing components. Static analysis classifies 114 of 174 configured components as likely no-code candidates; the remaining 60 need dependency cleanup, source-dependency handling, build-time setup, or a combination.
+      </div>
+      <div class="provenance">
+        <span class="pill">Today’s main: <a href="https://github.com/NVIDIA-NeMo/Gym/tree/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5">98713f8e…</a></span>
+        <span class="pill">Implementation base: <a href="https://github.com/NVIDIA-NeMo/Gym/tree/cd6acf792c3fe5b6289b383eb9b9fb343a281c17">cd6acf79…</a></span>
+        <span class="pill">Implementation: approved local review snapshot; public source link pending</span>
+      </div>
+
+      <div class="workflow" aria-label="Interactive build and runtime workflow">
+        <div class="steps" role="tablist">
+          <button class="step active" type="button" data-step="0" role="tab"><span class="step-num">1</span>Resolve</button>
+          <button class="step" type="button" data-step="1" role="tab"><span class="step-num">2</span>Lock</button>
+          <button class="step" type="button" data-step="2" role="tab"><span class="step-num">3</span>Build</button>
+          <button class="step" type="button" data-step="3" role="tab"><span class="step-num">4</span>Prepare</button>
+          <button class="step" type="button" data-step="4" role="tab"><span class="step-num">5</span>Run</button>
+        </div>
+        <div class="step-detail" id="step-detail" role="tabpanel"></div>
+      </div>
+    </section>
+
+    <nav class="toc" aria-label="Page sections">
+      <a href="#change">What changes</a>
+      <a href="#mechanism">End-to-end mechanism</a>
+      <a href="#migration">Migration impact</a>
+      <a href="#tradeoffs">Tradeoffs</a>
+      <a href="#audit">Review audit</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#recommendations">Recommended sequence</a>
+    </nav>
+
+    <section id="change">
+      <h2>The new path moves installation out of startup</h2>
+      <div class="switcher" role="tablist" aria-label="Deployment mode">
+        <button class="active" type="button" data-mode="main">Today’s main</button>
+        <button type="button" data-mode="packed">Packed image</button>
+        <button type="button" data-mode="split">Split images</button>
+      </div>
+      <div class="mode-panel active" data-panel="main">
+        <div class="compare-grid">
+          <div class="card">
+            <h3>Build time</h3>
+            <ul class="compact">
+              <li>Build one Gym image from a source ref.</li>
+              <li>Install the core project from <code>uv.lock</code>.</li>
+              <li>Optionally run <code>gym env prefetch</code> for named configs.</li>
+            </ul>
+          </div>
+          <div class="card problem">
+            <h3>Runtime</h3>
+            <ul class="compact">
+              <li><code>gym env start</code> resolves each selected server.</li>
+              <li><code>setup_env_command()</code> may create its venv and install dependencies.</li>
+              <li>The resolved config is placed in the child’s shell command before the process starts.</li>
+            </ul>
+          </div>
+        </div>
+        <p>The current Dockerfile already has a useful bridge: it can <a href="https://github.com/NVIDIA-NeMo/Gym/blob/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5/docker/Dockerfile#L184-L199">prefetch selected server venvs during the image build</a>. Prefetch is an optimization, not an immutable contract. The normal start path can still install, and main currently <a href="https://github.com/NVIDIA-NeMo/Gym/blob/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5/nemo_gym/cli/env.py#L432-L437">constructs child startup with serialized configuration in the command</a>.</p>
+      </div>
+      <div class="mode-panel" data-panel="packed">
+        <div class="compare-grid">
+          <div class="card ok">
+            <h3>Build time</h3>
+            <ul class="compact">
+              <li>Resolve one concrete environment.</li>
+              <li>Compile each component to hash-complete requirements.</li>
+              <li>Verify Gym and component source digests.</li>
+              <li>Create every selected component venv in one image.</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>Runtime</h3>
+            <ul class="compact">
+              <li>Mount resolved config and task artifacts.</li>
+              <li>Start the same agent, resources, and model entrypoints.</li>
+              <li>Reuse prebuilt venvs as numeric user <code>65532</code>.</li>
+              <li>Write temporary state under <code>/tmp</code>.</li>
+            </ul>
+          </div>
+        </div>
+        <p>This is the smallest operational migration. It preserves Gym’s in-container process topology and keeps <code>gym env start</code> as the orchestrator.</p>
+      </div>
+      <div class="mode-panel" data-panel="split">
+        <div class="compare-grid">
+          <div class="card alt">
+            <h3>Build output</h3>
+            <ul class="compact">
+              <li>One head-server image.</li>
+              <li>One image for each selected implementation.</li>
+              <li>A composition BOM with digest-pinned image references and instance names.</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>Operator responsibility</h3>
+            <ul class="compact">
+              <li>Project the same runtime config into every container.</li>
+              <li>Assign addresses, ports, probes, and service identities.</li>
+              <li>Provide Ray and start services in dependency order.</li>
+              <li>Compare image labels and BOM identities before launch.</li>
+            </ul>
+          </div>
+        </div>
+        <p>Server code can keep its existing entrypoint, but deployment ownership moves out of <code>RunHelper</code>. The current implementation produces the BOM; it does not yet provide a controller that consumes it.</p>
+      </div>
+    </section>
+
+    <section id="mechanism">
+      <h2>One concrete environment through the new workflow</h2>
+      <p>Use one environment throughout: <code>weather-eval</code> selects <code>simple_agent</code>, <code>example_single_tool_call</code>, and <code>openai_model</code>. The model URL and API key are supplied only at runtime.</p>
+      <figure class="figure">
+        <figcaption>Figure 1. The build identity stops before runtime secrets and addresses.</figcaption>
+        <svg viewBox="0 0 900 330" role="img" aria-labelledby="flow-title flow-desc">
+          <title id="flow-title">Build and runtime data flow</title>
+          <desc id="flow-desc">Resolved component configuration flows through a dependency lock and image build. Prepared rows flow through an artifact manifest. Runtime configuration and secrets join only when the image starts.</desc>
+          <defs>
+            <marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="var(--diagram-ok)"/></marker>
+            <marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="var(--diagram-alt)"/></marker>
+            <marker id="arrow-orange" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="var(--diagram-problem)"/></marker>
+          </defs>
+          <rect x="25" y="54" width="150" height="72" rx="9" class="svg-blue"/>
+          <text x="100" y="82" text-anchor="middle" font-weight="700">Resolved config</text>
+          <text x="100" y="106" text-anchor="middle" class="svg-dim">3 components</text>
+          <line x1="175" y1="90" x2="250" y2="90" stroke="var(--diagram-ok)" stroke-width="3" marker-end="url(#arrow-blue)"/>
+          <rect x="260" y="40" width="175" height="100" rx="9" class="svg-blue"/>
+          <text x="347" y="72" text-anchor="middle" font-weight="700">environment.lock</text>
+          <text x="347" y="96" text-anchor="middle" class="svg-dim">versions + hashes</text>
+          <text x="347" y="118" text-anchor="middle" class="svg-dim">source digests</text>
+          <line x1="435" y1="90" x2="510" y2="90" stroke="var(--diagram-ok)" stroke-width="3" marker-end="url(#arrow-blue)"/>
+          <rect x="520" y="40" width="155" height="100" rx="9" class="svg-blue"/>
+          <text x="597" y="72" text-anchor="middle" font-weight="700">Packed image</text>
+          <text x="597" y="96" text-anchor="middle" class="svg-dim">Gym + 3 venvs</text>
+          <text x="597" y="118" text-anchor="middle" class="svg-dim">lock labels</text>
+          <rect x="25" y="215" width="150" height="72" rx="9" class="svg-purple"/>
+          <text x="100" y="243" text-anchor="middle" font-weight="700">Prepared JSONL</text>
+          <text x="100" y="267" text-anchor="middle" class="svg-dim">canonical rows</text>
+          <line x1="175" y1="251" x2="250" y2="251" stroke="var(--diagram-alt)" stroke-width="3" marker-end="url(#arrow-purple)"/>
+          <rect x="260" y="201" width="175" height="100" rx="9" class="svg-purple"/>
+          <text x="347" y="233" text-anchor="middle" font-weight="700">Artifact directory</text>
+          <text x="347" y="257" text-anchor="middle" class="svg-dim">manifest + digest</text>
+          <text x="347" y="279" text-anchor="middle" class="svg-dim">stable task IDs</text>
+          <rect x="720" y="201" width="155" height="100" rx="9" class="svg-orange"/>
+          <text x="797" y="233" text-anchor="middle" font-weight="700">Runtime config</text>
+          <text x="797" y="257" text-anchor="middle" class="svg-dim">addresses + keys</text>
+          <text x="797" y="279" text-anchor="middle" class="svg-dim">read-only mount</text>
+          <line x1="675" y1="90" x2="760" y2="183" stroke="var(--diagram-ok)" stroke-width="3" marker-end="url(#arrow-blue)"/>
+          <line x1="435" y1="251" x2="700" y2="251" stroke="var(--diagram-alt)" stroke-width="3" marker-end="url(#arrow-purple)"/>
+          <line x1="797" y1="201" x2="797" y2="168" stroke="var(--diagram-problem)" stroke-width="3" stroke-dasharray="8 5" marker-end="url(#arrow-orange)"/>
+          <rect x="700" y="78" width="175" height="80" rx="9" class="svg-gray"/>
+          <text x="787" y="108" text-anchor="middle" font-weight="700">gym env start</text>
+          <text x="787" y="132" text-anchor="middle" class="svg-dim">verify, then exec</text>
+          <text x="25" y="318" class="svg-dim">Legend: solid blue = build identity · solid purple = task identity · dashed orange = runtime-only input · dotted gray = execution</text>
+        </svg>
+      </figure>
+      <div class="compare-grid">
+        <div class="card">
+          <h3>What the lock fixes</h3>
+          <p>It records Python, <code>uv</code>, parent package versions, selected implementations, component content hashes, and hash-complete Python requirements. The builder refuses changed selected source.</p>
+        </div>
+        <div class="card">
+          <h3>What remains outside</h3>
+          <p>The base image identity, operating-system packages, sibling source dependencies, component startup downloads, deployment topology, and secret-bearing runtime configuration need separate contracts.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="migration">
+      <h2>Existing server APIs stay stable; packaging assumptions do not</h2>
+      <p>No new <code>/run</code>, <code>/verify</code>, tool, or Responses API contract is required. A conventional server that has one relative <code>entrypoint</code>, self-contained source, lockable Python dependencies, and no startup installer can move to the packed path without code changes.</p>
+      <div class="metric-row">
+        <div class="metric blue"><strong>174</strong><span>configured component directories inspected</span></div>
+        <div class="metric blue"><strong>114</strong><span>static drop-in candidates</span></div>
+        <div class="metric orange"><strong>42</strong><span>import sibling component source</span></div>
+        <div class="metric purple"><strong>14</strong><span>have detected startup setup hooks</span></div>
+      </div>
+      <p class="method">Method: static analysis of public main plus the reviewed implementation. A “configured component” is a top-level resources server, agent, or model directory with a <code>configs/</code> directory and one supported dependency file. The cohorts overlap. Seven components fail strict dependency-input rules; the union of all migration flags is 60. “Candidate” means no known static blocker, not runtime certification.</p>
+
+      <figure class="figure">
+        <figcaption>Figure 2. Compatibility narrows as the contract becomes stricter.</figcaption>
+        <svg viewBox="0 0 900 220" role="img" aria-labelledby="cohort-title cohort-desc">
+          <title id="cohort-title">Migration cohort bar chart</title>
+          <desc id="cohort-desc">Of 174 configured components, 114 have no static migration flag. Sixty have at least one flag. The flags overlap and include sibling imports, startup setup, and strict dependency blockers.</desc>
+          <text x="35" y="38" font-weight="700">Configured components</text>
+          <rect x="35" y="54" width="800" height="34" rx="5" class="svg-gray"/>
+          <rect x="35" y="54" width="524" height="34" rx="5" class="svg-blue"/>
+          <line x1="559" y1="54" x2="559" y2="88" stroke="var(--diagram-problem)" stroke-width="3"/>
+          <text x="297" y="77" text-anchor="middle">114 likely no-code candidates</text>
+          <text x="697" y="77" text-anchor="middle">60 flagged</text>
+          <text x="35" y="122" font-weight="700">Overlapping reasons inside the 60 flagged components</text>
+          <line x1="35" y1="148" x2="228" y2="148" stroke="var(--diagram-problem)" stroke-width="14" stroke-dasharray="10 5"/>
+          <text x="245" y="154">42 sibling-source imports</text>
+          <line x1="35" y1="180" x2="99" y2="180" stroke="var(--diagram-alt)" stroke-width="14"/>
+          <text x="116" y="186">14 startup setup hooks</text>
+          <circle cx="516" cy="180" r="8" fill="none" stroke="var(--diagram-neutral)" stroke-width="3"/>
+          <text x="536" y="186">7 strict dependency blockers</text>
+          <text x="35" y="211" class="svg-dim">Legend: solid blue = no static flag · orange dashed = omitted source risk · purple solid = runtime setup · gray circle = dependency hygiene</text>
+        </svg>
+      </figure>
+
+      <h3>Estimate one component’s migration</h3>
+      <div class="estimator">
+        <div class="checks">
+          <label><input type="checkbox" id="m-deps"> Dependency file uses a mutable VCS ref or custom index</label>
+          <label><input type="checkbox" id="m-source"> Source imports another Gym component directory</label>
+          <label><input type="checkbox" id="m-startup"> Startup installs tools, downloads assets, or creates another venv</label>
+          <label><input type="checkbox" id="m-system"> Component requires OS packages absent from the chosen base</label>
+          <label><input type="checkbox" id="m-split"> Deployment must use split server images</label>
+        </div>
+        <div class="estimate-result" id="estimate-result" aria-live="polite"></div>
+      </div>
+
+      <div class="compare-grid" style="margin-top:1rem">
+        <div class="card ok">
+          <h3>Packed migration</h3>
+          <ol class="compact">
+            <li>Keep existing YAML and entrypoint.</li>
+            <li>Generate a strict lock for the exact composition.</li>
+            <li>Fix dependency or source-closure failures.</li>
+            <li>Build and mount prepared artifacts plus runtime config.</li>
+          </ol>
+        </div>
+        <div class="card alt">
+          <h3>Additional split migration</h3>
+          <ol class="compact">
+            <li>Provide an external Ray endpoint where required.</li>
+            <li>Create services, probes, and addresses for each instance.</li>
+            <li>Start the head and component containers.</li>
+            <li>Validate cookies, callbacks, and cross-service routing.</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="tradeoffs">
+      <h2>The design buys repeatability by narrowing runtime freedom</h2>
+      <div class="compare-grid">
+        <div class="card ok">
+          <h3>What improves over main</h3>
+          <ul class="compact">
+            <li>Dependency resolution becomes an explicit, reviewable artifact.</li>
+            <li>Selected source changes invalidate the build.</li>
+            <li>Component venv creation moves to image construction.</li>
+            <li>Task rows gain stable identities and content verification.</li>
+            <li>Runtime config can arrive as a read-only file instead of shell arguments.</li>
+            <li>Images default to a non-root identity and writable temporary workspace.</li>
+          </ul>
+        </div>
+        <div class="card alt">
+          <h3>What becomes harder</h3>
+          <ul class="compact">
+            <li>Mutable Git refs and per-component package indexes fail strict locking.</li>
+            <li>Every intentional source edit requires relocking.</li>
+            <li>Air-gapped operation requires assets and external tools to move into a build contract.</li>
+            <li>Each component gets a separate venv, which duplicates packages.</li>
+            <li>Split mode multiplies images and shifts orchestration to the deployer.</li>
+            <li>Cross-platform builds depend on a compatible, pinned base and BuildKit.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout" style="margin-top:1rem">
+        <strong>Measured footprint:</strong> the reviewed one-environment lock was 864,312 bytes. A local packed-image smoke using a CUDA development base produced a 23,977,897,062-byte image; the copied Python and Gym/component environments contributed about 4.17 GB of additional layers. This is one build, not a general benchmark, but it makes image-size and shared-layer work a release consideration.
+      </div>
+    </section>
+
+    <section id="audit">
+      <h2>Full review audit</h2>
+      <p>“Observed” items were reproduced against the reviewed snapshot. “Design gap” items follow a reachable code path but need a product decision or broader integration test. “Tradeoff” items are expected consequences rather than correctness bugs.</p>
+      <div class="filter" aria-label="Filter findings">
+        <button class="active" type="button" data-filter="all">All</button>
+        <button type="button" data-filter="observed">Observed</button>
+        <button type="button" data-filter="gap">Design gaps</button>
+        <button type="button" data-filter="tradeoff">Tradeoffs</button>
+      </div>
+
+      <article class="card problem finding" data-kind="observed">
+        <div class="finding-head"><h3>Runtime config can turn installation back on</h3><span class="badge blocker">Observed · release blocker</span></div>
+        <p><code>setup_env_command()</code> reads <code>runtime_install_policy</code> from resolved config before consulting <code>NEMO_GYM_RUNTIME_INSTALL_POLICY</code>. A mounted config containing <code>allow-install</code> therefore overrides the packed image’s <code>require-existing</code> environment setting.</p>
+        <div class="evidence-box"><strong>Reproduction:</strong> image policy <code>require-existing</code> + mounted config policy <code>allow-install</code> returned a command containing <code>uv venv</code>. Source: <code>nemo_gym/cli/setup_command.py:235-253</code> in the review snapshot.</div>
+      </article>
+
+      <article class="card problem finding" data-kind="observed">
+        <div class="finding-head"><h3>Selected-only build contexts omit required sibling source</h3><span class="badge blocker">Observed · release blocker</span></div>
+        <p>The context copier includes only implementations selected by the environment lock. Existing components frequently reuse sibling implementation code. For example, <a href="https://github.com/NVIDIA-NeMo/Gym/blob/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5/responses_api_models/litellm_model/app.py#L31">litellm_model imports openai_model</a>. A lock selecting only <code>litellm_model</code> copies its directory but omits <code>openai_model</code>. The same issue affects packed and split images.</p>
+        <div class="evidence-box"><strong>Reproduction:</strong> a generated representative context reported <code>selected_present=True</code> and <code>required_sibling_present=False</code>. Static import analysis found 42 configured components with cross-component source imports. Source: <code>nemo_gym/environment/image.py:181-194</code> in the review snapshot.</div>
+      </article>
+
+      <article class="card problem finding" data-kind="observed">
+        <div class="finding-head"><h3>Common secret names still affect lock identity</h3><span class="badge blocker">Observed · security contract</span></div>
+        <p>Lock redaction delegates key detection to the existing predicate, which matches <code>token</code>, <code>key</code>, and <code>header</code>. Plain values under <code>password</code>, <code>client_secret</code>, or <code>credential</code> are not masked. The lock does not print those values, but its identity changes with them, contradicting the claim that secrets are excluded from lock identity.</p>
+        <div class="evidence-box"><strong>Reproduction:</strong> changing <code>api_key</code>, <code>token</code>, or <code>header</code> preserved the digest; changing <code>password</code>, <code>client_secret</code>, or <code>credential</code> changed it. Source: <code>nemo_gym/environment/lock.py:145-173</code> and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5/nemo_gym/secret_utils.py#L24-L26">the public secret-key predicate</a>.</div>
+      </article>
+
+      <article class="card finding" data-kind="gap">
+        <div class="finding-head"><h3>The base image is an input but not part of the lock</h3><span class="badge blocker">Design gap</span></div>
+        <p>Strict mode accepts a mutable base tag. The lock identity and labels remain unchanged when that tag resolves to different bytes. The documentation recommends a digest, but the builder does not require one or record the resolved base digest.</p>
+        <div class="evidence-box"><strong>Resolution:</strong> add the OCI base digest and platform to the environment lock, reject tag-only bases in strict mode, and carry the digest into the composition BOM and image labels. Source: <code>nemo_gym/environment/image.py:250-281</code> in the review snapshot.</div>
+      </article>
+
+      <article class="card finding" data-kind="gap">
+        <div class="finding-head"><h3>Registry Gym identity does not bind the copied Gym source</h3><span class="badge blocker">Design gap</span></div>
+        <p>Editable installs receive a Gym source digest. Registry installs do not. Image construction still copies <code>source_root/nemo_gym</code> and builds a wheel from it, while verification checks only that the version string matches. A different source tree with the same version can therefore enter the image.</p>
+        <div class="evidence-box"><strong>Resolution:</strong> either build registry locks from a hash-pinned wheel without a source checkout, or always hash the source tree that will be copied. Source: <code>nemo_gym/environment/image.py:137-146</code> and <code>nemo_gym/environment/lock.py:217-275</code> in the review snapshot.</div>
+      </article>
+
+      <article class="card finding" data-kind="gap">
+        <div class="finding-head"><h3>No-install covers Gym venv setup, not component startup setup</h3><span class="badge blocker">Design gap</span></div>
+        <p>The runtime policy gates <code>setup_env_command()</code>. It does not stop an agent or resources server from downloading Node, installing an external tool, creating a nested venv, or fetching assets in <code>model_post_init()</code> or <code>__init__()</code>. Static analysis found 14 configured components with such startup hooks. The public <a href="https://github.com/NVIDIA-NeMo/Gym/blob/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5/responses_api_agents/codex_agent/setup_codex.py#L47-L60">Codex setup path downloads a Node distribution</a>.</p>
+        <div class="evidence-box"><strong>Resolution:</strong> define component build hooks and declared assets, execute them in the build stage, and add a strict startup guard or network-disabled smoke for certified components.</div>
+      </article>
+
+      <article class="card finding" data-kind="gap">
+        <div class="finding-head"><h3>Prepared-artifact provenance is recorded but not enforced</h3><span class="badge blocker">Design gap</span></div>
+        <p>The manifest may carry an environment-lock identity. Runtime loading verifies the artifact’s own digest, row count, canonical encoding, and split, but does not compare that identity with the running image’s lock. The <code>source_sha256</code> field also duplicates the canonical output data hash rather than preserving the input file’s byte identity.</p>
+        <div class="evidence-box"><strong>Resolution:</strong> compare non-null artifact lock identity with the mounted or embedded environment lock before server startup, and clarify whether source identity means original bytes or normalized task content. Source: <code>nemo_gym/environment/artifact.py:102-174</code> and <code>nemo_gym/cli/eval.py:415-425</code> in the review snapshot.</div>
+      </article>
+
+      <article class="card finding" data-kind="gap">
+        <div class="finding-head"><h3>The split BOM has no runtime consumer</h3><span class="badge blocker">Design gap</span></div>
+        <p><code>gym env build-images</code> pushes images and writes a digest-pinned composition BOM. No Gym command parses that BOM to validate labels, materialize services, start containers, or check readiness. Operators must independently reconstruct ports, addresses, Ray connectivity, startup order, and health policy from runtime config.</p>
+        <div class="evidence-box"><strong>Resolution:</strong> keep the BOM deliberately build-only and publish a deployment adapter contract, or add a small validator/renderer that turns BOM + runtime config into an orchestrator-neutral launch plan.</div>
+      </article>
+
+      <article class="card finding" data-kind="observed">
+        <div class="finding-head"><h3>Rebasing onto today’s main requires one semantic merge</h3><span class="badge evidence">Observed · integration</span></div>
+        <p>The implementation started from <code>cd6acf79…</code>. Replaying it onto <code>98713f8e…</code> merged every file except <code>nemo_gym/cli/eval.py</code>. Main added prepared-split declaration validation while the implementation added the artifact bypass. Both behaviors must remain in the resolved branch.</p>
+        <div class="evidence-box"><strong>Reproduction:</strong> Git’s three-way merge reported one content conflict. After retaining main’s declaration validation and setting the artifact’s parent as the validation directory, the focused current-main regression set passed 713 tests and Ruff.</div>
+      </article>
+
+      <article class="card finding" data-kind="gap">
+        <div class="finding-head"><h3>Container behavior is not covered by committed integration tests</h3><span class="badge blocker">Design gap</span></div>
+        <p>The unit suite checks lock models, generated commands, source verification, and Dockerfile text. Most image builds are mocked. The local smoke demonstrated a packed image starting as non-root with networking disabled, but CI does not currently replay that path or test a cross-component server.</p>
+        <div class="evidence-box"><strong>Resolution:</strong> add one small BuildKit smoke that builds a packed image, rejects a missing venv, starts with a read-only root, and exercises a declared source dependency. Add a split-image import/start smoke before calling split support generally compatible.</div>
+      </article>
+
+      <article class="card alt finding" data-kind="tradeoff">
+        <div class="finding-head"><h3>Content hashing is intentionally coarse</h3><span class="badge tradeoff">Tradeoff</span></div>
+        <p>The Gym digest includes the full <code>nemo_gym</code> package and both image recipes. A packed-only Dockerfile change can invalidate split locks, and unrelated CLI edits invalidate every environment lock. Component hashes include tests and preparation files as well as runtime code. This is safe but increases rebuild frequency.</p>
+      </article>
+
+      <article class="card alt finding" data-kind="tradeoff">
+        <div class="finding-head"><h3>Split mode trades process convenience for independent rollout</h3><span class="badge tradeoff">Tradeoff</span></div>
+        <p>Per-server images can be scanned, promoted, scaled, and restarted independently. They also duplicate the Gym runtime and Python layers, require a registry push during every build, and make the deployer responsible for service discovery and shared runtime state.</p>
+      </article>
+
+      <article class="card finding" data-kind="gap">
+        <div class="finding-head"><h3>Documentation overstates two current guarantees</h3><span class="badge blocker">Design gap</span></div>
+        <p>The draft says image construction populates a temporary wheelhouse, but installation now goes directly through <code>uv pip install --require-hashes --no-deps</code>. It also says deployment addresses are excluded from lock identity, while server configuration—including ordinary URL and host fields—feeds the redacted config digest. The capability output reports offline runtime installation even though policy downgrade and component startup hooks remain.</p>
+      </article>
+    </section>
+
+    <section id="evidence">
+      <h2>What was reproduced</h2>
+      <div class="compare-grid">
+        <div class="card">
+          <h3>Current-main integration</h3>
+          <p><strong>Revisions:</strong> base <a href="https://github.com/NVIDIA-NeMo/Gym/tree/cd6acf792c3fe5b6289b383eb9b9fb343a281c17">cd6acf79…</a>, target <a href="https://github.com/NVIDIA-NeMo/Gym/tree/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5">98713f8e…</a>.</p>
+          <p><strong>Observed:</strong> one semantic merge conflict; 713 focused unit tests passed after resolution; Ruff passed on the changed runtime and environment modules.</p>
+          <p><strong>Scope:</strong> CPU unit behavior. It does not prove every component image or distributed deployment.</p>
+        </div>
+        <div class="card">
+          <h3>Packed image smoke</h3>
+          <p><strong>Observed:</strong> lock generation, packed build, labels, non-root runtime, network-disabled capabilities, and a network-disabled dry start reached Ray and server startup.</p>
+          <p><strong>Scope:</strong> one representative environment on the implementation base. The current-main replay was unit-tested but not rebuilt as a container.</p>
+        </div>
+        <div class="card">
+          <h3>Migration scan</h3>
+          <p><strong>Observed:</strong> 174 configured component directories; 7 strict dependency blockers; 42 sibling-source importers; 14 startup setup hooks; 60 in the union.</p>
+          <p><strong>Scope:</strong> static source analysis. Lazy imports, optional paths, and environment-specific branches require per-component runtime certification.</p>
+        </div>
+        <div class="card">
+          <h3>Missing public evidence</h3>
+          <p>No public branch or pull request contains the implementation yet, so only today’s main links can be pinned to public source. No public CI run demonstrates packed or split images. The approved implementation details in this page should be replaced with commit permalinks when a branch is published.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="recommendations">
+      <h2>Recommended sequence to make this supportable</h2>
+      <div class="recommendations">
+        <div class="recommendation"><strong>Make strict policy monotonic.</strong> An image-level <code>require-existing</code> setting must win over runtime config. Add a regression test using a mounted config that requests <code>allow-install</code>.</div>
+        <div class="recommendation"><strong>Define the source closure.</strong> Add explicit component source dependencies, derive them conservatively, or temporarily copy and hash the complete component trees. Test a real sibling-importing model and resources server in packed and split modes.</div>
+        <div class="recommendation"><strong>Bind every build input.</strong> Put the resolved base-image digest in the lock. Hash copied Gym source for registry and editable installs. Verify the build-stage <code>uv</code> version recorded by the lock.</div>
+        <div class="recommendation"><strong>Separate runtime config from build identity.</strong> Define which server fields affect binaries and which are deployment-only. Expand secret-name redaction and prove password, client-secret, credential, headers, tokens, and arbitrary secret URLs do not affect or appear in locks.</div>
+        <div class="recommendation"><strong>Add build hooks and immutable assets.</strong> Give components a declarative way to install external tools, nested environments, and datasets during image construction. Record their digests and certify startup with networking disabled where the environment permits it.</div>
+        <div class="recommendation"><strong>Enforce artifact compatibility.</strong> Compare prepared-artifact provenance with the running lock before servers start, or explicitly document why cross-lock reuse is allowed. Rename or fix <code>source_sha256</code>.</div>
+        <div class="recommendation"><strong>Choose the split ownership boundary.</strong> Either ship an orchestrator-neutral BOM validator/renderer or state that split mode is a low-level build primitive. Document Ray, addressing, health checks, cookie routing, and startup order.</div>
+        <div class="recommendation"><strong>Rebase and certify in layers.</strong> Resolve the one current-main conflict, land secure config handoff and packed mode first, add a BuildKit smoke, then certify component cohorts. Treat split mode as a later milestone after source closure and deployment ownership are explicit.</div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p>This page contains public Gym source links and implementation details explicitly approved for public disclosure. It contains no credentials, internal infrastructure, private deployment information, or private run links.</p>
+    </div>
+  </footer>
+
+  <script>
+    const steps = [
+      {
+        title: "Resolve one exact composition",
+        text: "Gym resolves weather-eval into three concrete server instances. Runtime addresses and credentials may be present for validation, but they must not become image content.",
+        flow: ["weather-eval.yaml", "simple_agent", "example_single_tool_call", "openai_model"]
+      },
+      {
+        title: "Compile and identify build inputs",
+        text: "gym env lock validates dependency inputs, compiles hash-complete requirements for the target platform, hashes selected source, records tool versions, and writes environment.lock.json.",
+        flow: ["resolved config", "dependency inputs", "source digests", "environment.lock.json"]
+      },
+      {
+        title: "Build a packed image or a set of split images",
+        text: "BuildKit verifies the lock, creates component venvs, installs Gym, applies OCI labels, and switches the runtime to numeric user 65532. Strict mode should make this the last package-installing phase.",
+        flow: ["lock + source", "BuildKit", "prebuilt venvs", "OCI image digest"]
+      },
+      {
+        title: "Freeze task rows separately",
+        text: "gym eval prepare-artifact canonicalizes prepared JSONL, assigns stable task IDs, computes a content identity, and writes a manifest beside the data. This keeps large task data out of the image.",
+        flow: ["prepared JSONL", "canonical rows", "manifest.json", "artifact digest"]
+      },
+      {
+        title: "Inject deployment state and execute",
+        text: "The operator mounts runtime config, task artifacts, and result storage. Packed mode starts all processes in one container. Split mode starts the head and each component as separate services.",
+        flow: ["image + artifact", "runtime.yaml", "gym env start", "rollouts.jsonl"]
+      }
+    ];
+
+    function renderStep(index) {
+      const item = steps[index];
+      document.querySelectorAll(".step").forEach((button, i) => button.classList.toggle("active", i === index));
+      const flow = item.flow.map((value, i) => `<span class="node ${i === index % item.flow.length ? "active" : ""}">${value}</span>${i < item.flow.length - 1 ? '<span class="arrow">→</span>' : ""}`).join("");
+      document.getElementById("step-detail").innerHTML = `<h3>${item.title}</h3><p>${item.text}</p><div class="flowline">${flow}</div>`;
+    }
+    document.querySelectorAll(".step").forEach(button => button.addEventListener("click", () => renderStep(Number(button.dataset.step))));
+    renderStep(0);
+
+    document.querySelectorAll("[data-mode]").forEach(button => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll("[data-mode]").forEach(item => item.classList.toggle("active", item === button));
+        document.querySelectorAll("[data-panel]").forEach(panel => panel.classList.toggle("active", panel.dataset.panel === button.dataset.mode));
+      });
+    });
+
+    const migrationInputs = ["m-deps", "m-source", "m-startup", "m-system", "m-split"].map(id => document.getElementById(id));
+    function renderEstimate() {
+      const checked = migrationInputs.map(input => input.checked);
+      const score = checked.slice(0, 4).filter(Boolean).length + (checked[4] ? 1 : 0);
+      const result = document.getElementById("estimate-result");
+      result.className = "estimate-result";
+      let title = "Likely no server code change";
+      let text = "Generate a lock, build packed, mount runtime config and prepared data, then run a network-constrained smoke.";
+      if (score >= 3) {
+        result.classList.add("warn");
+        title = "Substantial packaging migration";
+        text = "Plan dependency cleanup, explicit source closure, build hooks or a richer base, and deployment integration before certification.";
+      } else if (score > 0) {
+        result.classList.add("medium");
+        title = "Focused migration required";
+        const actions = [];
+        if (checked[0]) actions.push("pin or mirror Python dependencies");
+        if (checked[1]) actions.push("declare sibling source");
+        if (checked[2]) actions.push("move startup setup into the build");
+        if (checked[3]) actions.push("pin a compatible base");
+        if (checked[4]) actions.push("supply external orchestration");
+        text = `Expected work: ${actions.join(", ")}.`;
+      }
+      result.innerHTML = `<h3>${title}</h3><p>${text}</p>`;
+    }
+    migrationInputs.forEach(input => input.addEventListener("change", renderEstimate));
+    renderEstimate();
+
+    document.querySelectorAll("[data-filter]").forEach(button => {
+      button.addEventListener("click", () => {
+        const filter = button.dataset.filter;
+        document.querySelectorAll("[data-filter]").forEach(item => item.classList.toggle("active", item === button));
+        document.querySelectorAll(".finding").forEach(item => item.dataset.hidden = String(filter !== "all" && item.dataset.kind !== filter));
+      });
+    });
+
+    const toggle = document.getElementById("theme-toggle");
+    function updateThemeLabel() {
+      toggle.textContent = `Theme: ${document.documentElement.dataset.theme === "light" ? "light" : "dark"}`;
+    }
+    toggle.addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+      if (next === "light") document.documentElement.dataset.theme = "light";
+      else delete document.documentElement.dataset.theme;
+      try { localStorage.setItem("engineering-notes-theme", next); } catch {}
+      updateThemeLabel();
+    });
+    updateThemeLabel();
+  </script>
+</body>
+</html>
