@@ -284,18 +284,115 @@
 
   <main class="wrap" id="top">
     <section class="hero">
-      <div class="eyebrow">Design review · 2 September 2026</div>
+      <div class="eyebrow">Design review · updated 3 September 2026</div>
       <h1>Reproducible NeMo Gym environment images</h1>
-      <p class="lede">How a resolved Gym environment becomes a lock, a packed or split image, immutable task data, and a runtime deployment—and what must change before existing servers can rely on that contract.</p>
+      <p class="lede">Why a working Gym environment cannot yet be treated as a reproducible customer artifact, what must be fixed beyond Python requirement pinning, and how environment code and customer evaluation data should meet at a versioned task contract.</p>
       <div class="answer">
-        <strong>Short answer:</strong> the lock-first design is the right boundary for platform builds, and existing server entrypoints do not need a new API. It is not yet a drop-in replacement for today’s main image. The audit reproduced two release blockers: runtime config can downgrade the no-install policy, and selected-only build contexts omit sibling source required by many existing components. Static analysis classifies 114 of 174 configured components as likely no-code candidates; the remaining 60 need dependency cleanup, source-dependency handling, build-time setup, or a combination.
+        <strong>Problem statement:</strong> today a Gym environment is a set of source directories, dependency files, server configuration, preparation code, task rows, and startup behavior. A Dockerfile can pin Python packages and still miss sibling source, downloaded tools, generated assets, the exact Gym runtime, task preparation, or the resources server’s expected row shape. The result may work in one checkout while changing on rebuild or installing more software when the container starts. A supportable customer artifact therefore needs two related contracts: an immutable environment image and a validated task dataset that declares exactly what the selected resources server consumes.
       </div>
       <div class="provenance">
-        <span class="pill">Today’s main: <a href="https://github.com/NVIDIA-NeMo/Gym/tree/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5">98713f8e…</a></span>
-        <span class="pill">Implementation base: <a href="https://github.com/NVIDIA-NeMo/Gym/tree/cd6acf792c3fe5b6289b383eb9b9fb343a281c17">cd6acf79…</a></span>
-        <span class="pill">Implementation: approved local review snapshot; public source link pending</span>
+        <span class="pill">Audit baseline: <a href="https://github.com/NVIDIA-NeMo/Gym/tree/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5">98713f8e…</a></span>
+        <span class="pill">Published implementation snapshot: <a href="https://github.com/ananthsub/Gym/tree/9f5686cad1d4cef43fddb08dc7d7360d2b760107">9f5686ca…</a></span>
+        <span class="pill">Design-gap fixes: <a href="https://github.com/ananthsub/Gym/commit/9f5686cad1d4cef43fddb08dc7d7360d2b760107">9f5686ca…</a></span>
+      </div>
+    </section>
+
+    <nav class="toc" aria-label="Page sections">
+      <a href="#problem">Problem statement</a>
+      <a href="#customer-contract">Customer contract</a>
+      <a href="#workflow">Customer workflow</a>
+      <a href="#change">What changes</a>
+      <a href="#mechanism">End-to-end mechanism</a>
+      <a href="#migration">Migration impact</a>
+      <a href="#tradeoffs">Tradeoffs</a>
+      <a href="#audit">Review audit</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#recommendations">Recommended sequence</a>
+    </nav>
+
+    <section id="problem">
+      <h2>A reproducible image must freeze more than Python packages</h2>
+      <p>The customer goal is simple: select an environment, build it once, move the image and evaluation data to another machine, inject deployment-specific configuration, and get the same executable environment and the same task inputs. Gym does not currently expose that as one complete contract. The normal runtime can discover components from a checkout, create component virtual environments, run setup code, prepare datasets, and pass loosely shaped row metadata to servers. Each behavior is useful for development, but each introduces an input that a conventional container build may fail to record.</p>
+      <div class="compare-grid">
+        <div class="card problem">
+          <h3>The executable closure is implicit</h3>
+          <p>A selected server can import another component directory, call a tool installed by startup code, depend on an operating-system package, or load an asset that is not named in <code>requirements.txt</code>. Copying only the selected directory and installing its Python lock can produce a valid build that fails at import or startup.</p>
+        </div>
+        <div class="card problem">
+          <h3>Startup can still mutate the image</h3>
+          <p>The development path may create a virtual environment or download software when <code>gym env start</code> runs. That makes the effective runtime depend on network availability, package indexes, mutable upstream artifacts, and the user running the container.</p>
+        </div>
+        <div class="card problem">
+          <h3>Build and deployment inputs are mixed</h3>
+          <p>Component selection affects image contents. Hosts, ports, API credentials, and service addresses should not. Without an explicit boundary, either secrets leak into serialized artifacts or harmless deployment changes force a different build identity.</p>
+        </div>
+        <div class="card problem">
+          <h3>Evaluation rows have no complete portable contract</h3>
+          <p>Gym rows conventionally carry <code>responses_create_params</code> plus environment-specific fields, often under <code>verifier_metadata</code>. The resources server owns the meaning of those fields, but prepared artifacts currently canonicalize arbitrary JSON objects without validating the full row against the selected server’s schema.</p>
+        </div>
       </div>
 
+      <h3>Requirement pinning is necessary, but it covers only one layer</h3>
+      <ul class="compact">
+        <li><strong>Base runtime:</strong> bind the OCI base digest, target platform, Python version, exact build tool, and operating-system packages inherited from the base.</li>
+        <li><strong>Gym runtime:</strong> bind the exact Gym source and image recipe instead of installing whichever package revision is reachable later.</li>
+        <li><strong>Component source:</strong> include and hash selected implementations plus transitive sibling imports and explicitly declared dynamic source dependencies.</li>
+        <li><strong>Build outputs:</strong> move tool installation, asset download, code generation, and nested environment creation into declared build steps with verifiable outputs.</li>
+        <li><strong>Runtime policy:</strong> fail when a required environment or asset is missing. A mounted configuration must not re-enable installation.</li>
+        <li><strong>Configuration boundary:</strong> keep credentials, hosts, ports, URLs, and service topology out of image and lock identities.</li>
+        <li><strong>Task boundary:</strong> version, validate, identify, and preserve the provenance of customer evaluation rows independently from the image.</li>
+      </ul>
+    </section>
+
+    <section id="customer-contract">
+      <h2>Customers should supply environment code and task data through separate contracts</h2>
+      <p>A customer-authored environment combines a resources server, an optional agent, configuration, dependency declarations, and a task schema. Gym should build that code into an image without embedding the customer’s evaluation rows. The same image can then evaluate any dataset that conforms to the published task schema.</p>
+      <div class="compare-grid">
+        <div class="card ok">
+          <h3>Environment package</h3>
+          <ul class="compact">
+            <li><code>app.py</code> implements tools, state, and verification.</li>
+            <li><code>task_data.py</code> exports the Pydantic shape consumed by that environment.</li>
+            <li>A requirements file declares Python dependencies.</li>
+            <li><code>component.build.yaml</code> declares additional source and build-time materialization.</li>
+            <li>YAML selects concrete agent, resources, and model server instances.</li>
+          </ul>
+        </div>
+        <div class="card alt">
+          <h3>Prepared task artifact</h3>
+          <ul class="compact">
+            <li>A versioned envelope separates framework fields from environment-owned data.</li>
+            <li>Every row has a stable <code>task_id</code>.</li>
+            <li><code>responses_create_params</code> contains the agent or model request.</li>
+            <li><code>task_data</code> contains fields validated by the resources server schema.</li>
+            <li>Provenance records the source dataset, revision, split, and original row identity.</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>The task should be a stable input, not a rollout record</h3>
+      <pre aria-label="Proposed versioned task envelope"><code>{
+  "schema_version": "nemo-gym/task/v1",
+  "task_id": "acme-eval:123",
+  "responses_create_params": {
+    "input": [{"role": "user", "content": "Question..."}]
+  },
+  "task_data": {
+    "expected_answer": "42",
+    "difficulty": "hard"
+  },
+  "provenance": {
+    "dataset": "acme-eval",
+    "revision": "2026-09-03",
+    "split": "test",
+    "source_id": "123"
+  }
+}</code></pre>
+      <p><code>responses_create_params</code> and <code>task_data</code> are task inputs. Rollout indexes, attempts, responses, rewards, trajectories, and other <code>_ng_*</code> fields are execution records and must not contribute to task identity. The existing per-server <code>TaskData</code> protocol is the right schema foundation because it can normalize legacy flat fields and <code>verifier_metadata</code>. The remaining product work is to make artifact preparation validate this complete envelope, export the selected environment’s JSON Schema, and translate <code>task_data</code> into legacy placement while older servers migrate.</p>
+    </section>
+
+    <section id="workflow">
+      <h2>The proposed customer workflow keeps code, data, and deployment separate</h2>
       <div class="workflow" aria-label="Interactive build and runtime workflow">
         <div class="steps" role="tablist">
           <button class="step active" type="button" data-step="0" role="tab"><span class="step-num">1</span>Resolve</button>
@@ -307,16 +404,6 @@
         <div class="step-detail" id="step-detail" role="tabpanel"></div>
       </div>
     </section>
-
-    <nav class="toc" aria-label="Page sections">
-      <a href="#change">What changes</a>
-      <a href="#mechanism">End-to-end mechanism</a>
-      <a href="#migration">Migration impact</a>
-      <a href="#tradeoffs">Tradeoffs</a>
-      <a href="#audit">Review audit</a>
-      <a href="#evidence">Evidence</a>
-      <a href="#recommendations">Recommended sequence</a>
-    </nav>
 
     <section id="change">
       <h2>The new path moves installation out of startup</h2>
@@ -447,7 +534,7 @@
         </div>
         <div class="card">
           <h3>What remains outside</h3>
-          <p>The base image identity, operating-system packages, sibling source dependencies, component startup downloads, deployment topology, and secret-bearing runtime configuration need separate contracts.</p>
+          <p>The lock now binds the base image, platform, Gym source, Python, <code>uv</code>, selected components, and transitive sibling source. Operating-system packages remain a pinned-base responsibility. Components with startup downloads still need build manifests and offline certification.</p>
         </div>
       </div>
     </section>
@@ -546,7 +633,7 @@
         </div>
       </div>
       <div class="callout" style="margin-top:1rem">
-        <strong>Measured footprint:</strong> the reviewed one-environment lock was 864,312 bytes. A local packed-image smoke using a CUDA development base produced a 23,977,897,062-byte image; the copied Python and Gym/component environments contributed about 4.17 GB of additional layers. This is one build, not a general benchmark, but it makes image-size and shared-layer work a release consideration.
+        <strong>Image footprint:</strong> the packed-image smoke used a CUDA development base and copied separate Python and component environments into the runtime. This is not a general size benchmark, but it makes image-size measurement and shared-layer work a release consideration before broad deployment.
       </div>
     </section>
 
@@ -560,52 +647,52 @@
         <button type="button" data-filter="tradeoff">Tradeoffs</button>
       </div>
 
-      <article class="card problem finding" data-kind="observed">
-        <div class="finding-head"><h3>Runtime config can turn installation back on</h3><span class="badge blocker">Observed · release blocker</span></div>
-        <p><code>setup_env_command()</code> reads <code>runtime_install_policy</code> from resolved config before consulting <code>NEMO_GYM_RUNTIME_INSTALL_POLICY</code>. A mounted config containing <code>allow-install</code> therefore overrides the packed image’s <code>require-existing</code> environment setting.</p>
-        <div class="evidence-box"><strong>Reproduction:</strong> image policy <code>require-existing</code> + mounted config policy <code>allow-install</code> returned a command containing <code>uv venv</code>. Source: <code>nemo_gym/cli/setup_command.py:235-253</code> in the review snapshot.</div>
+      <article class="card ok finding" data-kind="observed">
+        <div class="finding-head"><h3>Runtime no-install policy is now monotonic</h3><span class="badge evidence">Resolved · tested</span></div>
+        <p><code>setup_env_command()</code> chooses <code>require-existing</code> when either the image environment or mounted configuration requires it. A mounted <code>allow-install</code> value can no longer weaken a strict image.</p>
+        <div class="evidence-box"><strong>Validation:</strong> the regression case combines image policy <code>require-existing</code> with mounted config policy <code>allow-install</code> and verifies that startup only activates the prebuilt environment.</div>
       </article>
 
-      <article class="card problem finding" data-kind="observed">
-        <div class="finding-head"><h3>Selected-only build contexts omit required sibling source</h3><span class="badge blocker">Observed · release blocker</span></div>
-        <p>The context copier includes only implementations selected by the environment lock. Existing components frequently reuse sibling implementation code. For example, <a href="https://github.com/NVIDIA-NeMo/Gym/blob/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5/responses_api_models/litellm_model/app.py#L31">litellm_model imports openai_model</a>. A lock selecting only <code>litellm_model</code> copies its directory but omits <code>openai_model</code>. The same issue affects packed and split images.</p>
-        <div class="evidence-box"><strong>Reproduction:</strong> a generated representative context reported <code>selected_present=True</code> and <code>required_sibling_present=False</code>. Static import analysis found 42 configured components with cross-component source imports. Source: <code>nemo_gym/environment/image.py:181-194</code> in the review snapshot.</div>
+      <article class="card ok finding" data-kind="observed">
+        <div class="finding-head"><h3>Build contexts now include transitive sibling source</h3><span class="badge evidence">Resolved · container-tested</span></div>
+        <p>The lock infers imports rooted at the three component trees, follows them transitively, and merges explicit declarations for dynamic imports. Each source dependency receives its own digest. Packed and split contexts copy the closure while creating virtual environments only for selected runtime components.</p>
+        <div class="evidence-box"><strong>Validation:</strong> all 175 lockable component directories produced a resolvable closure. Packed and split <code>litellm_model</code> images imported <a href="https://github.com/NVIDIA-NeMo/Gym/blob/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5/responses_api_models/litellm_model/app.py#L31">the sibling <code>openai_model</code></a> with a read-only root and networking disabled.</div>
       </article>
 
-      <article class="card problem finding" data-kind="observed">
-        <div class="finding-head"><h3>Common secret names still affect lock identity</h3><span class="badge blocker">Observed · security contract</span></div>
-        <p>Lock redaction delegates key detection to the existing predicate, which matches <code>token</code>, <code>key</code>, and <code>header</code>. Plain values under <code>password</code>, <code>client_secret</code>, or <code>credential</code> are not masked. The lock does not print those values, but its identity changes with them, contradicting the claim that secrets are excluded from lock identity.</p>
-        <div class="evidence-box"><strong>Reproduction:</strong> changing <code>api_key</code>, <code>token</code>, or <code>header</code> preserved the digest; changing <code>password</code>, <code>client_secret</code>, or <code>credential</code> changed it. Source: <code>nemo_gym/environment/lock.py:145-173</code> and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5/nemo_gym/secret_utils.py#L24-L26">the public secret-key predicate</a>.</div>
+      <article class="card ok finding" data-kind="observed">
+        <div class="finding-head"><h3>Common secret classes no longer affect lock identity</h3><span class="badge evidence">Resolved · tested</span></div>
+        <p>The shared secret predicate now covers passwords, secrets, credentials, authentication fields, cookies, private headers, tokens, and keys. Tests change each value independently and preserve the redacted configuration digest.</p>
       </article>
 
-      <article class="card finding" data-kind="gap">
-        <div class="finding-head"><h3>The base image is an input but not part of the lock</h3><span class="badge blocker">Design gap</span></div>
-        <p>Strict mode accepts a mutable base tag. The lock identity and labels remain unchanged when that tag resolves to different bytes. The documentation recommends a digest, but the builder does not require one or record the resolved base digest.</p>
-        <div class="evidence-box"><strong>Resolution:</strong> add the OCI base digest and platform to the environment lock, reject tag-only bases in strict mode, and carry the digest into the composition BOM and image labels. Source: <code>nemo_gym/environment/image.py:250-281</code> in the review snapshot.</div>
+      <article class="card ok finding" data-kind="observed">
+        <div class="finding-head"><h3>The lock now binds the base image and build toolchain</h3><span class="badge evidence">Resolved · container-tested</span></div>
+        <p>Strict locking rejects tag-only bases. The lock records the digest-pinned base, platform, Python version, exact <code>uv</code> version, and copied Gym source digest. Both Dockerfiles verify those inputs before dependency installation.</p>
       </article>
 
-      <article class="card finding" data-kind="gap">
-        <div class="finding-head"><h3>Registry Gym identity does not bind the copied Gym source</h3><span class="badge blocker">Design gap</span></div>
-        <p>Editable installs receive a Gym source digest. Registry installs do not. Image construction still copies <code>source_root/nemo_gym</code> and builds a wheel from it, while verification checks only that the version string matches. A different source tree with the same version can therefore enter the image.</p>
-        <div class="evidence-box"><strong>Resolution:</strong> either build registry locks from a hash-pinned wheel without a source checkout, or always hash the source tree that will be copied. Source: <code>nemo_gym/environment/image.py:137-146</code> and <code>nemo_gym/environment/lock.py:217-275</code> in the review snapshot.</div>
+      <article class="card ok finding" data-kind="observed">
+        <div class="finding-head"><h3>Copied Gym source is bound for every installation kind</h3><span class="badge evidence">Resolved · tested</span></div>
+        <p>The environment lock carries a top-level digest of the exact Gym source and image recipes copied into the build context. Image construction verifies that digest for registry, editable, VCS, and direct-URL parent installations.</p>
       </article>
 
       <article class="card finding" data-kind="gap">
-        <div class="finding-head"><h3>No-install covers Gym venv setup, not component startup setup</h3><span class="badge blocker">Design gap</span></div>
-        <p>The runtime policy gates <code>setup_env_command()</code>. It does not stop an agent or resources server from downloading Node, installing an external tool, creating a nested venv, or fetching assets in <code>model_post_init()</code> or <code>__init__()</code>. Static analysis found 14 configured components with such startup hooks. The public <a href="https://github.com/NVIDIA-NeMo/Gym/blob/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5/responses_api_agents/codex_agent/setup_codex.py#L47-L60">Codex setup path downloads a Node distribution</a>.</p>
-        <div class="evidence-box"><strong>Resolution:</strong> define component build hooks and declared assets, execute them in the build stage, and add a strict startup guard or network-disabled smoke for certified components.</div>
+        <div class="finding-head"><h3>Component startup installers require catalog migration</h3><span class="badge blocker">Partially resolved · migration remains</span></div>
+        <p>A versioned <code>component.build.yaml</code> now declares argv-only build steps and expected outputs. Build execution strips secret-shaped environment variables and fails when outputs are absent. The Codex agent demonstrates the migration, but other startup installers remain unconverted, so runtime capabilities deliberately report <code>offline_runtime_installation: false</code>.</p>
+      </article>
+
+      <article class="card ok finding" data-kind="observed">
+        <div class="finding-head"><h3>Prepared artifacts now enforce runtime lock identity</h3><span class="badge evidence">Resolved · tested</span></div>
+        <p>Evaluation rejects a bound artifact when the runtime lock is absent or different. Images expose their embedded lock path. <code>input_sha256</code> identifies original bytes for provenance, while <code>data_sha256</code> and the artifact identity describe normalized task content.</p>
       </article>
 
       <article class="card finding" data-kind="gap">
-        <div class="finding-head"><h3>Prepared-artifact provenance is recorded but not enforced</h3><span class="badge blocker">Design gap</span></div>
-        <p>The manifest may carry an environment-lock identity. Runtime loading verifies the artifact’s own digest, row count, canonical encoding, and split, but does not compare that identity with the running image’s lock. The <code>source_sha256</code> field also duplicates the canonical output data hash rather than preserving the input file’s byte identity.</p>
-        <div class="evidence-box"><strong>Resolution:</strong> compare non-null artifact lock identity with the mounted or embedded environment lock before server startup, and clarify whether source identity means original bytes or normalized task content. Source: <code>nemo_gym/environment/artifact.py:102-174</code> and <code>nemo_gym/cli/eval.py:415-425</code> in the review snapshot.</div>
+        <div class="finding-head"><h3>Prepared artifacts do not yet validate a complete task contract</h3><span class="badge blocker">Design gap</span></div>
+        <p>Artifact preparation requires each row to be a JSON object, assigns or checks <code>task_id</code>, and canonicalizes the result. It does not require a versioned task envelope or validate environment-owned fields against the selected resources server’s <code>TaskData</code> schema. A customer can therefore create a content-valid artifact whose rows fail only after evaluation begins.</p>
+        <div class="evidence-box"><strong>Remaining work:</strong> define <code>nemo-gym/task/v1</code>, export the selected environment’s JSON Schema, validate every row during import, and provide a compatibility translation for servers that still read flat fields or <code>verifier_metadata</code>.</div>
       </article>
 
-      <article class="card finding" data-kind="gap">
-        <div class="finding-head"><h3>The split BOM has no runtime consumer</h3><span class="badge blocker">Design gap</span></div>
-        <p><code>gym env build-images</code> pushes images and writes a digest-pinned composition BOM. No Gym command parses that BOM to validate labels, materialize services, start containers, or check readiness. Operators must independently reconstruct ports, addresses, Ray connectivity, startup order, and health policy from runtime config.</p>
-        <div class="evidence-box"><strong>Resolution:</strong> keep the BOM deliberately build-only and publish a deployment adapter contract, or add a small validator/renderer that turns BOM + runtime config into an orchestrator-neutral launch plan.</div>
+      <article class="card ok finding" data-kind="observed">
+        <div class="finding-head"><h3>The split BOM now renders a validated launch plan</h3><span class="badge evidence">Resolved · tested</span></div>
+        <p><code>gym env render-launch-plan</code> validates schema and protocol versions, lock identity, image digests, head uniqueness, component and instance coverage, source digests, entrypoints, ports, and dependencies. It emits a secret-free orchestration contract and intentionally does not launch containers.</p>
       </article>
 
       <article class="card finding" data-kind="observed">
@@ -616,8 +703,8 @@
 
       <article class="card finding" data-kind="gap">
         <div class="finding-head"><h3>Container behavior is not covered by committed integration tests</h3><span class="badge blocker">Design gap</span></div>
-        <p>The unit suite checks lock models, generated commands, source verification, and Dockerfile text. Most image builds are mocked. The local smoke demonstrated a packed image starting as non-root with networking disabled, but CI does not currently replay that path or test a cross-component server.</p>
-        <div class="evidence-box"><strong>Resolution:</strong> add one small BuildKit smoke that builds a packed image, rejects a missing venv, starts with a read-only root, and exercises a declared source dependency. Add a split-image import/start smoke before calling split support generally compatible.</div>
+        <p>Local BuildKit validation now covers packed and split sibling imports, non-root execution, a read-only root, network-disabled startup, and identity labels. These checks are evidence for the branch but are not yet committed as a CI job.</p>
+        <div class="evidence-box"><strong>Remaining work:</strong> add a bounded BuildKit job before treating container behavior as continuously certified.</div>
       </article>
 
       <article class="card alt finding" data-kind="tradeoff">
@@ -630,9 +717,9 @@
         <p>Per-server images can be scanned, promoted, scaled, and restarted independently. They also duplicate the Gym runtime and Python layers, require a registry push during every build, and make the deployer responsible for service discovery and shared runtime state.</p>
       </article>
 
-      <article class="card finding" data-kind="gap">
-        <div class="finding-head"><h3>Documentation overstates two current guarantees</h3><span class="badge blocker">Design gap</span></div>
-        <p>The draft says image construction populates a temporary wheelhouse, but installation now goes directly through <code>uv pip install --require-hashes --no-deps</code>. It also says deployment addresses are excluded from lock identity, while server configuration—including ordinary URL and host fields—feeds the redacted config digest. The capability output reports offline runtime installation even though policy downgrade and component startup hooks remain.</p>
+      <article class="card ok finding" data-kind="observed">
+        <div class="finding-head"><h3>Documentation and capabilities now state enforced guarantees</h3><span class="badge evidence">Resolved · Fern validated</span></div>
+        <p>The guide describes direct hash-checked installation, monotonic policy, source closure, artifact compatibility, and launch-plan rendering. Capabilities expose those individual guarantees and keep general offline runtime installation false until remaining component startup installers are migrated.</p>
       </article>
     </section>
 
@@ -641,38 +728,35 @@
       <div class="compare-grid">
         <div class="card">
           <h3>Current-main integration</h3>
-          <p><strong>Revisions:</strong> base <a href="https://github.com/NVIDIA-NeMo/Gym/tree/cd6acf792c3fe5b6289b383eb9b9fb343a281c17">cd6acf79…</a>, target <a href="https://github.com/NVIDIA-NeMo/Gym/tree/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5">98713f8e…</a>.</p>
-          <p><strong>Observed:</strong> one semantic merge conflict; 713 focused unit tests passed after resolution; Ruff passed on the changed runtime and environment modules.</p>
-          <p><strong>Scope:</strong> CPU unit behavior. It does not prove every component image or distributed deployment.</p>
+          <p><strong>Revisions:</strong> detailed audit target <a href="https://github.com/NVIDIA-NeMo/Gym/tree/98713f8e9cbdbcc1db568fc6ab0dfc938d30afe5">98713f8e…</a>; published branch rebased through upstream <a href="https://github.com/NVIDIA-NeMo/Gym/tree/000107022f2d092a67bfacbde6af6186bf21c6ce">00010702…</a>.</p>
+          <p><strong>Observed:</strong> the expanded focused suite and repository pre-commit pass. The full unit suite has one missing optional test dependency unrelated to image work.</p>
+          <p><strong>Scope:</strong> CPU behavior plus the container checks below. It does not certify every component or a distributed production deployment.</p>
         </div>
         <div class="card">
-          <h3>Packed image smoke</h3>
-          <p><strong>Observed:</strong> lock generation, packed build, labels, non-root runtime, network-disabled capabilities, and a network-disabled dry start reached Ray and server startup.</p>
-          <p><strong>Scope:</strong> one representative environment on the implementation base. The current-main replay was unit-tested but not rebuilt as a container.</p>
+          <h3>Packed and split image smoke</h3>
+          <p><strong>Observed:</strong> strict lock generation and both image forms succeeded for <code>litellm_model</code>. Each image included and imported the sibling <code>openai_model</code> source as UID 65532 with a read-only root and networking disabled. Labels matched lock, source, and <code>uv</code> identities.</p>
+          <p><strong>Scope:</strong> one representative sibling-importing component. The checks are local evidence rather than committed CI.</p>
         </div>
         <div class="card">
           <h3>Migration scan</h3>
-          <p><strong>Observed:</strong> 174 configured component directories; 7 strict dependency blockers; 42 sibling-source importers; 14 startup setup hooks; 60 in the union.</p>
+          <p><strong>Original audit:</strong> 174 configured component directories; 7 strict dependency blockers; 42 sibling-source importers; 14 startup setup hooks; 60 in the union. The current checkout has 175 lockable component directories; source-closure validation resolves all of them, with 45 components requiring at least one source dependency.</p>
           <p><strong>Scope:</strong> static source analysis. Lazy imports, optional paths, and environment-specific branches require per-component runtime certification.</p>
         </div>
         <div class="card">
-          <h3>Missing public evidence</h3>
-          <p>No public branch or pull request contains the implementation yet, so only today’s main links can be pinned to public source. No public CI run demonstrates packed or split images. The approved implementation details in this page should be replaced with commit permalinks when a branch is published.</p>
+          <h3>Public evidence boundary</h3>
+          <p>The implementation is available at public commit <a href="https://github.com/ananthsub/Gym/tree/9f5686cad1d4cef43fddb08dc7d7360d2b760107">9f5686ca…</a>. No public CI run demonstrates packed or split images yet, so the container results on this page remain local validation rather than continuously enforced evidence.</p>
         </div>
       </div>
     </section>
 
     <section id="recommendations">
-      <h2>Recommended sequence to make this supportable</h2>
+      <h2>Remaining sequence to make this supportable</h2>
       <div class="recommendations">
-        <div class="recommendation"><strong>Make strict policy monotonic.</strong> An image-level <code>require-existing</code> setting must win over runtime config. Add a regression test using a mounted config that requests <code>allow-install</code>.</div>
-        <div class="recommendation"><strong>Define the source closure.</strong> Add explicit component source dependencies, derive them conservatively, or temporarily copy and hash the complete component trees. Test a real sibling-importing model and resources server in packed and split modes.</div>
-        <div class="recommendation"><strong>Bind every build input.</strong> Put the resolved base-image digest in the lock. Hash copied Gym source for registry and editable installs. Verify the build-stage <code>uv</code> version recorded by the lock.</div>
-        <div class="recommendation"><strong>Separate runtime config from build identity.</strong> Define which server fields affect binaries and which are deployment-only. Expand secret-name redaction and prove password, client-secret, credential, headers, tokens, and arbitrary secret URLs do not affect or appear in locks.</div>
-        <div class="recommendation"><strong>Add build hooks and immutable assets.</strong> Give components a declarative way to install external tools, nested environments, and datasets during image construction. Record their digests and certify startup with networking disabled where the environment permits it.</div>
-        <div class="recommendation"><strong>Enforce artifact compatibility.</strong> Compare prepared-artifact provenance with the running lock before servers start, or explicitly document why cross-lock reuse is allowed. Rename or fix <code>source_sha256</code>.</div>
-        <div class="recommendation"><strong>Choose the split ownership boundary.</strong> Either ship an orchestrator-neutral BOM validator/renderer or state that split mode is a low-level build primitive. Document Ray, addressing, health checks, cookie routing, and startup order.</div>
-        <div class="recommendation"><strong>Rebase and certify in layers.</strong> Resolve the one current-main conflict, land secure config handoff and packed mode first, add a BuildKit smoke, then certify component cohorts. Treat split mode as a later milestone after source closure and deployment ownership are explicit.</div>
+        <div class="recommendation"><strong>Define and enforce the customer task contract.</strong> Introduce a versioned task envelope, validate <code>task_data</code> against the selected resources server schema during artifact creation, export that schema for customer tooling, and preserve a compatibility path for legacy row layouts.</div>
+        <div class="recommendation"><strong>Migrate startup installers by component cohort.</strong> Add build manifests for components that download tools, assets, or nested environments. Pin every input and certify each converted startup path with networking disabled.</div>
+        <div class="recommendation"><strong>Clean the strict dependency blockers.</strong> Replace mutable VCS references and custom index directives with pinned, mirrorable artifacts or an explicit organization resolver policy.</div>
+        <div class="recommendation"><strong>Commit bounded BuildKit coverage.</strong> Keep one packed and one split sibling-import smoke in CI. Exercise non-root execution, read-only roots, missing-environment rejection, artifact mismatch, and launch-plan validation.</div>
+        <div class="recommendation"><strong>Replace local container evidence with CI permalinks.</strong> Keep the published source links and add immutable workflow evidence once the packed and split smoke jobs run in public CI.</div>
       </div>
     </section>
   </main>
@@ -692,22 +776,22 @@
       },
       {
         title: "Compile and identify build inputs",
-        text: "gym env lock validates dependency inputs, compiles hash-complete requirements for the target platform, hashes selected source, records tool versions, and writes environment.lock.json.",
+        text: "gym env lock validates dependency inputs, compiles hash-complete requirements, binds the digest-pinned base and build toolchain, computes transitive source closure, and writes environment.lock.json.",
         flow: ["resolved config", "dependency inputs", "source digests", "environment.lock.json"]
       },
       {
         title: "Build a packed image or a set of split images",
-        text: "BuildKit verifies the lock, creates component venvs, installs Gym, applies OCI labels, and switches the runtime to numeric user 65532. Strict mode should make this the last package-installing phase.",
+        text: "BuildKit verifies the lock, creates selected component venvs, runs declared build steps, installs Gym, applies OCI labels, and switches the runtime to numeric user 65532. This is the last Gym-managed package-installing phase.",
         flow: ["lock + source", "BuildKit", "prebuilt venvs", "OCI image digest"]
       },
       {
         title: "Freeze task rows separately",
-        text: "gym eval prepare-artifact canonicalizes prepared JSONL, assigns stable task IDs, computes a content identity, and writes a manifest beside the data. This keeps large task data out of the image.",
-        flow: ["prepared JSONL", "canonical rows", "manifest.json", "artifact digest"]
+        text: "The current command canonicalizes prepared JSONL, assigns stable task IDs, separates original-byte provenance from normalized content identity, and binds the artifact to an environment lock. The proposed task/v1 contract adds resources-server schema validation before the artifact is accepted.",
+        flow: ["customer JSONL", "task schema", "canonical rows", "artifact digest"]
       },
       {
         title: "Inject deployment state and execute",
-        text: "The operator mounts runtime config, task artifacts, and result storage. Packed mode starts all processes in one container. Split mode starts the head and each component as separate services.",
+        text: "The operator mounts runtime config, task artifacts, and result storage. Packed mode starts one container. Split mode validates the BOM and runtime config into a secret-free launch plan for an external orchestrator.",
         flow: ["image + artifact", "runtime.yaml", "gym env start", "rollouts.jsonl"]
       }
     ];
