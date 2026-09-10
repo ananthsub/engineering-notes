@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How sandbox filesystem snapshots support rollout checkpointing</title>
+  <script>
+    (() => {
+      try {
+        if (localStorage.getItem("engineering-notes-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {}
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1c2128;
+      --border: #30363d;
+      --text: #e6edf3;
+      --dim: #9aa4ae;
+      --accent: #58a6ff;
+      --diagram-ok: #5bc0eb;
+      --diagram-problem: #ffb000;
+      --diagram-alt: #d98bc3;
+      --diagram-neutral: #c7ced8;
+      --code-bg: #090c10;
+      --shadow: rgba(0, 0, 0, .28);
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --surface-2: #eef1f4;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --dim: #59636e;
+      --accent: #0969da;
+      --diagram-ok: #005a8d;
+      --diagram-problem: #9a4d00;
+      --diagram-alt: #7a3e6d;
+      --diagram-neutral: #4b5563;
+      --code-bg: #f0f3f6;
+      --shadow: rgba(31, 35, 40, .12);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.65 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+    a:hover { text-decoration-thickness: 2px; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 34px 22px 72px; }
+    .theme-toggle {
+      position: fixed;
+      z-index: 10;
+      top: 14px;
+      right: 14px;
+      min-height: 42px;
+      padding: 9px 13px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--text);
+      background: var(--surface);
+      box-shadow: 0 4px 18px var(--shadow);
+      cursor: pointer;
+    }
+    h1 {
+      max-width: 870px;
+      margin: 6px 0 10px;
+      font-size: clamp(2rem, 5vw, 3.35rem);
+      line-height: 1.08;
+      letter-spacing: -.035em;
+    }
+    h2 { margin: 54px 0 12px; font-size: clamp(1.45rem, 3vw, 2rem); line-height: 1.2; }
+    h3 { margin: 0 0 8px; font-size: 1.05rem; }
+    p { margin: 10px 0; }
+    li + li { margin-top: 6px; }
+    code {
+      padding: .12em .35em;
+      border-radius: 5px;
+      color: var(--text);
+      background: var(--code-bg);
+      font-size: .9em;
+    }
+    pre {
+      margin: 12px 0;
+      padding: 14px;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--code-bg);
+      color: var(--text);
+      line-height: 1.55;
+    }
+    pre code { padding: 0; background: none; }
+    .eyebrow {
+      color: var(--diagram-ok);
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      font-size: .78rem;
+    }
+    .lede { max-width: 850px; font-size: 1.17rem; line-height: 1.6; }
+    .provenance {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      margin: 18px 0 24px;
+      color: var(--dim);
+      font-size: .91rem;
+    }
+    .answer {
+      border-left: 5px solid var(--diagram-ok);
+      padding: 13px 17px;
+      background: var(--surface);
+      border-radius: 0 10px 10px 0;
+      font-size: 1.08rem;
+    }
+    .figure {
+      margin: 22px 0;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--surface);
+      box-shadow: 0 8px 28px var(--shadow);
+      overflow-x: auto;
+    }
+    .figure:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    .figure h3 { margin-bottom: 3px; }
+    .caption { color: var(--dim); font-size: .9rem; margin: 3px 0 12px; }
+    svg { display: block; width: 100%; min-width: 760px; height: auto; }
+    svg text { fill: var(--text); font-family: system-ui, sans-serif; }
+    svg .dim { fill: var(--dim); }
+    svg .box { fill: var(--bg); stroke: var(--diagram-neutral); stroke-width: 2; }
+    svg .active { fill: var(--bg); stroke: var(--diagram-ok); stroke-width: 3; }
+    svg .physical { fill: var(--bg); stroke: var(--diagram-alt); stroke-width: 2.5; stroke-dasharray: 3 3; }
+    svg .warning {
+      fill: var(--bg);
+      stroke: var(--diagram-problem);
+      stroke-width: 2.5;
+      stroke-dasharray: 8 5;
+    }
+    svg .arrow {
+      fill: none;
+      stroke: var(--diagram-neutral);
+      stroke-width: 2.4;
+      marker-end: url(#arrow);
+    }
+    svg .ok-arrow {
+      fill: none;
+      stroke: var(--diagram-ok);
+      stroke-width: 3;
+      marker-end: url(#arrow-ok);
+    }
+    svg .alt-arrow {
+      fill: none;
+      stroke: var(--diagram-alt);
+      stroke-width: 2.5;
+      stroke-dasharray: 3 4;
+      marker-end: url(#arrow-alt);
+    }
+    svg .dash-arrow {
+      fill: none;
+      stroke: var(--diagram-problem);
+      stroke-width: 2.5;
+      stroke-dasharray: 8 5;
+      marker-end: url(#arrow-warn);
+    }
+    svg .fig2.arrow { marker-end: url(#arrow2); }
+    svg .fig2.ok-arrow { marker-end: url(#arrow2ok); }
+    svg .fig2.dash-arrow { marker-end: url(#arrow2warn); }
+    svg .fig3.arrow { marker-end: url(#arrow3); }
+    svg .fig3.ok-arrow { marker-end: url(#arrow3ok); }
+    svg .fig3.dash-arrow { marker-end: url(#arrow3warn); }
+    .toc {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+    .toc a { padding: 5px 9px; }
+    .grid-2, .grid-3 { display: grid; gap: 14px; }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      padding: 17px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    .card.ok { border-top: 4px solid var(--diagram-ok); }
+    .card.alt { border-top: 4px solid var(--diagram-alt); }
+    .card.warn { border-top: 4px dashed var(--diagram-problem); }
+    .label {
+      display: inline-block;
+      padding: 2px 8px;
+      margin-bottom: 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--dim);
+      font-size: .79rem;
+      font-weight: 700;
+    }
+    .trace { display: grid; gap: 0; margin: 18px 0; }
+    .trace-step {
+      position: relative;
+      margin-left: 17px;
+      padding: 4px 0 20px 28px;
+      border-left: 2px solid var(--diagram-neutral);
+    }
+    .trace-step:last-child { border-left-color: transparent; padding-bottom: 0; }
+    .trace-step::before {
+      content: "";
+      position: absolute;
+      left: -7px;
+      top: 9px;
+      width: 12px;
+      height: 12px;
+      border: 2px solid var(--diagram-ok);
+      border-radius: 50%;
+      background: var(--bg);
+    }
+    .trace-step strong { display: block; }
+    .source { font-size: .88rem; color: var(--dim); }
+    .ledger { display: grid; gap: 10px; }
+    .ledger-row {
+      display: grid;
+      grid-template-columns: 175px 1fr 1fr;
+      gap: 12px;
+      padding: 13px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--surface);
+    }
+    .ledger-row > :first-child { font-weight: 750; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--dim);
+      font-size: .9rem;
+    }
+    .dot-ok, .dot-warn {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+    .dot-ok { border: 2px solid var(--diagram-ok); }
+    .dot-warn { border: 2px dashed var(--diagram-problem); }
+    .question {
+      margin: 14px 0;
+      padding: 16px;
+      border-left: 4px dashed var(--diagram-problem);
+      background: var(--surface);
+    }
+    .boundary {
+      margin: 18px 0;
+      padding: 16px;
+      border: 2px dashed var(--diagram-problem);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    .small { color: var(--dim); font-size: .9rem; }
+    footer {
+      margin-top: 56px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+      color: var(--dim);
+    }
+    @media (max-width: 720px) {
+      .wrap { padding: 62px 16px 52px; }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .ledger-row { grid-template-columns: 1fr; gap: 4px; }
+      .theme-toggle { top: 10px; right: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <button class="theme-toggle" type="button" aria-label="Toggle color theme">Use light theme</button>
+  <main class="wrap">
+    <div class="eyebrow">NeMo Gym PR deep dive · rollout checkpointing substrate</div>
+    <h1>How sandbox filesystem snapshots support rollout checkpointing</h1>
+    <p class="lede"><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2636">PR #2636</a> gives a rollout coordinator a way to commit an OpenSandbox root filesystem, release its runtime, hand the stable sandbox ID to another process, recreate an exec-ready runtime from that filesystem, and clean up records left by interrupted runs. This page traces that path and compares it with the later, broader contract proposed by <a href="https://github.com/NVIDIA-NeMo/Gym/issues/3024">issue #3024</a>.</p>
+    <div class="provenance">
+      <span>PR head: <a href="https://github.com/NVIDIA-NeMo/Gym/commit/03b229fec7cacf29b1c23df0baed7fe12ba082df"><code>03b229fec7ca…</code></a></span>
+      <span>PR comparison base: <a href="https://github.com/NVIDIA-NeMo/Gym/commit/d23a85ac7d311d863415d27c8c22cde6942868b8"><code>d23a85ac7d31…</code></a></span>
+      <span>Target <code>main</code> observed at <a href="https://github.com/NVIDIA-NeMo/Gym/commit/2448579496dcb768c5a3a891ece723570366d3d4"><code>2448579496dc…</code></a></span>
+      <span>Reviewed 2026-09-10 UTC</span>
+    </div>
+
+    <div class="answer"><strong>Short answer:</strong> PR #2636 implements a filesystem-preservation primitive, not a live-runtime checkpoint or the rollout checkpoint transaction. OpenSandbox commits the root filesystem as an OCI image, releases the Pod and its processes, keeps the sandbox ID stable, then creates a new runtime from the image on resume. Process memory, sockets, and PTY processes do not survive. Issue #3024 still needs a coordinator to bind this filesystem state to matching agent, resources, model-lineage, token-store, rollout-ID, and attempt state. Two independently reproduced gaps remain: the configured timeout does not bound the complete resume call, and moving pagination can leave a snapshot behind while cleanup returns success.</div>
+
+    <div class="figure" tabindex="0">
+      <h3>Figure 1 — What moves across the process boundary?</h3>
+      <p class="caption">The concrete example keeps sandbox ID <code>sb-42</code> and its committed root filesystem stable. The Pod, processes, SDK object, sockets, and PTY do not survive. Process B creates a fresh runtime and SDK handle. Orange dashed boxes are required by the checkpoint design but not implemented by this PR.</p>
+      <svg viewBox="0 0 940 500" role="img" aria-labelledby="fig1-title fig1-desc">
+        <title id="fig1-title">Sandbox pause, descriptor handoff, and resume path</title>
+        <desc id="fig1-desc">Process A commits sandbox sb-42's root filesystem, closes the local PTY client, releases the runtime Pod, and serializes the sandbox ID and working directory. Process B connects without probing an absent exec daemon, creates a new runtime from the snapshot, swaps in a fresh SDK handle, and executes. A coordinator above this path must align all other rollout state.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-neutral)"/></marker>
+          <marker id="arrow-ok" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-ok)"/></marker>
+          <marker id="arrow-alt" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-alt)"/></marker>
+          <marker id="arrow-warn" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-problem)"/></marker>
+        </defs>
+        <text x="24" y="28" font-size="13" font-weight="700">LEGEND</text>
+        <line x1="92" y1="23" x2="133" y2="23" class="ok-arrow"/><text x="143" y="28" font-size="12">implemented control flow</text>
+        <line x1="330" y1="23" x2="371" y2="23" class="alt-arrow"/><text x="381" y="28" font-size="12">dotted descriptor handoff</text>
+        <line x1="545" y1="23" x2="586" y2="23" class="dash-arrow"/><text x="596" y="28" font-size="12">checkpoint contract outside this PR</text>
+
+        <rect x="24" y="56" width="892" height="88" rx="12" class="warning"/>
+        <text x="45" y="84" font-size="15" font-weight="750">External checkpoint coordinator · issue #3024</text>
+        <text x="45" y="108" font-size="13">Must choose one consistent boundary across rollout 42, attempt 0, agent history, resources revision,</text>
+        <text x="45" y="128" font-size="13">model-call lineage, token custody, and the filesystem snapshot. PR #2636 supplies only the filesystem lane below.</text>
+
+        <rect x="24" y="178" width="405" height="266" rx="14" class="active"/>
+        <text x="46" y="207" font-size="18" font-weight="750">Process A · live rollout</text>
+        <rect x="52" y="230" width="349" height="58" rx="9" class="box"/>
+        <text x="73" y="255" font-size="14" font-weight="700">sb-42 · RUNNING · PTY pty-7 attached</text>
+        <text x="73" y="275" font-size="12" class="dim">workdir=/workspace · provider handle raw-A</text>
+        <path d="M225 288 L225 320" class="ok-arrow"/>
+        <rect x="52" y="324" width="349" height="58" rx="9" class="active"/>
+        <text x="73" y="349" font-size="14" font-weight="700">pause() → commit rootfs → PAUSED</text>
+        <text x="73" y="369" font-size="12" class="dim">close local PTY client; release Pod and processes</text>
+        <path d="M225 382 L225 406" class="alt-arrow"/>
+        <text x="73" y="430" font-size="13">descriptor = {sandbox_id: sb-42, workdir: /workspace}</text>
+
+        <rect x="511" y="178" width="405" height="266" rx="14" class="active"/>
+        <text x="533" y="207" font-size="18" font-weight="750">Process B · recreated runtime</text>
+        <rect x="539" y="230" width="349" height="58" rx="9" class="physical"/>
+        <text x="560" y="255" font-size="14" font-weight="700">connect(descriptor) → handle raw-paused</text>
+        <text x="560" y="275" font-size="12" class="dim">status is PAUSED, so do not probe absent exec daemon</text>
+        <path d="M713 288 L713 320" class="ok-arrow"/>
+        <rect x="539" y="324" width="349" height="58" rx="9" class="active"/>
+        <text x="560" y="349" font-size="14" font-weight="700">resume() → new Pod → readiness → raw-B</text>
+        <text x="560" y="369" font-size="12" class="dim">close raw-paused; mutate the existing handle to raw-B</text>
+        <path d="M713 382 L713 406" class="ok-arrow"/>
+        <text x="560" y="430" font-size="13">exec("restart") sees committed files through fresh raw-B</text>
+
+        <path d="M429 418 C458 418 482 418 511 418" class="alt-arrow"/>
+        <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L774-L892">
+          <text x="360" y="478" font-size="13" text-decoration="underline">pinned implementation: serialize → connect → pause → resume</text>
+        </a>
+      </svg>
+    </div>
+
+    <nav class="toc" aria-label="Page sections">
+      <a href="#before-after">Before and after</a>
+      <a href="#walkthrough">Worked checkpoint</a>
+      <a href="#implementation">Implementation</a>
+      <a href="#pty">PTY lifecycle</a>
+      <a href="#cleanup">Snapshot cleanup</a>
+      <a href="#boundary">Checkpoint boundary</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#questions">Review questions</a>
+    </nav>
+
+    <section id="before-after">
+      <h2>The old API could identify a sandbox, but not persist its filesystem</h2>
+      <div class="grid-2">
+        <article class="card warn">
+          <span class="label">Before · d23a85ac7d31…</span>
+          <h3>No provider-neutral pause contract</h3>
+          <p><code>AsyncSandbox</code> and <code>Sandbox</code> had no <code>pause()</code> or <code>resume()</code>. A provider status of <code>paused</code> mapped to <code>UNKNOWN</code>. Reconnecting always health-checked the exec daemon unless the caller disabled checks globally, but a paused sandbox has no live exec daemon to probe.</p>
+          <pre><code>hasattr(AsyncSandbox, "pause")  # False
+_to_sandbox_status("paused")   # UNKNOWN</code></pre>
+        </article>
+        <article class="card ok">
+          <span class="label">After · 03b229fec7ca…</span>
+          <h3>Optional capability with a paused state</h3>
+          <p>The public API detects <code>SupportsSandboxPauseResume</code> structurally. OpenSandbox maps <code>paused</code> to <code>PAUSED</code>, accepts a paused descriptor without an exec-daemon probe, and makes <code>resume()</code> responsible for creating a new runtime from the committed root filesystem and returning a fresh SDK handle.</p>
+          <pre><code>hasattr(AsyncSandbox, "pause")  # True
+_to_sandbox_status("paused")   # PAUSED</code></pre>
+        </article>
+      </div>
+      <p class="source">Public API: <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/api.py#L521-L538">async pause/resume</a> and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/api.py#L737-L744">sync wrappers</a> · Capability and state: <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/base.py#L25-L33">SandboxStatus</a> and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/base.py#L259-L269">SupportsSandboxPauseResume</a>.</p>
+    </section>
+
+    <section id="walkthrough">
+      <h2>Worked checkpoint: preserve <code>sb-42</code>'s files between two processes</h2>
+      <p>Assume rollout <code>rollout-42</code> is executing inside OpenSandbox <code>sb-42</code>. Its working directory is <code>/workspace</code>, its provider-owned SDK object is <code>raw-A</code>, and process A has PTY client <code>pty-7</code>. The root filesystem and sandbox ID survive. The running command, memory, sockets, and PTY process do not.</p>
+      <div class="trace">
+        <div class="trace-step">
+          <strong>1. Process A asks the public facade to pause.</strong>
+          <span><code>AsyncSandbox.pause()</code> verifies that the provider exposes the optional capability, then passes the existing provider-neutral handle to <code>OpenSandboxProvider.pause()</code>.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/api.py#L521-L529">api.py L521–L529</a></div>
+        </div>
+        <div class="trace-step">
+          <strong>2. One lifecycle deadline covers the pause request and polling.</strong>
+          <span>The standard YAML allows 1,500 seconds. The SDK pause request keeps its shorter per-request timeout. OpenSandbox attempts a guest <code>sync</code>, commits the root filesystem to an OCI image, and releases the runtime Pod. Gym polls status until it sees <code>PAUSED</code>; <code>ERROR</code> or <code>STOPPED</code> ends the transition immediately. Guest <code>sync</code> is best-effort, so recent writes are not guaranteed if it fails.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml#L62-L68">configured lifecycle budget</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L826-L868">bounded pause transition</a> · <a href="https://github.com/opensandbox-group/OpenSandbox/blob/e9d0a63919739b1bed05914373acbacb11e37d43/docs/guides/pause-resume.md#L26-L32">rootfs snapshot and runtime release</a> · <a href="https://github.com/opensandbox-group/OpenSandbox/blob/e9d0a63919739b1bed05914373acbacb11e37d43/docs/guides/pause-resume.md#L309-L319">best-effort guest sync</a></div>
+        </div>
+        <div class="trace-step">
+          <strong>3. Local PTY clients close before process A exits.</strong>
+          <span>The provider marks sessions belonging to <code>sb-42</code> as not owned, closes their local WebSocket clients, and removes them from its live-session set. That suppresses Gym's explicit PTY delete request. It does not preserve the remote PTY process: OpenSandbox releases the runtime Pod, and process state is not checkpointed. Sessions belonging to another sandbox are untouched.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L838-L852">targeted PTY detachment</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L1595-L1658">session-to-sandbox association</a></div>
+        </div>
+        <div class="trace-step">
+          <strong>4. Process A serializes a portable descriptor.</strong>
+          <span>The provider contributes <code>{"sandbox_id": "sb-42"}</code>. The public facade adds <code>workdir: "/workspace"</code>. The descriptor contains identity and working-directory context, not the SDK object, WebSocket, coroutine, or checkpoint manifest.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L774-L783">provider descriptor</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/api.py#L551-L568">facade workdir preservation</a></div>
+        </div>
+        <div class="trace-step">
+          <strong>5. Process B connects while <code>sb-42</code> is still paused.</strong>
+          <span>The SDK connection is created with its initial health check disabled. Gym asks for management status. If the sandbox is paused, it returns the handle without calling <code>check_ready()</code>; running sandboxes still receive the configured readiness check.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L785-L823">paused-aware connect</a></div>
+        </div>
+        <div class="trace-step">
+          <strong>6. Source inspection shows resume creates and checks a new runtime.</strong>
+          <span><code>Sandbox.resume()</code> receives the configured timeout and polling interval. OpenSandbox rewrites the runtime template to the snapshot image and creates a new Pod. Health checks remain enabled by default. Gym closes <code>raw-paused</code> and mutates the existing provider-neutral handle so every later operation uses <code>raw-B</code>. In OpenSandbox 0.1.15, <code>resume_timeout</code> applies only to the final readiness check; it does not bound the preceding resume request or endpoint rebuild.</span>
+          <div class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L870-L892">Gym resume and handle replacement</a> · <a href="https://github.com/opensandbox-group/OpenSandbox/blob/e9d0a63919739b1bed05914373acbacb11e37d43/sdks/sandbox/python/src/opensandbox/sandbox.py#L760-L828">pinned SDK resume sequence</a></div>
+        </div>
+      </div>
+      <div class="figure" tabindex="0">
+        <h3>Figure 2 — State, client, and handle values at each cut</h3>
+        <p class="caption">OpenSandbox management state moves through five names; Gym exposes both transitional states as <code>STARTING</code>. The sandbox ID and root filesystem stay stable. The runtime, processes, and clients are replaced.</p>
+        <svg viewBox="0 0 930 390" role="img" aria-labelledby="fig2-title fig2-desc">
+          <title id="fig2-title">Value timeline through pause and resume</title>
+          <desc id="fig2-desc">The sandbox ID remains sb-42. OpenSandbox management state moves from running to pausing to paused to resuming to running, while Gym exposes starting, paused, and starting. The old runtime Pod and PTY process are removed. The handle changes from raw-A to raw-paused to raw-B.</desc>
+          <defs>
+            <marker id="arrow2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-neutral)"/></marker>
+            <marker id="arrow2ok" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-ok)"/></marker>
+            <marker id="arrow2warn" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-problem)"/></marker>
+          </defs>
+          <text x="22" y="28" font-size="13" font-weight="700">time →</text>
+          <line x1="72" y1="24" x2="900" y2="24" class="fig2 arrow"/>
+          <text x="22" y="77" font-size="13" font-weight="700">OpenSandbox</text>
+          <rect x="100" y="51" width="132" height="38" rx="8" class="active"/><text x="136" y="75" font-size="13">Running</text>
+          <rect x="272" y="51" width="132" height="38" rx="8" class="warning"/><text x="307" y="75" font-size="13">Pausing</text>
+          <rect x="444" y="51" width="132" height="38" rx="8" class="warning"/><text x="481" y="75" font-size="13">Paused</text>
+          <rect x="616" y="51" width="132" height="38" rx="8" class="warning"/><text x="646" y="75" font-size="13">Resuming</text>
+          <rect x="788" y="51" width="120" height="38" rx="8" class="active"/><text x="817" y="75" font-size="13">Running</text>
+          <path d="M232 70 L272 70 M404 70 L444 70 M576 70 L616 70 M748 70 L788 70" class="fig2 arrow"/>
+          <text x="22" y="120" font-size="13" font-weight="700">Gym status</text>
+          <text x="138" y="120" font-size="12">RUNNING</text><text x="310" y="120" font-size="12">STARTING</text><text x="482" y="120" font-size="12">PAUSED</text><text x="648" y="120" font-size="12">STARTING</text><text x="817" y="120" font-size="12">RUNNING</text>
+
+          <text x="22" y="171" font-size="13" font-weight="700">PTY</text>
+          <rect x="100" y="143" width="304" height="48" rx="8" class="physical"/><text x="130" y="172" font-size="13">pty-7 · local WebSocket attached</text>
+          <rect x="444" y="143" width="304" height="48" rx="8" class="warning"/><text x="475" y="172" font-size="13">client closed · Pod and PTY process removed</text>
+          <rect x="788" y="143" width="120" height="48" rx="8" class="box"/><text x="801" y="172" font-size="13">new session</text>
+          <path d="M404 167 L444 167 M748 167 L788 167" class="fig2 arrow"/>
+
+          <text x="22" y="258" font-size="13" font-weight="700">handle</text>
+          <rect x="100" y="230" width="304" height="48" rx="8" class="active"/><text x="185" y="259" font-size="13">sb-42 · raw-A</text>
+          <rect x="444" y="230" width="304" height="48" rx="8" class="physical"/><text x="521" y="259" font-size="13">sb-42 · raw-paused</text>
+          <rect x="788" y="230" width="120" height="48" rx="8" class="active"/><text x="807" y="259" font-size="13">sb-42 · raw-B</text>
+          <path d="M404 254 L444 254 M748 254 L788 254" class="fig2 arrow"/>
+
+          <text x="22" y="340" font-size="13" font-weight="700">rule</text>
+          <text x="100" y="330" font-size="13">ID + rootfs cross processes.</text>
+          <text x="444" y="330" font-size="13">Runtime + processes do not.</text>
+          <text x="788" y="330" font-size="13">Runtime is recreated.</text>
+          <rect x="100" y="341" width="18" height="10" rx="2" class="active"/><text x="126" y="351" font-size="12">ready</text>
+          <rect x="210" y="341" width="18" height="10" rx="2" class="warning"/><text x="236" y="351" font-size="12">not ready / no runtime</text>
+          <rect x="420" y="341" width="18" height="10" rx="2" class="physical"/><text x="446" y="351" font-size="12">process-local or rebuilt client</text>
+          <text x="100" y="380" font-size="12" class="dim">Stable: sandbox_id and committed rootfs. Replaced: Pod, processes, SDK handle, endpoints, sockets, and PTY.</text>
+        </svg>
+      </div>
+    </section>
+
+    <section id="implementation">
+      <h2>Four responsibilities make the handoff work</h2>
+      <div class="grid-2">
+        <article class="card ok">
+          <span class="label">Public contract</span>
+          <h3>Capability detection keeps other providers honest</h3>
+          <p>Pause/resume is optional. Providers that do not implement both methods fail with <code>NotImplementedError</code> instead of inheriting a false preservation guarantee.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/api.py#L521-L538">facade dispatch</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/tests/unit_tests/test_sandbox.py#L380-L397">unsupported-provider regression</a></p>
+        </article>
+        <article class="card alt">
+          <span class="label">Status contract</span>
+          <h3>Paused becomes a first-class provider-neutral state</h3>
+          <p>OpenSandbox's <code>paused</code> state maps to <code>SandboxStatus.PAUSED</code>. Transitional <code>pausing</code> and <code>resuming</code> states remain <code>STARTING</code>, which tells callers that the runtime is not ready yet.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L382-L395">status normalization</a></p>
+        </article>
+        <article class="card ok">
+          <span class="label">Deadline contract</span>
+          <h3>Pause has one end-to-end budget</h3>
+          <p>The outer <code>asyncio.timeout</code> includes both the mutating pause request and all status polls. The pause request is not retried because a connection failure leaves its outcome unknown. A shorter request timeout is preserved inside the longer lifecycle budget.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L826-L868">pause deadline</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/tests/unit_tests/test_opensandbox_provider.py#L1701-L1773">deadline regressions</a></p>
+        </article>
+        <article class="card alt">
+          <span class="label">Ownership contract</span>
+          <h3>The provider-neutral handle survives; its raw client does not</h3>
+          <p>Callers keep the same <code>SandboxHandle</code>. Resume closes the stale client and replaces <code>handle.raw</code>. Existing facade methods therefore route later <code>exec</code>, upload, download, endpoint, and status calls through the rebuilt SDK object.</p>
+          <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L870-L892">in-place handle refresh</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/tests/unit_tests/test_sandbox.py#L320-L328">facade-level assertion</a></p>
+        </article>
+      </div>
+      <article class="card warn">
+        <span class="label">Reproduced finding · head 03b229fec7ca…</span>
+        <h3>The configured lifecycle timeout does not bound a stalled resume request</h3>
+        <p>Gym passes <code>pause_resume_timeout_s</code> to the SDK as <code>resume_timeout</code>, but does not put an outer deadline around <code>Sandbox.resume()</code>. The pinned SDK first sends the mutating resume request and resolves rebuilt exec and egress endpoints. It applies <code>resume_timeout</code> only when <code>check_ready()</code> begins.</p>
+        <pre><code>PYTHONPATH=&lt;PR-head-checkout&gt; python -m pytest -q -s \
+  test_resume_lifecycle_timeout.py
+
+configured_lifecycle_timeout=0.05s
+external_timeout_fired_after=0.12s
+resume_call_cancelled_by=external_wait_for
+
+1 passed in 0.19s</code></pre>
+        <p>The reproduction stalled the SDK call before it returned. Gym exceeded the configured 0.05-second budget and stopped only when an independent 0.12-second timeout cancelled it. An outer <code>asyncio.timeout()</code>, matching the pause implementation, would bound the caller's wait. Because cancellation can leave the mutating request's server-side outcome unknown, the public contract should also say whether callers reconnect and inspect status before retrying.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L870-L892">unbounded Gym call</a> · <a href="https://github.com/opensandbox-group/OpenSandbox/blob/e9d0a63919739b1bed05914373acbacb11e37d43/sdks/sandbox/python/src/opensandbox/sandbox.py#L789-L828">SDK request, endpoint rebuild, then bounded readiness</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L826-L868">pause's outer-deadline analog</a>.</p>
+      </article>
+      <div class="boundary"><strong>Source-derived failure boundary:</strong> pause closes and forgets matching local PTY clients before sending the pause request. If that request times out or status polling ends in an error, Gym has no rollback path to reconstruct those clients or prove whether the server accepted the mutation. A caller must reconnect and inspect management state before deciding whether to resume, retry, or restart.</div>
+    </section>
+
+    <section id="pty">
+      <h2>Pausing closes the local PTY object; the remote PTY process also ends</h2>
+      <p>OpenSandbox PTYs are backed by local aiohttp and WebSocket clients. The PR records the owning sandbox ID on each session, then closes only sessions for the sandbox being paused. Gym suppresses its own PTY delete request, but OpenSandbox subsequently releases the runtime Pod. The remote PTY process and its memory are not part of the filesystem snapshot.</p>
+      <div class="grid-2">
+        <article class="card warn">
+          <span class="label">What closes</span>
+          <h3>Process A's client, then the runtime</h3>
+          <p>Gym sets <code>session._owned = False</code> before closing. That prevents <code>close()</code> from sending an explicit PTY <code>DELETE</code>. The closed client is removed from provider tracking. OpenSandbox pause then releases the Pod, so the remote process does not survive anyway.</p>
+        </article>
+        <article class="card ok">
+          <span class="label">What resume provides</span>
+          <h3>A fresh runtime under the same sandbox ID</h3>
+          <p>Resume recreates the runtime from committed files and rebuilds SDK endpoints. A caller that needs a terminal must create a new PTY session. The old session ID and replay offset cannot represent continuation of a process that no longer exists.</p>
+        </article>
+      </div>
+      <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/pty.py#L96-L139">local PTY state</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/tests/unit_tests/test_opensandbox_pty.py#L974-L1007">test proves only local target-scoped detachment</a> · <a href="https://github.com/opensandbox-group/OpenSandbox/blob/e9d0a63919739b1bed05914373acbacb11e37d43/docs/guides/pause-resume.md#L70-L79">process and memory preservation limits</a>.</p>
+    </section>
+
+    <section id="cleanup">
+      <h2>Interrupted runs get an audit-first snapshot cleanup path</h2>
+      <p>Pausing creates server-side snapshot records and OCI image tags. If the controlling process disappears, snapshot records and paused sandboxes remain. The new helper talks directly to the public management API and defaults to audit mode. Deletion requires <code>--reap</code>. Deleting a snapshot record does not delete its pushed OCI image; registry retention or garbage collection remains a separate operator responsibility.</p>
+      <pre><code>python -m nemo_gym.sandbox.providers.opensandbox.snapshots \
+  --connection-config opensandbox.yaml \
+  --sandbox-id sb-42 \
+  --kill-paused
+
+# Add --reap only after reviewing the audit output.</code></pre>
+      <div class="figure" tabindex="0">
+        <h3>Figure 3 — Audit first, then delete in dependency order</h3>
+        <p class="caption">The helper collects every page before mutation. Snapshot deletes run with a maximum of 32 concurrent requests. Paused sandboxes are deleted only after all snapshot requests finish.</p>
+        <svg viewBox="0 0 920 440" role="img" aria-labelledby="fig3-title fig3-desc">
+          <title id="fig3-title">Snapshot cleanup control flow</title>
+          <desc id="fig3-desc">Filters select snapshots and optional paused sandboxes. The default prints what would be deleted. Reap mode deletes snapshots concurrently with a limit of 32, waits for them, then deletes paused sandboxes. Redirects and non-success statuses are failures; 404 is success.</desc>
+          <defs>
+            <marker id="arrow3" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-neutral)"/></marker>
+            <marker id="arrow3ok" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-ok)"/></marker>
+            <marker id="arrow3warn" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--diagram-problem)"/></marker>
+          </defs>
+          <text x="26" y="28" font-size="13" font-weight="700">LEGEND</text>
+          <line x1="94" y1="23" x2="134" y2="23" class="fig3 ok-arrow"/><text x="145" y="28" font-size="12">ordered action</text>
+          <line x1="320" y1="23" x2="360" y2="23" class="fig3 dash-arrow"/><text x="370" y="28" font-size="12">failure or destructive boundary</text>
+
+          <rect x="34" y="64" width="250" height="76" rx="10" class="box"/>
+          <text x="54" y="91" font-size="14" font-weight="700">Selectors</text>
+          <text x="54" y="115" font-size="13">sandbox=sb-42 · states=* · kill-paused</text>
+          <path d="M284 102 L336 102" class="fig3 ok-arrow"/>
+          <rect x="340" y="64" width="250" height="76" rx="10" class="active"/>
+          <text x="360" y="91" font-size="14" font-weight="700">Collect full inventory</text>
+          <text x="360" y="115" font-size="13">page 1…N before any delete</text>
+          <path d="M590 102 L642 102" class="fig3 ok-arrow"/>
+          <rect x="646" y="64" width="240" height="76" rx="10" class="physical"/>
+          <text x="666" y="91" font-size="14" font-weight="700">Audit output</text>
+          <text x="666" y="115" font-size="13">“Would delete …” · exit 0</text>
+
+          <path d="M766 140 L766 188" class="fig3 dash-arrow"/>
+          <text x="785" y="170" font-size="12">--reap</text>
+          <rect x="340" y="196" width="546" height="76" rx="10" class="warning"/>
+          <text x="362" y="223" font-size="14" font-weight="700">Phase 1 · DELETE /v1/snapshots/{id}</text>
+          <text x="362" y="247" font-size="13">bounded at 32 · 404 = already gone · redirect/non-2xx = failure</text>
+          <path d="M613 272 L613 315" class="fig3 ok-arrow"/>
+          <text x="632" y="300" font-size="12">await all</text>
+          <rect x="340" y="320" width="546" height="76" rx="10" class="warning"/>
+          <text x="362" y="347" font-size="14" font-weight="700">Phase 2 · DELETE /v1/sandboxes/{paused-id}</text>
+          <text x="362" y="371" font-size="13">runs only after snapshot phase · any surviving request failure → exit 1</text>
+          <rect x="34" y="196" width="250" height="200" rx="10" class="box"/>
+          <text x="54" y="226" font-size="14" font-weight="700">Why snapshots go first</text>
+          <text x="54" y="252" font-size="13">Deleting a paused sandbox</text>
+          <text x="54" y="273" font-size="13">releases its checkpoint.</text>
+          <text x="54" y="307" font-size="13">Snapshot-first ordering makes</text>
+          <text x="54" y="328" font-size="13">each requested snapshot delete</text>
+          <text x="54" y="349" font-size="13">observable instead of turning it</text>
+          <text x="54" y="370" font-size="13">into an expected 404.</text>
+        </svg>
+      </div>
+      <p class="source">Inventory and filtering: <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/snapshots.py#L46-L132">snapshots.py L46–L132</a> · Delete semantics: <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/snapshots.py#L134-L161">L134–L161</a> · CLI validation: <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/snapshots.py#L190-L263">L190–L263</a> · <a href="https://github.com/opensandbox-group/OpenSandbox/blob/e9d0a63919739b1bed05914373acbacb11e37d43/docs/guides/pause-resume.md#L309-L321">registry images survive snapshot-record deletion</a>.</p>
+      <article class="card warn">
+        <span class="label">Reproduced finding · head 03b229fec7ca…</span>
+        <h3>One-pass numbered pagination can skip a shifted snapshot and still return success</h3>
+        <p>The reproduction used a mocked page size of one. The same positional race applies at the production page size of 100. Page 1 returned <code>snap-a</code> and said another page existed. An external teardown then removed <code>snap-a</code>, shifting <code>snap-b</code> onto page 1. The helper requested page 2, saw nothing, treated the later delete of <code>snap-a</code> as an idempotent 404, and returned zero while <code>snap-b</code> remained.</p>
+        <pre><code>PYTHONPATH=&lt;PR-head-checkout&gt; python -m pytest -q -s \
+  test_snapshot_pagination_race.py
+
+GET page=1 -&gt; ['snap-a']
+external delete removes snap-a
+GET page=2 -&gt; []
+DELETE snap-a -&gt; 404
+exit=0 remaining=['snap-b']
+
+1 passed in 0.09s</code></pre>
+        <p>The neighboring cleanup helper documents this exact moving-page race and performs up to three list/delete sweeps. Snapshot cleanup should likewise re-list after deletion and return success only after an empty final inventory, or use a server-provided stable cursor if one exists.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/snapshots.py#L73-L109">one-pass numbered listing</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/snapshots.py#L154-L161">single delete sweep and success return</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py#L124-L137">bounded re-list analog</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/2448579496dcb768c5a3a891ece723570366d3d4/tests/unit_tests/test_opensandbox_cleanup.py#L312-L359">existing moving-page regression</a>.</p>
+      </article>
+      <div class="boundary"><strong>Failure ordering:</strong> snapshot deletion failures do not stop phase two. The helper records the failure, still deletes selected paused sandboxes, and returns a nonzero status afterward. Reviewers should decide whether best-effort teardown is intended or whether preserving a recoverable checkpoint should take precedence when its snapshot cleanup fails.</div>
+      <div class="boundary"><strong>Operational boundary:</strong> selectors are optional. <code>--reap</code> without a sandbox, state, or snapshot selector targets every listed snapshot. Adding <code>--kill-paused</code> also targets every paused sandbox. Audit mode is safe, but the destructive form has deployment-wide scope rather than the run-and-user scope enforced by the older <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py#L25-L138"><code>cleanup_sandboxes.py</code></a>.</div>
+    </section>
+
+    <section id="boundary">
+      <h2>This is one lane of issue #3024, not a complete checkpoint</h2>
+      <p>PR #2636 predates issue #3024 and is not part of the issue's listed prototype stack. The relationship is therefore an inference from their public contracts, not a declared dependency. The checkpoint proposal classifies blackbox runtime continuation as a later milestone that needs both runtime-provider snapshots and a checkpoint-aware egress relay. Its own out-of-scope section says that a filesystem-only sandbox snapshot is not automatically a complete opaque-agent runtime snapshot. PR #2636 supplies the filesystem snapshot lifecycle and stable sandbox identity. It does not add the egress relay or Gym's global prepare, commit, restore, resume, and stale-attempt protocol.</p>
+      <div class="figure" tabindex="0">
+        <h3>Figure 4 — State covered by PR #2636 versus state the checkpoint must reconcile</h3>
+        <p class="caption">Blue solid boxes are directly represented by this PR. Orange dashed boxes remain coordinator or component responsibilities in issue #3024. The purple dotted boundary is the global checkpoint publication decision.</p>
+        <svg viewBox="0 0 930 500" role="img" aria-labelledby="fig4-title fig4-desc">
+          <title id="fig4-title">Checkpoint ownership boundary</title>
+          <desc id="fig4-desc">PR 2636 covers sandbox identity, root filesystem snapshot lifecycle, and fresh SDK endpoint reconstruction. It does not preserve process or PTY state and does not cover rollout identity, agent history, resource state, model lineage, token custody, admission fencing, or global manifest publication.</desc>
+          <rect x="24" y="52" width="882" height="398" rx="16" class="physical"/>
+          <text x="46" y="82" font-size="18" font-weight="750">Global checkpoint transaction · issue #3024</text>
+          <text x="46" y="104" font-size="12" class="dim">A checkpoint is publishable only when every required lane names the same execution boundary.</text>
+
+          <rect x="52" y="132" width="252" height="116" rx="11" class="active"/>
+          <text x="72" y="160" font-size="15" font-weight="700">Runtime lane · PR #2636</text>
+          <text x="72" y="185" font-size="13">✓ sandbox ID</text>
+          <text x="72" y="207" font-size="13">✓ rootfs snapshot lifecycle</text>
+          <text x="72" y="229" font-size="13">✓ fresh SDK handle + endpoints</text>
+
+          <rect x="339" y="132" width="252" height="116" rx="11" class="warning"/>
+          <text x="359" y="160" font-size="15" font-weight="700">Agent + resources lanes</text>
+          <text x="359" y="185" font-size="13">△ conversation boundary</text>
+          <text x="359" y="207" font-size="13">△ cookies + mutable state</text>
+          <text x="359" y="229" font-size="13">△ resources revision</text>
+
+          <rect x="626" y="132" width="252" height="116" rx="11" class="warning"/>
+          <text x="646" y="160" font-size="15" font-weight="700">Model + token lanes</text>
+          <text x="646" y="185" font-size="13">△ model-call lineage</text>
+          <text x="646" y="207" font-size="13">△ token IDs / masks / logprobs</text>
+          <text x="646" y="229" font-size="13">△ token-store snapshot</text>
+
+          <rect x="52" y="286" width="252" height="116" rx="11" class="warning"/>
+          <text x="72" y="314" font-size="15" font-weight="700">Execution identity</text>
+          <text x="72" y="339" font-size="13">△ rollout_id</text>
+          <text x="72" y="361" font-size="13">△ attempt index + stale fencing</text>
+          <text x="72" y="383" font-size="13">△ checkpoint-aware egress relay</text>
+
+          <rect x="339" y="286" width="539" height="116" rx="11" class="warning"/>
+          <text x="359" y="314" font-size="15" font-weight="700">Coordinator publication</text>
+          <text x="359" y="339" font-size="13">△ close admission → park/drain → commit each component</text>
+          <text x="359" y="361" font-size="13">△ validate compatible manifests and token-store snapshot</text>
+          <text x="359" y="383" font-size="13">△ publish the global checkpoint last; resume dependencies in order</text>
+
+          <text x="52" y="475" font-size="13">✓ implemented here</text>
+          <text x="206" y="475" font-size="13">△ required elsewhere</text>
+          <text x="410" y="475" font-size="13">Purple dotted outline = one atomic publication decision</text>
+        </svg>
+      </div>
+      <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3024">Issue #3024's public ownership, lifecycle, recovery, and milestone proposal</a> · Runtime descriptor contents: <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L774-L783">sandbox ID only at provider layer</a>.</p>
+      <p><strong>General rule:</strong> this sandbox snapshot preserves a root-filesystem lane, not a live execution lane. A rollout checkpoint becomes valid only when an external coordinator proves that the recreated runtime and every logical Gym lane describe the same completed operation boundary.</p>
+    </section>
+
+    <section id="evidence">
+      <h2>What was reproduced, what the author reports, and what remains open</h2>
+      <div class="ledger">
+        <div class="ledger-row">
+          <div><span class="status"><span class="dot-ok"></span>Reproduced</span><br>Public surface</div>
+          <div><strong>Base <code>d23a85ac7d31…</code>:</strong> <code>has_pause=False</code>; <code>"paused" → unknown</code>.</div>
+          <div><strong>Head <code>03b229fec7ca…</code>:</strong> <code>has_pause=True</code>; <code>"paused" → paused</code>.</div>
+        </div>
+        <div class="ledger-row">
+          <div><span class="status"><span class="dot-ok"></span>Reproduced</span><br>Focused CPU tests</div>
+          <div><strong>Environment:</strong> PR head <code>03b229fec7ca…</code>, reusable Gym virtual environment, and the exact <code>opensandbox 0.1.15</code> and <code>tenacity 9.1.4</code> wheels pinned by the lockfile.</div>
+          <div><strong>Observed:</strong> 229/229 passed: facade 53, provider 62, PTY 76, and snapshot helper 38.</div>
+        </div>
+        <div class="ledger-row">
+          <div><span class="status"><span class="dot-ok"></span>Reproduced</span><br>Provider lifecycle</div>
+          <div><strong>Scope:</strong> fake OpenSandbox SDK plus mocked HTTP and WebSocket clients exercised paused reconnect, deadline wiring, handle refresh, and target-only local PTY detachment.</div>
+          <div><strong>Observed:</strong> every focused provider and PTY assertion passed. Runtime recreation and the SDK's internal readiness loop are source-derived, not independently observed.</div>
+        </div>
+        <div class="ledger-row">
+          <div><span class="status"><span class="dot-ok"></span>Reproduced</span><br>Snapshot coverage</div>
+          <div><strong>Command:</strong> run Coverage.py for the snapshot module with the repository's <code>__main__</code> guard exclusion.</div>
+          <div><strong>Observed:</strong> 147 statements, 0 missed, 100% line coverage. Both module and direct-path <code>--help</code> entry points succeeded.</div>
+        </div>
+        <div class="ledger-row">
+          <div><span class="status"><span class="dot-warn"></span>Reproduced finding</span><br>Moving pagination</div>
+          <div><strong>Input:</strong> page 1 returns <code>snap-a</code> and <code>hasNextPage=true</code>; an external teardown removes it before page 2.</div>
+          <div><strong>Observed:</strong> <code>snap-b</code> shifts behind the cursor, remains undeleted, and the helper returns zero.</div>
+        </div>
+        <div class="ledger-row">
+          <div><span class="status"><span class="dot-warn"></span>Reproduced finding</span><br>Resume deadline</div>
+          <div><strong>Input:</strong> configure a 0.05-second lifecycle timeout and stall the SDK resume call before its readiness phase.</div>
+          <div><strong>Observed:</strong> Gym remained blocked until an independent 0.12-second timeout cancelled the call.</div>
+        </div>
+        <div class="ledger-row">
+          <div><span class="status"><span class="dot-warn"></span>Author-reported</span><br>Live handoff</div>
+          <div><strong>PR description:</strong> process A wrote proof state, paused, serialized, and exited; process B connected, resumed, and read the preserved proof.</div>
+          <div><strong>Scope:</strong> useful provider-backed evidence, but no public command, log, or artifact is attached for independent replay.</div>
+        </div>
+      </div>
+      <pre><code># Reproduction used at each pinned checkout
+python -c '
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.providers.opensandbox.provider import _to_sandbox_status
+print("has_pause=", hasattr(AsyncSandbox, "pause"))
+print("paused_maps_to=", _to_sandbox_status("paused").value)
+'</code></pre>
+      <pre><code># Public-safe command shape; local checkout and wheel paths are parameterized.
+PYTHONPATH="$PR_HEAD:$OPENSANDBOX_WHEEL:$TENACITY_WHEEL" "$GYM_PYTHON" -m pytest -q \
+  tests/unit_tests/test_sandbox.py \
+  tests/unit_tests/test_opensandbox_provider.py \
+  tests/unit_tests/test_opensandbox_pty.py \
+  tests/unit_tests/test_opensandbox_snapshots.py
+
+# The six selected provider lifecycle regressions were:
+connect_accepts_a_paused_sandbox
+pause_waits_until_opensandbox_reports_paused
+pause_timeout_bounds_the_full_transition
+pause_preserves_a_shorter_request_timeout
+resume_rebuilds_the_sdk_handle
+resume_failure_keeps_the_paused_handle</code></pre>
+      <p class="source">Behavior-focused tests: <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/tests/unit_tests/test_opensandbox_provider.py#L1651-L1818">connect, pause, and resume</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/tests/unit_tests/test_opensandbox_pty.py#L974-L1007">PTY detachment</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/tests/unit_tests/test_opensandbox_snapshots.py#L143-L338">snapshot behavior</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2636">author's public test plan</a>.</p>
+      <p>The first targeted attempts skipped provider tests because the reusable environment lacked the optional OpenSandbox SDK and then Tenacity. Adding the two versions pinned by the PR lockfile to <code>PYTHONPATH</code> removed those skips; the final 229-test run had none. All lifecycle and PTY tests used fakes or mocks, so this validates Gym's control flow rather than a Kubernetes deployment.</p>
+      <p>At review time, public checks showed lint, copyright, secret scanning, and DCO passing. The unit workflow had not run because runner validation was still gated. Passing generic checks does not independently establish provider-backed filesystem persistence or runtime recreation.</p>
+    </section>
+
+    <section id="questions">
+      <h2>Concrete questions before treating this as rollout checkpointing</h2>
+      <div class="question">
+        <h3>1. Which component binds <code>sb-42</code> to the global checkpoint boundary?</h3>
+        <p>The descriptor contains a sandbox ID and facade-added working directory. It does not carry <code>checkpoint_id</code>, <code>rollout_id</code>, attempt index, operation boundary, snapshot digest, resources revision, or model-call lineage. Issue #3024 assigns that consistency proof to an external coordinator and its aggregate manifest, not to the bare descriptor. A later integration test should pause at one completed agent boundary, commit all component manifests, restore as attempt N+1, and reject a global manifest whose runtime reference does not match the selected checkpoint.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L774-L783">descriptor contract</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/issues/3024">coordinator contract</a></p>
+      </div>
+      <div class="question">
+        <h3>2. How will a checkpoint prove that recent guest filesystem writes are durable?</h3>
+        <p>OpenSandbox attempts <code>sync</code> inside each running container before committing the root filesystem, but failure only emits a warning and snapshotting continues. A successful <code>PAUSED</code> state can therefore coexist with missing recent writes. A checkpoint-aware agent should flush its own files and persist a boundary marker before pause, then validate that marker after resume. Otherwise the framework should classify the rollout for a fresh attempt rather than continuation.</p>
+        <p class="source"><a href="https://github.com/opensandbox-group/OpenSandbox/blob/e9d0a63919739b1bed05914373acbacb11e37d43/docs/guides/pause-resume.md#L309-L319">best-effort guest sync</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/issues/3024">fail-closed checkpoint proposal</a></p>
+      </div>
+      <div class="question">
+        <h3>3. Should destructive snapshot cleanup require an explicit scope?</h3>
+        <p><code>--reap</code> with no selector deletes every snapshot returned by the deployment. <code>--kill-paused</code> additionally deletes every paused sandbox. More subtly, <code>--snapshot-id snap-a --kill-paused --reap</code> looks snapshot-scoped but still deletes every paused sandbox because exact snapshot IDs bypass listing while <code>sandbox_id</code> remains unset. The neighboring sandbox cleanup tool requires exact run and user metadata. Requiring a sandbox, run/user attribution, or explicit global-confirmation flag would make destructive scope visible. A CLI regression should cover the exact-ID plus <code>--kill-paused</code> combination.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/snapshots.py#L104-L161">unscoped inventory and reap</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py#L25-L48">run/user-scoped analog</a></p>
+      </div>
+      <div class="question">
+        <h3>4. Will callers discard old PTY identity and create a new session after resume?</h3>
+        <p>The pause path closes the caller's PTY object, and OpenSandbox recreates the runtime without process state. The cross-process descriptor correctly carries no PTY session ID or replay offset. A provider-backed regression should prove that old PTY identity is invalid after resume and that callers establish a new terminal process rather than attempting replay from a process that no longer exists.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/provider.py#L838-L852">local detachment</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/pty.py#L129-L139">session replay state</a></p>
+      </div>
+      <div class="question">
+        <h3>5. Can the PR description match the final cleanup interface?</h3>
+        <p>The public description still advertises <code>list</code>, <code>delete</code>, and <code>cleanup</code> subcommands with <code>--dry-run</code>. The reviewed head has no subcommands: it audits by default and deletes only with <code>--reap</code>. Updating the description would keep reviewers and operators from testing a superseded command shape.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2636">current PR description</a> · <a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/providers/opensandbox/snapshots.py#L190-L218">final argument parser</a></p>
+      </div>
+      <div class="question">
+        <h3>6. Where will users discover the preservation and failure contract?</h3>
+        <p>The PR adds public sync and async methods but no Fern documentation. The user-facing contract needs to say that only root filesystem and template environment survive; processes, memory, sockets, and PTYs do not; guest sync is best-effort; pause and resume can have indeterminate outcomes after network failure; and resume currently has the reproduced timeout gap.</p>
+        <p class="source"><a href="https://github.com/NVIDIA-NeMo/Gym/blob/03b229fec7cacf29b1c23df0baed7fe12ba082df/nemo_gym/sandbox/api.py#L521-L538">new public methods</a> · <a href="https://github.com/opensandbox-group/OpenSandbox/blob/e9d0a63919739b1bed05914373acbacb11e37d43/docs/guides/pause-resume.md#L70-L79">actual preservation boundary</a></p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Practical consequence</h2>
+      <ol>
+        <li><strong>Review PR #2636 as a filesystem primitive:</strong> it creates a clean optional API, paused-aware reconnect, fresh-runtime handle replacement, and record cleanup. The pause deadline is complete; the resume deadline has the reproduced gap above.</li>
+        <li><strong>Do not advertise complete rollout checkpointing from this PR alone:</strong> no global boundary, manifest, attempt fence, checkpoint-aware egress relay, or cross-component restore order exists here.</li>
+        <li><strong>Make the next integration prove composition:</strong> one provider-backed failure test should stop at a completed operation boundary, flush and snapshot files, publish a consistent checkpoint, recreate execution in a new process, and continue without repeating the completed operation.</li>
+        <li><strong>Keep recovery fail-closed:</strong> if the filesystem snapshot cannot be reconciled with agent, resources, model, and token state, dispatch a fresh attempt or reject the checkpoint as issue #3024 requires.</li>
+      </ol>
+    </section>
+
+    <footer>
+      <p>This page contains public-safe local reproductions plus public GitHub source, pull request, issue, test, and checks evidence. Source links are pinned to immutable commits where code is cited. Runtime behavior that could not be independently executed is labeled as source-derived or author-reported.</p>
+      <span hidden>PR2636-CHECKPOINT-SUBSTRATE-03b229fec7ca</span>
+    </footer>
+  </main>
+  <script>
+    (() => {
+      const button = document.querySelector(".theme-toggle");
+      const updateLabel = () => {
+        button.textContent = document.documentElement.dataset.theme === "light"
+          ? "Use dark theme"
+          : "Use light theme";
+      };
+      button.addEventListener("click", () => {
+        const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+        document.documentElement.dataset.theme = next;
+        try {
+          localStorage.setItem("engineering-notes-theme", next);
+        } catch {}
+        updateLabel();
+      });
+      updateLabel();
+    })();
+  </script>
+</body>
+</html>
