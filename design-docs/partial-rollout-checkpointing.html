@@ -96,15 +96,15 @@ tr:last-child td { border-bottom: none; }
 <button class="themetoggle" id="themetoggle" type="button">◐ light</button>
 <div class="wrap">
 
-<div class="eyebrow">Architecture decision · 1 September 2026</div>
+<div class="eyebrow">Architecture decision · 17 September 2026</div>
 <h1>Partial-rollout checkpointing for NeMo-RL and NeMo Gym</h1>
-<div class="meta">owner ansubramania · Gym draft stack at a2e92b237 · companion NeMo-RL integration boundary · self-contained HTML, inline CSS/JS/SVG</div>
+<div class="meta">owner ansubramania · aligned with episode orchestration PRs #3482–#3492 · checkpoint ownership update · self-contained HTML, inline CSS/JS/SVG</div>
 
-<p class="lede">The eight-PR Gym draft stack implements the server participants needed to pause policy, agent, and stateful resources traffic; save a consistent boundary for each participant; restore that boundary as attempt N+1; and reject late work from attempt N. It does not yet implement the training controller that coordinates those participants or the durable <code>TransferQueue</code> checkpoint. Gym preserves model-lineage coordinates, agent turns, and resources revisions; the remaining training-framework work must join those records to durable token rows and publish the global checkpoint.</p>
+<p class="lede">The episode-orchestration design moves the complete rollout lifecycle out of an agent server's <code>/run</code> method and into an episode processor. The processor owns resources and agent session setup, one or more <code>/v1/responses</code> activations, verification, cleanup, and the decision about what happens next. Checkpointing must therefore persist the episode boundary in the processor. Agent servers persist only the private session state needed to continue later <code>/v1/responses</code> activations. NeMo-RL still owns the global checkpoint transaction and validates the processor, agent-session, resources, model-lineage, and <code>TransferQueue</code> records as one compatible cut.</p>
 
 <nav class="tabs" id="tabs" aria-label="Sections">
   <button data-tab="inv" class="on">Requirements</button>
-  <button data-tab="state">State model</button>
+  <button data-tab="state">State ownership</button>
   <button data-tab="ov">Overview</button>
   <button data-tab="rt">Runtime</button>
   <button data-tab="pp">Prepare</button>
@@ -138,7 +138,7 @@ tr:last-child td { border-bottom: none; }
 <div class="inv"><b>Closing a gate and testing admission happen atomically.</b><p>The <code>AdmissionLimiter</code> grants a capacity permit only while the gate accepts work. Closing the gate atomically rejects or parks new callers. A caller waiting for capacity holds no permit and does not count as in flight. An admitted request remains in flight until its response and required custody updates are durable.</p></div>
 <div class="inv"><b>Only policy model servers pause in the first milestone.</b><p>Token-capture checkpointing first closes admission only on policy model-server instances backed by NeMo-RL generation workers. Stateless resources servers and verifiers retain no checkpoint state and do not need an admission API. Stateful-resources support later closes admission on those resources-server instances as well. Judge and simulator model-server instances remain open so accepted tools and verifiers can finish. Startup validation rejects environment traffic that targets a policy instance.</p></div>
 <div class="inv"><b>A model-server pause must cover every FastAPI worker process.</b><p>A pause request routed to one Uvicorn worker cannot close admission for the other workers that share the service port. The PR stack implements and tests a service-level coordinator protocol over a Unix-domain socket. Workers apply coordinator state and report acknowledgements plus local in-flight counts. The coordinator reports <code>paused</code> only after every expected worker has acknowledged the checkpoint ID and the summed count is zero. Production startup and control-URL routing are not wired yet, so a configured multi-worker server reports <code>unmanaged</code> and NeMo-RL must refuse checkpointing through it. Single-worker servers are the supported first integration.</p></div>
-<div class="inv"><b>Prepare parks whitebox agents before it closes dependent servers.</b><p><code>POST /ng-control/v1/agent-checkpoint/prepare</code> changes active runs to <code>park_requested</code>. Each run finishes its current turn, records an <code>AgentBoundaryRecord</code>, and blocks on an in-memory event. NeMo-RL closes policy-model admission and prepares resources state only after the agent prepare call succeeds. Judge and simulator model instances remain open while the current turn finishes. This order avoids using a <code>409 checkpoint_parked</code> response as normal whitebox control flow.</p></div>
+<div class="inv"><b>Prepare parks episode processors before it closes their dependencies.</b><p><code>POST /ng-control/v1/episode-checkpoint/prepare</code> changes active episodes to <code>park_requested</code>. Each processor finishes its current protocol operation, records an <code>EpisodeBoundaryRecord</code>, and blocks on an in-memory event. The boundary identifies the next protocol operation and every still-open agent and resources session. NeMo-RL prepares those component sessions and closes policy-model admission only after the processor has stopped issuing new calls. Judge and simulator model instances remain open while an accepted operation finishes.</p></div>
 <div class="inv"><b>Resources mutations finish before state export.</b><p>The resources middleware serializes mutations for each rollout attempt with an <code>asyncio.Lock</code>. Resources prepare closes admission, acquires each live session's lock, and exports that session after any accepted mutation releases the lock. New mutations receive <code>409 resources_admission_closed</code>. The first integration does not propagate admission leases or expose separate resources-admission routes.</p></div>
 <div class="inv"><b>The controller decides what happens to unfinished rollouts.</b><p>The Gym routes expose blockers and provide attempt-specific model abort, agent retirement, and resources retirement. Resources retirement is checkpoint-fenced and waits for that execution's mutation lock before it removes adapter state and the prepared snapshot. A future controller must decide whether all participant state for a straggler can be discarded. If an external effect cannot be rolled back or acknowledged, the controller must abort the global checkpoint rather than publish an incomplete cut.</p></div>
 
@@ -146,22 +146,48 @@ tr:last-child td { border-bottom: none; }
 <div class="inv"><b>Generation workers stay available during prepare.</b><p>Accepted generations must finish staging their output before Gym can drain. Pausing workers earlier would deadlock prepare. NeMo-RL may pause, checkpoint, or refit workers only after Gym commits and before the final resume.</p></div>
 <div class="inv"><b>The future controller must finish finalizers before saving <code>TransferQueue</code>.</b><p>Pausing Gym does not stop an RL-side finalizer that is already writing token rows. The training-framework integration must wait for those writes, publish a completed group before clearing staged rows, and then save the queue. This ordering is not implemented by the Gym stack.</p></div>
 <div class="inv"><b>Each manifest is written last.</b><p>A component writes payloads to temporary names, flushes them, and renames them before writing its manifest. The actor verifies every component digest before writing <code>gym/manifest.json</code>. The <code>SingleController</code> writes <code>training_info.json</code> last, renames the checkpoint atomically, and flushes the parent directory. A committed participant directory never changes.</p></div>
-<div class="inv"><b>One explicit call resumes work in dependency order.</b><p>Prepare, commit, and restore leave Gym paused. After the checkpoint is published and generation workers pass validation, <code>NemoGym.resume</code> opens resources admission, policy model admission, relays and runtimes, parked loops, and dispatch in that order.</p></div>
+<div class="inv"><b>One explicit call resumes work in dependency order.</b><p>Prepare, commit, and restore leave Gym paused. After the checkpoint is published and generation workers pass validation, <code>NemoGym.resume</code> opens resources admission and policy model admission, reconnects agent sessions and runtimes, releases parked episode processors, and finally reopens dispatch. A processor cannot resume before every session referenced by its boundary is usable.</p></div>
 
 <h3>Durability and publication</h3>
 <div class="inv"><b><code>TransferQueue</code> needs its own durable snapshot contract.</b><p>The intended training checkpoint uses a fresh content-addressed path and restores it by the digest recorded in the global checkpoint. The Gym stack neither defines nor exercises that persistence operation; it only stores the coordinates that the controller must validate against the restored queue.</p></div>
-<div class="inv"><b>Gym components publish immutable manifests after their payloads.</b><p>The current draft writes one JSON payload per parked agent boundary or resources snapshot and copies token-free lineage files, then writes a digest-bearing manifest last. This makes torn writes and corrupt restore input detectable. It is not the final format for large live rollout sets. Archive shards with a member index can replace the per-rollout files later without changing the checkpoint APIs or state machine.</p></div>
-<div class="inv"><b>Control operations are idempotent and fenced.</b><p>Every actor method and control endpoint carries <code>checkpoint_id</code> and an absolute deadline. Repeating a phase for the same checkpoint returns the recorded result. A stale checkpoint ID cannot reopen traffic or replace files. A short-held mutex in the <code>NemoGym</code> actor protects checkpoint phase changes and snapshots of the live-execution registry. It prevents two checkpoint IDs from preparing concurrently, prevents commit, abort, restore, and resume from racing, and rejects invalid transitions such as commit before prepared. The actor releases the mutex before waiting for servers to drain so <code>checkpoint_progress</code> and <code>abort_checkpoint</code> remain callable during a long prepare.</p></div>
+<div class="inv"><b>Gym components publish immutable manifests after their payloads.</b><p>The current draft writes one JSON payload per parked boundary or resources snapshot and copies token-free lineage files, then writes a digest-bearing manifest last. The episode-oriented design adds separate processor-boundary and private agent-session manifests. This makes torn writes and corrupt restore input detectable. Archive shards with a member index can replace per-rollout files later without changing the checkpoint APIs or state machine.</p></div>
+<div class="inv"><b>Control operations are idempotent and fenced.</b><p>Every actor method and control endpoint carries <code>checkpoint_id</code> and an absolute deadline. Repeating a phase for the same checkpoint returns the recorded result. A stale checkpoint ID cannot reopen traffic or replace files. A mutex in the <code>NemoGym</code> actor serializes checkpoint phase changes and live-execution snapshots. It prevents two checkpoint IDs from preparing concurrently, prevents commit, abort, restore, and resume from racing, and rejects invalid transitions such as commit before prepared. Participant I/O is deadline-bounded, and the lock-free <code>checkpoint_status</code> snapshot keeps progress observable while an operation is active.</p></div>
 
 <h3>Restore</h3>
-<div class="inv"><b>NeMo-RL chooses one recovery action for each execution.</b><p>An execution is already complete, resumes from an agent boundary, resumes from a full runtime snapshot, or starts again from its input. An execution marked <code>transferred_to_rl</code> cannot also have a continuation. The restored NeMo-RL registry decides whether work completed or failed. Gym does not make that decision.</p></div>
-<div class="inv"><b>Gym restores participants paused; the controller verifies the full join.</b><p>Each participant restores attempt-N state as attempt N+1 and remains closed until an explicit resume. The model participant rejects a non-fresh ledger namespace. The resources participant requires a fresh process that has not served stateful traffic. The agent participant installs continuations without starting <code>/run</code>. The future controller must still verify each agent boundary against its model lineage, resources revision, and restored <code>TransferQueue</code> rows before dispatch.</p></div>
+<div class="inv"><b>NeMo-RL chooses one recovery action for each execution.</b><p>An execution is already complete, resumes from an episode boundary, resumes from a full runtime snapshot, or starts again from its input. An execution marked <code>transferred_to_rl</code> cannot also have a continuation. The restored NeMo-RL registry decides whether work completed or failed. Gym does not make that decision.</p></div>
+<div class="inv"><b>Gym restores participants paused; the controller verifies the full join.</b><p>Each participant restores attempt-N state as attempt N+1 and remains closed until an explicit resume. The model participant rejects a non-fresh ledger namespace. The resources participant requires a fresh process that has not served stateful traffic. Agent servers restore only the sessions named by selected episode boundaries. Episode processors restore last, after the controller verifies their last model-call IDs, resources revisions, agent-session snapshots, and restored <code>TransferQueue</code> rows.</p></div>
 <div class="inv"><b>An opaque harness requires a full runtime snapshot.</b><p>A filesystem snapshot, sandbox identifier, or provider descriptor cannot restore an opaque harness by itself. A resumable snapshot includes the harness process tree and memory, the egress relay's pending requests and cached responses, and a provider compatibility fingerprint. At the prepare deadline, the runtime may freeze a forwarded but unfinished request as <em>pending reissue</em>. Restore tombstones the abandoned server-side call and sends a new request through the relay.</p></div>
 </section>
 
 <section class="tab" id="tab-state">
-<h2>A rollout does not have one global state enum</h2>
-<p>The implementation deliberately separates three kinds of state. NeMo-RL owns whether a logical rollout still needs a result. The agent server owns where one <code>/run</code> attempt is executing. Each Gym server owns the phase of the current checkpoint transaction. Treating these as one enum would create impossible combinations: for example, an agent can be running after boundary 4 while boundary 4 is already safe to save, and a resources server can be checkpoint-prepared while the model server is still draining an accepted generation.</p>
+<h2>The processor owns protocol state; servers own private session state</h2>
+<p>The ownership rule is: the component that decides the next remote operation persists the state needed to make that decision. The episode processor decides whether to seed a session, invoke <code>/v1/responses</code>, verify, close, or return. It therefore owns the episode boundary. An agent server owns only state hidden behind <code>agent_session_id</code> that is needed to service a later activation. Resources and model servers continue to own environment state and model-call lineage.</p>
+<div class="callout warn"><b>Do not persist the same mutable fact in two owners</b>The processor may retain the request and response exchanged with an agent. The agent may retain an internal conversation or native thread cursor when that state is not supplied on the wire. It must be clear which copy is authoritative. A processor-supplied full conversation and an independently mutable agent-side conversation cannot both determine the next turn.</div>
+
+<h3>State the agent server persists</h3>
+<div class="tbl"><table>
+<tr><th>State</th><th>Why it belongs to the agent server</th><th>Checkpoint rule</th></tr>
+<tr><td>Session identity</td><td><code>agent_session_id</code>, <code>EpisodeId</code>, and <code>TaskId</code> bind later <code>/v1/responses</code> and close calls to the same private session.</td><td>Restore under attempt N+1 with a new externally visible session identity or a validated attempt remapping. Attempt N remains fenced.</td></tr>
+<tr><td>Private agent continuation</td><td>Native thread IDs, compaction summaries, graph cursors, harness state, or other data that the processor cannot reconstruct from the Responses request and response.</td><td>Export a versioned typed snapshot only at a declared activation boundary. If the state cannot be serialized, advertise <code>restart_only</code> or require a full runtime snapshot.</td></tr>
+<tr><td>Scoped dependency access</td><td>The resources transport, resources cookies, sandbox connection descriptor, and work directory supplied when the session is seeded are inputs to the agent implementation.</td><td>Persist serializable descriptors and cookie values, never live clients, sockets, subprocess objects, or callback functions. Validate the restored descriptors before accepting an activation.</td></tr>
+<tr><td>Accumulated agent observations</td><td>Model, tool, compaction, child-invocation, and conversation observations returned by the agent close response may be assembled inside the agent runtime.</td><td>Retain observations not yet transferred to the processor. Release them only after close or an explicit durable acknowledgement.</td></tr>
+<tr><td>Activation deduplication</td><td>A retry after a lost response must not execute the same logical activation twice when the agent has private mutable state or external effects.</td><td>Record the logical activation ID, request digest, completion status, and response digest for the latest replayable activation.</td></tr>
+</table></div>
+<p>The agent server does not own the materialized task, the episode's next protocol stage, verification status, resources state, model token rows, or global recovery disposition. A stateless agent whose complete input arrives in each <code>/v1/responses</code> request may have no checkpoint payload beyond admission, attempt fencing, and any unacknowledged close observations.</p>
+
+<h3>State the episode processor persists</h3>
+<div class="tbl"><table>
+<tr><th>State</th><th>Required content</th><th>Checkpoint rule</th></tr>
+<tr><td>Identity and protocol</td><td><code>EpisodeId</code>, <code>TaskId</code>, processor type and schema version, materialized task input or its immutable reference.</td><td>The restored processor must prove that it is continuing the same task and protocol under attempt N+1.</td></tr>
+<tr><td>Next operation</td><td>A typed stage such as <code>seed_resources</code>, <code>seed_agent</code>, <code>invoke_agent</code>, <code>close_agent</code>, <code>verify</code>, <code>close_resources</code>, or <code>return_result</code>, plus an invocation index.</td><td>Commit only after the preceding operation has a durable outcome. Never serialize a coroutine or infer the stage from which handles happen to exist.</td></tr>
+<tr><td>Open participant handles</td><td><code>resources_session_id</code>, <code>agent_session_id</code>, cookie values, tool-access metadata, sandbox descriptors, and the participant instance names that own them.</td><td>Every referenced participant snapshot must appear in the same aggregate checkpoint. Cleanup ownership is persisted as data: open, close pending, or closed.</td></tr>
+<tr><td>Completed operation results</td><td>The latest complete agent response or durable reference, agent-close observations, verification input, verification result when complete, and any partial result required by the protocol.</td><td>Retain a result until the next operation has durably consumed it. Use request and response digests to make retries idempotent.</td></tr>
+<tr><td>Cross-component joins</td><td>Last committed policy model-call ID, expected resources revision, agent activation ID, and any runtime or token-custody reference needed by recovery.</td><td>NeMo-RL validates these joins against model, resources, agent-session, runtime, and <code>TransferQueue</code> manifests before releasing the processor.</td></tr>
+<tr><td>Outcome and cleanup obligations</td><td>Handled failure, retryability, terminal status, and which sessions or runtimes still require close, detach, or destroy.</td><td><code>EpisodeContext</code> callbacks are process-local conveniences. The durable boundary must contain enough data to retry cleanup after process loss.</td></tr>
+</table></div>
+
+<h3>State that must not be checkpointed as application data</h3>
+<p>Neither owner serializes active HTTP requests, asyncio tasks, semaphores, locks, clients, sockets, file descriptors, or arbitrary process memory. Prepare either waits for the current operation to reach a durable boundary, retires a restart-safe attempt, or delegates an opaque runtime to a provider that can snapshot and restore the complete process plus its egress state.</p>
 
 <h3>Logical rollout and attempt identity</h3>
 <figure>
@@ -184,7 +210,7 @@ tr:last-child td { border-bottom: none; }
     <path d="M400 68 C440 95, 450 160, 465 166" fill="none"/><path d="M650 166 C710 166, 710 86, 745 70" fill="none" stroke-dasharray="5 3"/>
   </g>
   <g fill="var(--dim)" font-size="10.5" text-anchor="middle">
-    <text x="190" y="48">dispatch</text><text x="432" y="48">/run returns</text><text x="695" y="48">RL accepts result</text>
+    <text x="190" y="48">dispatch</text><text x="432" y="48">processor /run returns</text><text x="695" y="48">RL accepts result</text>
     <text x="438" y="125">restore chooses a continuation</text><text x="438" y="139">or a fresh dispatch</text>
     <text x="730" y="146">later result</text>
   </g>
@@ -192,9 +218,9 @@ tr:last-child td { border-bottom: none; }
 </figure>
 <p><code>rollout_id</code> identifies the logical work across failures. <code>attempt_index</code> identifies one execution of that work. Restore never reactivates attempt N. It installs state for attempt N+1 and tombstones attempt N, so delayed HTTP requests from the old process receive <code>409 stale_attempt</code> instead of mutating restored state.</p>
 
-<h3>Agent execution state</h3>
+<h3>Episode processor execution state</h3>
 <figure>
-<svg viewBox="0 0 940 250" role="img" aria-label="Agent execution states: running, park requested, parked with a committed boundary, completed but unacknowledged, and retired.">
+<svg viewBox="0 0 940 250" role="img" aria-label="Episode processor execution states: running, park requested, parked with a committed boundary, completed but unacknowledged, and retired.">
   <defs><marker id="agent-state-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>
   <g fill="none" stroke="var(--border)" stroke-width="1.5">
     <rect x="35" y="35" width="165" height="56" rx="8" stroke="var(--diagram-ok)"/>
@@ -217,13 +243,13 @@ tr:last-child td { border-bottom: none; }
   </g>
   <g fill="var(--dim)" font-size="10.5" text-anchor="middle">
     <text x="240" y="53">prepare</text><text x="507" y="53">next boundary</text><text x="638" y="126">resume</text>
-    <text x="690" y="143">/run finishes or fails</text><text x="507" y="138">deadline handling</text>
+    <text x="690" y="143">processor finishes or fails</text><text x="507" y="138">deadline handling</text>
   </g>
 </svg>
 </figure>
-<p>A boundary is the completed state after a whole agent turn, not a separate execution state. While the agent is running turn 5, its boundary for turn 4 may remain available as the latest safe rollback point. Prepare changes <code>running</code> to <code>park_requested</code>. The agent finishes the current operation and commits the next boundary before it blocks on an in-memory event. No file is polled on each turn.</p>
-<p>The participant reports whether each parked execution has a committed boundary. Both a parked execution without a boundary and a completed result that the training framework has not durably acknowledged make <code>ready_to_commit</code> false. A boundary does not make every parked state publishable, and completion alone does not transfer ownership of the result.</p>
-<p>If the deadline expires while an agent is still between boundaries, prepare fails without caching a successful result. Retirement cancels both the outer <code>/run</code> task and the active inner handler task, including a handler blocked while parking at a boundary. Retirement is not durable result acknowledgement: a completed-but-unacknowledged execution refuses retirement and continues to block publication. Failed executions discard cached boundary, continuation, and result payloads, remove the live execution, and tombstone that attempt.</p>
+<p>A boundary is the completed state after a whole protocol operation, not a separate execution state. While the processor is invoking the agent for activation 5, its boundary after activation 4 may remain available as a rollback point, but it is publishable only if every component still agrees with that earlier point. Prepare changes <code>running</code> to <code>park_requested</code>. The processor finishes the current operation, commits the next boundary, and then blocks on an in-memory event.</p>
+<p>The processor participant reports whether each parked episode has a committed boundary. Both a park without a boundary and a completed result that NeMo-RL has not durably acknowledged make <code>ready_to_commit</code> false. Agent-session and resources participants report their own matching state; the processor boundary does not substitute for those snapshots.</p>
+<p>If the deadline expires between boundaries, prepare fails without inventing a successful result. Retirement cancels the processor's outer <code>/run</code> task and any active component request, retires the referenced agent and resources sessions, and tombstones the attempt. Retirement is not durable result acknowledgement: a completed-but-unacknowledged episode continues to block publication.</p>
 
 <h3>Checkpoint phase and admission state</h3>
 <figure>
@@ -262,18 +288,17 @@ tr:last-child td { border-bottom: none; }
 </svg>
 </figure>
 <p>The control fence is per server process and per checkpoint ID. It prevents a stale or concurrent controller from committing, restoring, or resuming the wrong transaction. Repeating the same successful operation returns its recorded result. Most failed operations return to their entry phase. Model restore is deliberately different: a failure leaves both the limiter and the control fence in <code>restore_failed_paused</code>, so status remains observable and the same restore can be retried or explicitly resumed without admitting traffic by accident.</p>
-<p>Admission is a separate state machine. The policy model server changes from <code>accepting</code> to <code>draining</code> when prepare closes its gate. Requests already admitted remain counted until their complete HTTP response has been sent and token custody has been recorded. When that count reaches zero, the limiter changes to <code>paused</code>. New requests receive <code>409 checkpoint_parked</code>. Resume reopens admission after commit or restore.</p>
+<p>Admission is a separate state machine. The policy model server changes from <code>accepting</code> to <code>draining</code> when prepare closes its gate. A request is prepare-safe only after durable completed custody, a durable failure, a validated active-prefix receipt, a no-generation exit, or complete pre-cut response egress. Response lifetime remains separate: a response that has not started is fenced until checkpoint resolution, while a stream that already started drains completely instead of entering a prefix cut. Missing workers, duplicate worker IDs, swallowed cancellation, and incomplete receipts fail closed. New requests receive <code>409 checkpoint_parked</code>. Resume reopens admission and releases fenced response egress after commit or restore.</p>
 
 <div class="card"><h3>What the current Gym draft guarantees</h3>
-<p>The model, agent, and resources participants can independently preserve a compatible attempt-N cut and install it for attempt N+1 while traffic remains paused. Their manifests are separated by model server, agent instance, and resources server inside one controller-supplied directory. The production guarantee still depends on a controller that checks all three manifests and the matching <code>TransferQueue</code> snapshot before publishing one global checkpoint.</p></div>
+<p>The model, agent-session, resources, and episode-processor participants preserve separate parts of one attempt-N cut and install them for attempt N+1 while traffic remains paused. Their manifests are separated by participant instance inside one controller-supplied directory. Active generation receipts bind immutable worker, model-call, frozen-buffer, inventory, and backend-snapshot identities. The production guarantee depends on a controller that checks every manifest and the matching <code>TransferQueue</code> snapshot before publishing one global checkpoint.</p></div>
 <div class="card"><h3>The Python implementation is intentionally internal</h3>
 <p>The checkpoint modules in PRs #2940–#2946 live under <code>nemo_gym._checkpoint</code>. The leading underscore marks this as an experimental implementation rather than a supported public import surface. Gym servers use these modules internally while the protocol, controller integration, and storage format continue to evolve. A later stabilization change can expose a public package after those contracts are ready for compatibility guarantees.</p></div>
 <div class="card"><h3>Work remaining outside the Gym draft stack</h3>
 <ul>
-  <li>Implement the NeMo-RL controller state machine, live-execution registry, durable result acknowledgement, participant ordering, global publication marker, restore reconciliation, and explicit resume sequence.</li>
-  <li>Implement actual <code>TransferQueue</code> checkpoint durability and verify that every staging coordinate named by restored model lineage exists before a continuation starts.</li>
+  <li>Integrate the <code>NemoGym</code> actor participant from <a href="https://github.com/NVIDIA-NeMo/RL/pull/4093">NeMo-RL #4093</a> into the existing <code>SingleController</code> checkpoint transaction, including global publication, restored rollout disposition, and training-state reconciliation.</li>
+  <li>Reuse NeMo-RL's existing native <code>TransferQueue</code> save and restore from <a href="https://github.com/NVIDIA-NeMo/RL/pull/3429">#3429</a> and <a href="https://github.com/NVIDIA-NeMo/RL/pull/3480">#3480</a>. Add Gym-manifest reconciliation against that restored inventory and implement production inference-generation cuts.</li>
   <li>Wire the multi-worker coordinator into Gym process startup and route one authenticated control URL per server instance. Until then, require <code>num_workers=1</code>.</li>
-  <li>Aggregate model-ledger commit and restore across the same worker set. The current coordinator protocol covers admission state and in-flight counts only.</li>
   <li>Apply <code>deadline_ts</code> inside commit, restore, and resume operations. Those request models carry the deadline today, but only prepare and model-drain waits actively enforce it.</li>
   <li>Pack per-rollout payloads into bounded archive shards before using the format at very large rollout counts.</li>
 </ul></div>
@@ -281,7 +306,8 @@ tr:last-child td { border-bottom: none; }
 
 <section class="tab" id="tab-ov">
 <h2>How the components share checkpoint ownership</h2>
-<p>The intended <code>SingleController</code> owns the global checkpoint transaction, but that controller integration is not in the Gym draft stack. The implemented Gym side gives each server a participant with authenticated control routes. The agent server owns each <code>/run</code> loop. The policy model server owns admission and token-free lineage. Stateful resources servers own environment sessions and revisions. A future NeMo-RL <code>NemoGym</code> actor must order those routes, make the referenced <code>TransferQueue</code> rows durable, and publish the global checkpoint.</p>
+<p>The existing NeMo-RL <code>SingleController</code> owns the global checkpoint transaction, including a data-plane checkpoint barrier, native <code>TransferQueue</code> save and restore, rollout-recovery state, replay metadata, and atomic publication. The episode processor owns each externally dispatched <code>/run</code> lifecycle and the protocol boundary between resources seed, agent seed, <code>/v1/responses</code> activation, agent close, verification, resources close, and result return. Agent servers own private state behind <code>agent_session_id</code>. The policy model server owns admission and token-free lineage. Stateful resources servers own environment sessions, revisions, and exact-once mutation receipts. <a href="https://github.com/NVIDIA-NeMo/RL/pull/4093">NeMo-RL #4093</a> must be updated to discover episode processors, order all participant routes, freeze actor-local membership, validate aggregate manifests, and acknowledge completed episode results.</p>
+<div class="card"><h3>The processor boundary replaces the agent <code>/run</code> boundary</h3><p>The existing checkpoint draft places conversation, control phase, cookies, model-call identity, and resources revisions in <code>AgentBoundaryRecord</code>. Under episode orchestration, that record splits. <code>EpisodeBoundaryRecord</code> retains protocol position, request and response data, participant handles, cleanup obligations, and cross-component joins. <code>AgentSessionSnapshot</code> retains only private agent implementation state that cannot be reconstructed from the processor's request and response history.</p></div>
 
 <figure>
 <svg viewBox="0 0 940 240" role="img" aria-label="Four-phase timeline: runtime, prepare, save, restore, with the gates that separate them.">
@@ -316,31 +342,32 @@ tr:last-child td { border-bottom: none; }
 </section>
 <section class="tab" id="tab-rt">
 <h2>Normal rollout execution records restorable state</h2>
-<p>Each component records the state it already owns during normal execution. The actor registers executions, the model server records token custody, generation workers stage tokens, and resources servers retain sessions. Checkpointing does not add per-rollout filesystem writes during this phase. Use the controls below to follow the calls in execution order. When the walkthrough has focus, the left and right arrow keys change steps.</p>
+<p>Each component records the state it already owns during normal execution. The actor registers episodes. The episode processor records the latest completed protocol operation and the handles it still owns. Agent servers retain private session state across <code>/v1/responses</code> activations. The model server records token custody, generation workers stage tokens, and resources servers retain sessions. Checkpointing adds in-memory boundaries and receipts but no per-rollout filesystem writes during this phase.</p>
 <div class="stepper" id="st-rt" tabindex="0"></div>
 </section>
 
 <section class="tab" id="tab-pp">
 <h2>Prepare stops new work and reaches a recoverable boundary</h2>
-<p>The intended NeMo-RL flow first stops new <code>/run</code> dispatch and asks each whitebox agent server to prepare. Active runs finish their current turn and park after committing a boundary. It then pauses policy-model admission and prepares resources state. The Gym routes implement these participant operations; the actor that orders them is still required. If an agent misses the deadline or reports an unsafe parked or completed state, prepare fails. A controller may retire a restart-safe attempt and retry, but Gym does not silently discard it.</p>
+<p>The intended NeMo-RL flow first stops new episode dispatch and asks each episode processor to prepare. Active processors finish their current protocol operation and park after committing a boundary. NeMo-RL then prepares every agent and resources session named by those boundaries and pauses policy-model admission. If a processor misses the deadline, references an uncheckpointable session, or reports an unsafe parked or completed state, prepare fails. A controller may retire a restart-safe attempt and retry, but Gym does not silently discard it.</p>
 <div class="stepper" id="st-pp" tabindex="0"></div>
 </section>
 
 <section class="tab" id="tab-sv">
 <h2>Save publishes only a complete checkpoint</h2>
-<p>The Gym draft accepts one controller-owned directory and writes the frozen model, agent, and resources state into separate namespaces beneath it. Each component publishes a digest-bearing manifest last and remains paused until explicit resume. The remaining controller work must stop its rollout registry and <code>TransferQueue</code> writers, invoke those commits, save the actual queue, validate every artifact, and publish the global checkpoint. The current Gym format uses per-rollout JSON and lineage files; shard packing is a later scalability optimization.</p>
+<p>Gym accepts one controller-owned directory and writes frozen model, agent-session, resources, and episode-processor state into separate namespaces beneath it. Each component publishes a digest-bearing manifest last and remains paused until explicit resume. The controller must stop its rollout registry and <code>TransferQueue</code> writers, invoke those commits, save the queue, validate every artifact, and publish the global checkpoint. The current checkpoint draft implements the first three server participants under the older agent-owned <code>/run</code> boundary; episode orchestration requires the processor and agent-session split described here.</p>
 <div class="stepper" id="st-sv" tabindex="0"></div>
 </section>
 
 <section class="tab" id="tab-rs">
 <h2>Restore verifies each continuation before dispatch</h2>
-<p>Replacement Gym processes restore model lineage, resources sessions, and agent continuations while admission remains closed. The resources process must be fresh, and every participant requires a separate explicit resume. The first resumed policy call carries the verified attempt-N source capture key and parent model-call ID exactly once. That lookup copies the complete staging coordinates for the parent into attempt N+1. Later calls omit the cross-attempt headers and resolve their parent within attempt N+1.</p>
+<p>Replacement Gym processes restore model lineage, resources sessions, and agent sessions while admission remains closed. Episode processor boundaries restore only after those dependencies exist. The resources process must be fresh, and every participant requires a separate explicit resume. The controller verifies each processor boundary against the matching agent session, resources revision, model-call lineage, and restored token inventory. The first resumed policy call carries the verified attempt-N source capture key and parent model-call ID exactly once.</p>
 <div class="stepper" id="st-rs" tabindex="0"></div>
 </section>
 
 <section class="tab" id="tab-e2e">
-<h2>The production-route test joins all Gym participants</h2>
-<p>The top PR, <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2946">Gym #2946</a>, contains <code>tests/unit_tests/test_checkpoint_e2e.py</code>. The test uses the production participant installers and authenticated control routes for one checkpoint and recovery cycle. It supplies a small in-process controller sequence so the test can exercise cross-component behavior without claiming that NeMo-RL orchestration is implemented.</p>
+<h2>The current test proves the pre-processor participant mechanics</h2>
+<p>The top PR, <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2946">Gym #2946</a>, contains <code>tests/unit_tests/test_checkpoint_e2e.py</code>. The test proves fencing, model lineage, agent-owned boundaries, resources snapshots, retirement, restore, and one-shot parent relay. It predates the episode processor ownership split. It remains useful participant-level evidence, but it is not the target end-to-end episode recovery test.</p>
+<div class="callout warn"><b>The replacement test needs a fourth manifest</b>The episode-oriented test must park and commit an episode processor boundary, restore its referenced model, resources, and agent-session state first, then restore the processor and verify that it continues with the next protocol operation. The test must also prove that process-local cleanup callbacks can be lost without losing durable cleanup obligations.</div>
 
 <figure>
 <svg viewBox="0 0 940 300" role="img" aria-label="End-to-end checkpoint test from prepare blockers through attempt N plus one continuation.">
@@ -388,7 +415,7 @@ tr:last-child td { border-bottom: none; }
   <li>The relay headers are consumed once. The next policy call carries no attempt-N parent headers and resolves to the first call recorded within N+1.</li>
 </ol>
 
-<div class="card"><h3>Boundary of this end-to-end test</h3><p>The test simulates controller ordering with direct route calls. It does not implement the NeMo-RL <code>SingleController</code> or <code>NemoGym</code> actor. It records representative staging coordinates in the lineage store, but it does not save, restore, or validate an actual <code>TransferQueue</code> snapshot. Those two integrations remain outside the Gym PR stack.</p></div>
+<div class="card"><h3>Boundary of this end-to-end test</h3><p>The Gym test simulates controller ordering with direct route calls. Separate tests in <a href="https://github.com/NVIDIA-NeMo/RL/pull/4093">NeMo-RL #4093</a> exercise the <code>NemoGym</code> actor against the pinned Gym stack. NeMo-RL separately tests its existing <code>SingleController</code> and native <code>TransferQueue</code> recovery. The missing joined test inserts the actor and Gym manifests into that real controller transaction and validates their model coordinates against the restored token inventory.</p></div>
 </section>
 
 <script>
@@ -470,70 +497,86 @@ function buildStepper(mountId, phaseName, actors, steps) {
 }
 </script>
 <script>
-buildStepper("st-rt", "Runtime", ["SC / pumps","NemoGym actor","Agent server","Resources server","Judge/Sim models","Policy model","Gen worker","TransferQueue"], [
+buildStepper("st-rt", "Runtime", ["SC / pumps","NemoGym actor","Episode processor","Agent server","Resources server","Judge/Sim models","Policy model","Gen worker","TransferQueue"], [
  {id:"R1", f:0, t:1, call:"Dispatch batch (Ray stream)",
   req:"task rows with stamped ids\nrollout_id = {group}_g{i}   _ng_attempt_index = 1",
   resp:"results streamed back as rollouts complete",
   eff:"RL registry: pending -> inflight", fail:"redispatch; nothing exists Gym-side"},
  {id:"R2", f:1, t:1, call:"Register execution BEFORE the concurrency semaphore",
-  req:"registry[(rollout_id, attempt)] = {phase: queued, task, agent_instance: null}",
+  req:"registry[(rollout_id, attempt)] = {phase: queued, task, processor_instance: null}",
   resp:"(local)",
   eff:"liveness-set entry exists before any HTTP", fail:"entry proves the request never started -> fresh dispatch at restore"},
- {id:"R3", f:1, t:2, call:"POST /run",
-  req:"{responses_create_params: {input: seed}, rollout_id, _ng_attempt_index}",
-  resp:"connection held open for the whole rollout",
-  eff:"registry phase: queued -> issued -> running; agent_instance recorded", fail:"redispatch same rollout_id, next attempt"},
- {id:"R4", f:2, t:3, call:"POST /seed_session",
-  req:"session cookie derived from rollout_id; server may allocate a sandbox (metadata-tagged run + rollout)",
-  resp:"{ok}",
-  eff:"in-memory session created", fail:"orphan sandbox reaped by the label janitor"},
- {id:"R5", f:2, t:5, call:"Policy generation request",
+ {id:"R3", f:1, t:2, call:"POST episode processor /run",
+  req:"{episode_id: {rollout_id, attempt}, task: {task_id, task_input}}",
+  resp:"connection held open for the complete episode protocol",
+  eff:"registry phase: queued -> issued -> running; processor instance recorded", fail:"redispatch same rollout_id, next attempt"},
+ {id:"R4", f:2, t:4, call:"Seed resources session",
+  req:"POST /seed_session {episode_id, task_id, task_data}",
+  resp:"{resources_session_id, resources_tools, sandbox_access} + cookies",
+  eff:"processor records the resources handle and cleanup obligation", fail:"processor returns a typed seed failure; remote owner reaps an orphan"},
+ {id:"R5", f:2, t:3, call:"Seed agent session",
+  req:"POST /v1/agent_sessions {episode_id, task_id, resources_access, sandbox_access}",
+  resp:"{agent_session_id} + cookies",
+  eff:"processor records the agent handle; agent retains only private session state", fail:"processor closes the resources session or records cleanup pending"},
+ {id:"R6", f:2, t:3, call:"Invoke agent",
+  req:"POST /ng-rollout/{capture_key}/v1/responses with agent session cookies and one logical activation id",
+  resp:"complete Responses API result",
+  eff:"processor records the completed activation and next protocol operation", fail:"retry only when the agent can deduplicate the activation; otherwise restart"},
+ {id:"R7", f:3, t:6, call:"Policy generation request",
   req:"POST /ng-rollout/{rid}-a1/training-token-capture/v1/responses\nfull conversation; header x-ng-plane: policy",
   resp:"admission ticket created; inflight+1 (atomic AdmissionLimiter)",
   eff:"request remains in flight until custody data is durable", fail:"client retries carrying the same logical request id"},
- {id:"R6", f:5, t:6, call:"Dispatch to generation worker",
+ {id:"R8", f:6, t:7, call:"Dispatch to generation worker",
   req:"POST /v1/chat/completions + ng_capture{rollout, call_id, parent, staging_chain}",
-  resp:"(returns at R8)",
+  resp:"(returns at R10)",
   eff:"none", fail:"retry is idempotent: staging is keyed by call id"},
- {id:"R7", f:6, t:7, call:"Stage token delta, synchronous, pre-ack",
+ {id:"R9", f:7, t:8, call:"Stage token delta, synchronous, pre-ack",
   req:"put_samples key {rollout}/{call}: token/mask/logprob deltas + identity tags",
   resp:"ack required before the generation response is released",
   eff:"staged row in TransferQueue", fail:"orphan row + dangling admission -> masked"},
- {id:"R8", f:6, t:5, call:"Return text + token-free coordinates",
-  req:"(response to R6)",
+ {id:"R10", f:7, t:6, call:"Return text + token-free coordinates",
+  req:"(response to R8)",
   resp:"{staging_key, prev/delta/cum lengths, digests, weight_version, prefix_verified}",
-  eff:"none", fail:"as R6"},
- {id:"R9", f:5, t:5, call:"Custody row, then release",
+  eff:"none", fail:"as R8"},
+ {id:"R11", f:6, t:6, call:"Custody row, then release",
   req:"append token-free custody row (durable); echo x-ng-model-call-id header; inflight-1",
   resp:"token-stripped response to the agent",
   eff:"call k is committed; agent may act on it", fail:"agent never saw the response; the row stands; masked or continued at restore"},
- {id:"R10", f:2, t:3, call:"Tool calls",
+ {id:"R12", f:3, t:4, call:"Tool calls",
   req:"POST /{tool} per call with rollout and attempt headers; successful state creation binds identity; MCP replays signed identity",
   resp:"tool results",
   eff:"HTTP and MCP mutations share one per-session lock and revision path", fail:"unknown POST data routes default to mutation; untracked stateful traffic makes prepare fail safe"},
- {id:"R11", f:3, t:4, call:"Nested environment-plane model call",
+ {id:"R13", f:4, t:5, call:"Nested environment-plane model call",
   req:"simulator or judge request targets an auxiliary model-server instance that remains open during prepare",
   resp:"model output",
   eff:"none for training: environment-plane tokens are never selected", fail:"tool surfaces a typed error, not a fabricated observation"},
- {id:"R12", f:2, t:2, call:"Operation edge",
-  req:"append results; check the park flag before the NEXT operation (no-op during runtime)",
+ {id:"R14", f:2, t:2, call:"Protocol boundary",
+  req:"record completed activation, agent_session_id, resources_session_id, cookies, model-call id, resources revision, and next_operation",
   resp:"(local)",
-  eff:"this edge is where prepare will park the loop", fail:"—"},
- {id:"R13", f:2, t:3, call:"Verify",
+  eff:"this is where prepare can park the episode processor", fail:"a boundary is invalid if a referenced component outcome is not durable"},
+ {id:"R15", f:2, t:3, call:"Close agent session",
+  req:"POST /v1/agent_sessions/close {agent_session_id}",
+  resp:"{agent_observations, resources_cookies}",
+  eff:"processor records close completion before advancing", fail:"idempotent retry or cleanup remains pending"},
+ {id:"R16", f:2, t:4, call:"Verify",
   req:"POST /verify; any judge call targets a separate auxiliary model instance",
   resp:"{reward, verifier metadata}",
   eff:"reward computed", fail:"judge failure -> typed judge_failed outcome, owned by RL policy"},
- {id:"R14", f:1, t:0, call:"Result handoff with acknowledgement",
-  req:"/run returns -> actor streams result to the rollout manager",
+ {id:"R17", f:2, t:4, call:"Close resources session",
+  req:"POST /close_session {resources_session_id}",
+  resp:"{resources_session_id}",
+  eff:"processor marks the final cleanup obligation complete", fail:"idempotent retry from durable cleanup state"},
+ {id:"R18", f:1, t:0, call:"Result handoff with acknowledgement",
+  req:"episode processor /run returns -> actor streams result to the rollout manager",
   resp:"handoff ACK from the rollout manager",
   eff:"registry phase transferred_to_rl, then entry removed; prepare can never acknowledge mid-handoff", fail:"unacked handoff keeps the entry; restore reconciles against the RL registry"},
- {id:"R15", f:0, t:7, call:"Finalization (RL-side)",
+ {id:"R19", f:0, t:8, call:"Finalization (RL-side)",
   req:"finalizer fetches staged rows by manifest keys; verifies digests, lengths, masks, weight versions",
   resp:"publishes exactly N train rows per group, then clears staging keys",
   eff:"canonical training rows", fail:"publish-before-clear makes any torn state re-runnable"}
 ]);
 
-buildStepper("st-pp", "Prepare", ["SingleController","NemoGym actor","Agent server","Relay / runtime","Resources server","Policy model","Judge/Sim models","Gen worker"], [
+buildStepper("st-pp", "Prepare", ["SingleController","NemoGym actor","Episode processor","Agent server","Relay / runtime","Resources server","Policy model","Judge/Sim models","Gen worker"], [
  {id:"P1", f:0, t:0, call:"Fence RL-side work",
   req:"pause rollout and training pumps; stop issuing finalizations; wait for in-flight finalizations",
   resp:"(local)",
@@ -546,43 +589,47 @@ buildStepper("st-pp", "Prepare", ["SingleController","NemoGym actor","Agent serv
   req:"while the same mutex is held: close the actor dispatch gate and snapshot membership of the live-execution registry; then release the mutex before any drain wait",
   resp:"(local)",
   eff:"no new execution can join the checkpoint set; queued-never-issued entries are classified now; progress and abort calls remain available during draining", fail:"—"},
- {id:"P4", f:1, t:2, call:"Prepare whitebox agents",
-  req:"POST /ng-control/v1/agent-checkpoint/prepare {checkpoint_id, deadline_ts} per agent instance",
-  resp:"{state: preparing, running: 0, parked, active} after every tracked run reaches a boundary",
-  eff:"each /run finishes its current turn, commits an AgentBoundaryRecord, and blocks on an in-memory event", fail:"a nonzero running count at the deadline fails prepare; retire restart-safe attempts and retry, or abort"},
- {id:"P5", f:1, t:3, call:"Pause blackbox egress",
+ {id:"P4", f:1, t:2, call:"Prepare episode processors",
+  req:"POST /ng-control/v1/episode-checkpoint/prepare {checkpoint_id, deadline_ts} per processor instance",
+  resp:"{state: preparing, running: 0, parked, active} after every tracked episode reaches a boundary",
+  eff:"each processor finishes its current protocol operation, commits an EpisodeBoundaryRecord, and blocks", fail:"a nonzero running count at the deadline fails prepare; retire restart-safe attempts and retry, or abort"},
+ {id:"P5", f:1, t:3, call:"Prepare private agent sessions",
+  req:"prepare every agent_session_id referenced by a selected processor boundary",
+  resp:"{state: prepared, sessions, restart_only_sessions}",
+  eff:"active /v1/responses calls drain to an activation boundary; private session snapshots freeze", fail:"a referenced session that cannot reach its advertised boundary blocks continuation"},
+ {id:"P6", f:1, t:4, call:"Pause blackbox egress",
   req:"pause_egress {checkpoint_id} per blackbox runtime",
   resp:"{state: paused, local_pending_requests}",
   eff:"relay holds NEW harness requests locally; the harness may keep computing", fail:"re-send; idempotent"},
- {id:"P6", f:1, t:5, call:"Close policy-model admission",
-  req:"POST /ng-control/v1/model-admission/pause {checkpoint_id, deadline_ts} after whitebox agents are parked\nexcluded: judge and simulator instances; generation workers stay available",
+ {id:"P7", f:1, t:6, call:"Close policy-model admission",
+  req:"POST /ng-control/v1/model-admission/pause {checkpoint_id, deadline_ts} after processors and agent activations are parked\nexcluded: judge and simulator instances; generation workers stay available",
   resp:"{state: draining, workers: {acknowledged, expected}, inflight_total, waiters_total}",
   eff:"the service coordinator publishes the closed state to every FastAPI worker; no new top-level operations enter after all workers acknowledge; accepted ones finish", fail:"a missing worker is an error; re-send is idempotent"},
- {id:"P7", f:7, t:5, call:"Accepted generations drain",
-  req:"each finishes the R6-R9 path: stage -> coordinates -> custody row -> release",
+ {id:"P8", f:8, t:6, call:"Accepted generations drain",
+  req:"each finishes the generation path: stage -> coordinates -> custody row -> release",
   resp:"(normal operation)",
-  eff:"each FastAPI worker decrements its local count after custody is durable; the service coordinator's aggregate falls toward zero", fail:"a straggler is handled at P11, never by waiting forever"},
- {id:"P8", f:1, t:4, call:"Prepare resources state",
+  eff:"each FastAPI worker decrements its local count after custody is durable; the service coordinator's aggregate falls toward zero", fail:"a straggler is handled by the deadline policy, never by waiting forever"},
+ {id:"P9", f:1, t:5, call:"Prepare resources state",
   req:"POST /ng-control/v1/resources-checkpoint/prepare {checkpoint_id, deadline_ts}",
   resp:"{state: prepared, sessions}",
   eff:"new mutations are rejected; prepare acquires each per-session lock and exports state after the accepted mutation finishes", fail:"timeout or codec failure aborts this participant prepare; no partial resources manifest is published"},
- {id:"P9", f:2, t:2, call:"Loops park; completions transfer",
-  req:"each loop records its latest completed turn and parks; rollouts already past verify stream results and transfer with handoff ACK",
+ {id:"P10", f:2, t:2, call:"Processors park; completions transfer",
+  req:"each processor records its latest completed protocol operation and parks; completed episodes transfer with handoff ACK",
   resp:"(local)",
-  eff:"per-rollout state: parked | transferred_to_rl", fail:"a loop stuck mid-operation is visible at P10 with the blocking operation named"},
- {id:"P10", f:1, t:5, call:"Observe model drain",
+  eff:"per-rollout state: parked | transferred_to_rl", fail:"a processor stuck mid-operation reports the blocking operation and target participant"},
+ {id:"P11", f:1, t:6, call:"Observe model drain",
   req:"GET /ng-control/v1/model-admission/status {checkpoint_id, wait_state: paused, timeout_s}",
   resp:"{state, inflight_total, waiters_total}; a coordinator deployment also reports worker acknowledgements",
   eff:"the absolute deadline remains enforceable while accepted HTTP generations finish", fail:"a missing worker or deadline expiry fails prepare; it is never treated as zero in flight"},
- {id:"P11", f:1, t:4, call:"Apply the deadline policy",
-  req:"for a restart-safe attempt: retire agent and resources state under the checkpoint fence; abort matching model requests; mark fresh_dispatch",
+ {id:"P12", f:1, t:2, call:"Apply the deadline policy",
+  req:"for a restart-safe attempt: retire processor, agent-session, resources, runtime, and model state under one checkpoint fence; mark fresh_dispatch",
   resp:"{aborted}",
-  eff:"agent outer and parked tasks are cancelled; resources retirement waits for the mutation lock and removes the frozen snapshot; model roots are excluded", fail:"a non-discardable external effect or missing durable result acknowledgement aborts the global checkpoint"},
- {id:"P12", f:1, t:3, call:"Freeze blackbox runtimes",
+  eff:"processor tasks are cancelled; component sessions retire; resources waits for mutation locks; model roots are excluded", fail:"a non-discardable external effect or missing durable result acknowledgement aborts the global checkpoint"},
+ {id:"P13", f:1, t:4, call:"Freeze blackbox runtimes",
   req:"checkpoint_runtime {rollout, attempt, mode: full_runtime_snapshot} once that rollout has no in-flight calls, or at the deadline with the forwarded call marked pending_reissue",
   resp:"RuntimeSnapshotDescriptor {artifact_ref, digest, provider_fingerprint}",
   eff:"harness memory + relay pending/cached state captured", fail:"provider without full-runtime support -> rollout marked restart"},
- {id:"P13", f:1, t:0, call:"Prepared",
+ {id:"P14", f:1, t:0, call:"Prepared",
   req:"(response to P2)",
   resp:"{state: prepared, rollouts: {rid: parked | transferred | snapshot_ready | fresh_dispatch}, restarted_rollouts: [{rid, attempt, stuck_op, age}]}",
   eff:"Gym is paused at restorable points; SC may seal its data plane", fail:"SC aborts -> resume everything, delete temp"}
@@ -602,7 +649,7 @@ buildStepper("st-sv", "Save", ["SingleController","TransferQueue","NemoGym actor
   resp:"(returns at S5)",
   eff:"actor phase prepared -> committing", fail:"idempotent; a repeat verifies and returns the same descriptor"},
  {id:"S4", f:2, t:3, call:"Component commit fan-out",
-  req:"POST /ng-control/v1/{agent|resources|model}-checkpoint/commit {checkpoint_id, checkpoint_dir, deadline_ts}\nmodel server, agent instance, and resources server each publish a namespaced manifest",
+  req:"POST /ng-control/v1/{episode|agent-session|resources|model}-checkpoint/commit {checkpoint_id, checkpoint_dir, deadline_ts}\neach participant publishes a namespaced manifest",
   resp:"{manifest_path, digest, counts}",
   eff:"each component manifest makes its payload set immutable and verifiable", fail:"write failure -> remain paused, report; SC aborts the global checkpoint"},
  {id:"S5", f:2, t:4, call:"Write the actor manifest last",
@@ -624,14 +671,14 @@ buildStepper("st-sv", "Save", ["SingleController","TransferQueue","NemoGym actor
  {id:"S9", f:0, t:6, call:"Validate workers",
   req:"health + policy-version checks against the published anchor",
   resp:"ready",
-  eff:"parked agents will never call an incompatible policy", fail:"retry worker recovery; stay paused"},
+  eff:"parked processors will never release agent sessions against an incompatible policy", fail:"retry worker recovery; stay paused"},
  {id:"S10", f:0, t:2, call:"Resume in dependency order",
   req:"Ray: resume {checkpoint_id}",
   resp:"{state: running}",
-  eff:"ordered reopen: resources admission -> policy model admission -> relays + runtimes -> parked loops -> dispatch; SC reopens pumps + finalizers", fail:"any earlier failure took the abort path: release every control, delete temp"}
+  eff:"ordered reopen: resources -> policy model -> agent sessions and runtimes -> episode processors -> dispatch; SC reopens pumps + finalizers", fail:"any earlier failure took the abort path: release every control, delete temp"}
 ]);
 
-buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen workers","NemoGym actor","Model server","Resources server","Agent server","Runtime / relay"], [
+buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen workers","NemoGym actor","Model server","Resources server","Agent server","Runtime / relay","Episode processor"], [
  {id:"T1", f:0, t:0, call:"Select the checkpoint",
   req:"newest published checkpoint by checkpoint id, never mtime; read training_info.json",
   resp:"(local)",
@@ -664,15 +711,19 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
   req:"per execution: RL-completed beats valid continuation beats fresh dispatch;\nverify every selected chain against restored TransferQueue BEFORE dispatch; write tombstones",
   resp:"(local)",
   eff:"exactly one action per rollout; a chain miss demotes to fresh dispatch here, not as a serving error later", fail:"fail closed to fresh dispatch"},
- {id:"T9", f:3, t:6, call:"Restore agent continuations",
-  req:"POST .../agent restore {checkpoint_id, subdir, attempt_mapping_ref}",
-  resp:"{state: restored_paused, run_count}",
-  eff:"conversation + control fields installed for parked runs", fail:"as T5"},
- {id:"T10", f:0, t:3, call:"Resume in dependency order",
+ {id:"T9", f:3, t:6, call:"Restore private agent sessions",
+  req:"POST .../agent-session restore {checkpoint_id, subdir, attempt_mapping_ref}",
+  resp:"{state: restored_paused, session_count}",
+  eff:"private continuation state, descriptors, observations, and activation receipts install under N+1", fail:"a missing session demotes the referencing processor boundary to fresh dispatch"},
+ {id:"T10", f:3, t:8, call:"Restore episode processor boundaries",
+  req:"POST .../episode restore {checkpoint_id, subdir, attempt_mapping_ref}",
+  resp:"{state: restored_paused, episode_count}",
+  eff:"next operation and cleanup obligations install only after every referenced component session exists", fail:"a mismatched handle, revision, or result digest rejects the continuation"},
+ {id:"T11", f:0, t:3, call:"Resume in dependency order",
   req:"Ray: resume {checkpoint_id} - only after every participant and every worker is ready",
   resp:"{state: running}",
-  eff:"resources -> model admission open; runtimes resumed (pending-reissue calls re-issued as NEW calls); loops re-enter at next_operation; fresh dispatches requeued by RL", fail:"stay paused; retry readiness"},
- {id:"T11", f:6, t:4, call:"First resumed policy call",
+  eff:"resources -> model admission -> agent sessions and runtimes -> episode processors; fresh dispatches requeued by RL", fail:"stay paused; retry readiness"},
+ {id:"T12", f:6, t:4, call:"First resumed policy call",
   req:"the continued conversation plus source capture key and verified attempt-N model-call ID; both relay headers are consumed once",
   resp:"normal generation",
   eff:"the parent row's complete staging coordinates are copied into N+1; later calls parent-link within N+1", fail:"a missing parent or staging row must fail reconciliation before production dispatch"}
@@ -686,20 +737,32 @@ buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen worker
 <div class="tbl"><table>
 <tr><th>Path</th><th>Additional work during normal execution</th><th>Expected effect</th></tr>
 <tr><td>Every internal request</td><td>Read two request-scoped values and attach <code>x-ng-rollout-id</code> plus <code>x-ng-attempt-index</code>. Validate that explicit headers do not conflict with the active context.</td><td>Small fixed CPU and header overhead. No filesystem operation and no extra network round trip.</td></tr>
-<tr><td>Agent <code>/run</code></td><td>Insert one execution object into an in-memory dictionary and update it at completion. After each nonterminal turn, validate and replace one <code>AgentBoundaryRecord</code> containing output items, usage, cookie values, model-call ID, and resource revisions.</td><td>Memory grows with live rollouts and retained conversation state. Boundary construction adds serialization and copying work at turn boundaries, but no normal-path <code>fsync</code>.</td></tr>
+<tr><td>Episode processor <code>/run</code></td><td>Insert one execution object into an in-memory dictionary. After each complete protocol operation, validate and replace one <code>EpisodeBoundaryRecord</code> containing the next operation, open session handles, completed inputs and outputs, cleanup obligations, model-call ID, and resource revision.</td><td>Memory grows with live episodes and retained protocol state. Boundary construction adds serialization and copying at operation boundaries but no normal-path <code>fsync</code>.</td></tr>
+<tr><td>Agent <code>/v1/responses</code></td><td>For a stateful session, update private continuation state and retain one replayable activation receipt. A stateless agent performs no additional checkpoint bookkeeping.</td><td>Cost depends on the agent. The checkpoint contract must not force every Responses API agent to retain a duplicate conversation when the processor already supplies complete input.</td></tr>
 <tr><td>Policy model request</td><td>Parse identity headers, check admission and tombstones, create one in-memory ticket, and remove it after the ASGI response completes. Capture-enabled requests already perform the more expensive token-staging and lineage work required by the token-capture stack.</td><td>Small fixed bookkeeping cost per generation. The limiter does not add a queue or remote coordinator call on the single-worker data path.</td></tr>
-<tr><td>Stateful resources mutation</td><td>Parse identity, acquire an <code>asyncio.Lock</code> for that rollout attempt, increment a revision, and append the revision response header. Successful terminal operations unregister the session.</td><td>This is the largest semantic cost. Mutations for one session become serialized. Different sessions still run concurrently. Environments that already require ordered state changes should not lose useful parallelism.</td></tr>
+<tr><td>Stateful resources mutation</td><td>Parse identity and request ID, acquire an <code>asyncio.Lock</code> for that rollout attempt, buffer and validate the complete response, then atomically advance the revision and retain a replayable receipt before egress. Successful terminal operations unregister the session while preserving bounded receipt evidence.</td><td>This is the largest semantic cost. Mutations for one session become serialized and their responses are buffered. Different sessions still run concurrently. Environments that already require ordered state changes should not lose useful parallelism.</td></tr>
 <tr><td>Server startup</td><td>Install the capabilities route and checkpoint participants. A multi-worker deployment reports <code>unmanaged</code> until the production coordinator lifecycle is wired.</td><td>No per-request cost beyond the middleware described above. Capability negotiation occurs only during startup and restore.</td></tr>
 </table></div>
-<p>Checkpoint-time cost is proportional to live state. Prepare waits for accepted operations, copies agent and resources state into a frozen set, and commit writes that set to disk. The current draft writes one JSON file per agent boundary and resources snapshot and copies per-rollout lineage files before publishing each component manifest. Large live sets may create excessive shared-filesystem metadata traffic. Archive shards and a member index are a later storage optimization; they are not implemented by this PR stack.</p>
-<div class="card"><h3>Cleanup preserves fences while releasing failed work</h3><p>Failed agent executions clear their boundary, continuation, result, and task references before leaving the live map. Resources lock entries are pruned after their final user releases them when no live revision remains. Tombstones remain separate so delayed attempt-N traffic is still rejected. Completed agent results intentionally remain cached because the stack has no durable training-framework acknowledgement route yet; that missing acknowledgement is the remaining ownership boundary.</p></div>
+<p>Checkpoint-time cost is proportional to live state. Prepare waits for accepted processor operations and component activations, copies episode, agent-session, and resources state into frozen sets, and commits those sets to disk. Large live sets may create excessive shared-filesystem metadata traffic. Archive shards and a member index remain a later storage optimization.</p>
+<div class="card"><h3>Cleanup obligations survive processor failure</h3><p><code>EpisodeContext</code> may still use LIFO callbacks during normal execution, but the durable episode boundary records which agent sessions, resources sessions, and runtimes remain open. A replacement processor can therefore finish cleanup after the original process dies. Tombstones remain separate so delayed attempt-N traffic is rejected. Completed episode results remain cached until the receipt-bound acknowledgement validates identity and result digest. <a href="https://github.com/NVIDIA-NeMo/RL/pull/4093">NeMo-RL #4093</a> performs that acknowledgement only after the result crosses the actor boundary.</p></div>
+
+<h3>A generation-safe cut separates request lifetime from durable token custody</h3>
+<p>The restacked Gym drafts implement the active-generation inventory, cut, durable receipt, worker-membership aggregation, response-egress fence, and restore validation contracts described here. Deterministic fake-backend tests cover close-before-egress, started-stream drain, cancellation, worker replacement, receipt mismatch, and multi-worker omission. <a href="https://github.com/NVIDIA-NeMo/Gym/issues/3218">#3218</a> and its inference children track the remaining real vLLM and Megatron cuts plus reconciliation with NeMo-RL's existing checkpointed <code>TransferQueue</code>.</p>
+<div class="tbl"><table>
+<tr><th>Part of the cut</th><th>Meaning at checkpoint time</th><th>Required invariant</th></tr>
+<tr><td>Response lifetime</td><td>The HTTP or engine request remains active until its response is published, cancelled, or fenced. Request liveness is not itself durable token custody.</td><td>The checkpoint records whether the response existed at the cut and prevents the old attempt from publishing after replacement.</td></tr>
+<tr><td>Completed durable custody</td><td>Token segments completed before the cut are already owned by the framework token store and included in the selected durable snapshot.</td><td>Gym lineage names the same immutable segments that the framework validates before global publication.</td></tr>
+<tr><td>Active pre-cut prefix</td><td>For an accepted generation still decoding, the engine atomically detaches the tokens produced before the cut from tokens produced afterward. The detached prefix is staged durably before the checkpoint can publish.</td><td>The cut has one acknowledged token boundary. Post-cut decoding cannot alter or republish the pre-cut segment.</td></tr>
+<tr><td>Prefix delivery after restore</td><td>The restored child generation receives the durable pre-cut prefix through the representation supported by its engine.</td><td>Delivery changes representation, not custody, identity, length, or hash.</td></tr>
+</table></div>
+<p><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3227">#3227</a> proposes staged-prefix cuts for NeMo-RL vLLM generation. A worker with access to <code>TransferQueue</code> receives a staging chain and fetches the prefix itself. <a href="https://github.com/NVIDIA-NeMo/Gym/issues/3228">#3228</a> proposes inline-prefix recovery for Megatron Inference. In that path, NeMo-RL materializes the same durable staging chain and sends the token IDs inline. The staged and inline forms are mutually exclusive delivery mechanisms for one custody record.</p>
 
 <h3>Prefix custody is common, but prefix delivery differs by inference backend</h3>
 <p>Hashes and lineage keys identify and authenticate a token prefix, but they are not an inference prompt. A backend must obtain the actual token IDs before it can prefill the next model call. The vLLM capture path can send a <code>TransferQueue</code> staging chain to a generation worker because that worker can read the referenced rows. The Megatron Inference integration in <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2823">Gym #2823</a> cannot do that today, so its capture handler sends <code>required_prefix_token_ids</code> inline.</p>
 <div class="tbl"><table>
 <tr><th>Backend path</th><th>Current prefix custody and delivery</th><th>Checkpoint consequence</th></tr>
 <tr><td>vLLM worker staging</td><td>The worker stages each completed call in <code>TransferQueue</code>. Gym records a token-free staging chain. A child call sends that chain back to a worker, which fetches and verifies the prefix.</td><td>The restored Gym ledger can continue referring to the restored <code>TransferQueue</code> rows. The worker needs no inline token array from Gym.</td></tr>
-<tr><td>Megatron Inference deferred ledger</td><td>Megatron keeps the finished generation record in its metadata ledger. Gym #2823 records the ledger request UID and also retains cumulative token IDs in its private lineage file so the next child call can receive them inline. <a href="https://github.com/NVIDIA-NeMo/RL/pull/3869">NeMo-RL #3869</a> fetches the finished records and stages them in <code>TransferQueue</code> only after the rollout finishes.</td><td>A rollout-end flush is too late for an in-flight checkpoint. Before a checkpoint can publish, NeMo-RL must detach or fetch the active Megatron prefix, stage it in <code>TransferQueue</code>, and give Gym the resulting durable coordinate.</td></tr>
+<tr><td>Megatron Inference staging</td><td>The merged baseline uses a finished-generation metadata ledger. In-flight <a href="https://github.com/NVIDIA-NeMo/RL/pull/3869">NeMo-RL #3869</a> instead unifies Megatron and vLLM completed-call capture around Gym's <code>CaptureAdmission</code> and stages canonical records through the same <code>TransferQueue</code> sink before Gym records custody.</td><td>That closes completed-call custody but not an active-generation cut. Before an in-flight checkpoint can publish, the engine must still detach the active Megatron prefix, stage it through the established sink, and give Gym the resulting durable coordinate.</td></tr>
 </table></div>
 
 <div class="card"><h3>Make the delivery representation explicit</h3>
@@ -720,7 +783,7 @@ StagedPrefix:
 <p>Persisting cumulative token arrays and a staging chain for the same prefix creates two possible sources of truth. The forms can disagree, and repeatedly storing the cumulative array makes storage grow quadratically across a long multi-turn rollout. The durable ledger should record one authoritative custody location. Prefix delivery can then adapt that location to the backend: vLLM dereferences a staged chain itself, while an RL-side prefix materializer can fetch the same chain and send inline tokens to Megatron Inference.</p></div>
 
 <div class="card"><h3>Megatron checkpoint recovery needs more than the schema change</h3>
-<p>The explicit prefix union is a localized wire-contract cleanup. Continuing an unfinished Megatron generation is a larger cross-repository change. Megatron Inference needs a cut operation for an active request rather than only a finished-request ledger record. NeMo-RL must stage that cut in <code>TransferQueue</code> before the global checkpoint is published. During restore, either Megatron gains a <code>TransferQueue</code> prefix source or NeMo-RL materializes the staged prefix and sends it inline before prefill. The current rollout-end <code>flush_token_capture()</code> path does not provide this checkpoint-time behavior.</p></div>
+<p>The explicit prefix union is a localized wire-contract cleanup. Continuing an unfinished Megatron generation is a larger cross-repository change. Megatron Inference needs a cut operation for an active request rather than only completed-call capture. <a href="https://github.com/NVIDIA-NeMo/RL/pull/3869">NeMo-RL #3869</a> puts completed Megatron and vLLM calls on the same durable staging path, which the active cut should reuse. During restore, either Megatron gains a <code>TransferQueue</code> prefix source or NeMo-RL materializes the staged prefix and sends it inline before prefill.</p></div>
 
 <h3>Failure handling is fail-closed</h3>
 <div class="tbl"><table>
@@ -741,7 +804,7 @@ StagedPrefix:
 <tr><td>Wait for every rollout to finish</td><td>The checkpoint contains only terminal results, so no continuation state is needed.</td><td>Checkpoint latency becomes the tail latency of the longest rollout. A hung tool or blackbox harness can block checkpoint publication indefinitely, which defeats periodic fault recovery.</td></tr>
 <tr><td>Replay the conversation and tool log</td><td>An append-only event log can be easier to inspect than snapshots.</td><td>Replay is correct only when every effect is deterministic and idempotent. Judges, simulators, external APIs, clocks, random number generators, sandboxes, and failed requests can produce different state or duplicate effects. Replay is useful only for environments that explicitly prove those properties.</td></tr>
 <tr><td>Move all live state into NeMo-RL or one database</td><td>A central service can take one database snapshot and expose one recovery API.</td><td>It puts remote writes and a shared availability dependency on every agent turn and tool mutation. It also forces the controller to understand every agent, environment, and sandbox schema. Component ownership is lost, and the central schema becomes a bottleneck for new environments.</td></tr>
-<tr><td>Pull snapshots from each server without pausing admission</td><td>No admission gates or drain protocol.</td><td>The resulting files can describe different cuts. An agent boundary may reference a resource mutation or model call that committed after another component was copied. Digests prove file integrity, not cross-component consistency.</td></tr>
+<tr><td>Pull snapshots from each server without pausing admission</td><td>No admission gates or drain protocol.</td><td>The resulting files can describe different cuts. A processor boundary may reference an agent activation, resource mutation, or model call that committed after another component was copied. Digests prove file integrity, not cross-component consistency.</td></tr>
 <tr><td>Snapshot the whole process or container</td><td>Opaque agent memory and native library state can be preserved without application codecs.</td><td>Process snapshots are provider- and kernel-specific and do not automatically make external HTTP calls, <code>TransferQueue</code> writes, sockets, or remote sandboxes consistent. This remains the likely extension for blackbox agents, paired with an egress relay and the same outer admission protocol.</td></tr>
 </table></div>
 
@@ -750,42 +813,43 @@ StagedPrefix:
 
 <h3>Assumptions the controller must enforce</h3>
 <ul>
-  <li><b>Cross-component validation is an RL responsibility.</b> Gym records <code>last_committed_model_call_id</code>, complete model staging coordinates, and <code>resource_state_revisions</code>, but it does not join them to a durable <code>TransferQueue</code> snapshot or choose the final recovery disposition.</li>
+  <li><b>Cross-component validation is an RL responsibility.</b> The episode processor records <code>last_committed_model_call_id</code>, expected resources revisions, agent-session identity, and protocol position. Component manifests provide the corresponding model staging coordinates and private session state. Gym does not join them to a durable <code>TransferQueue</code> snapshot or choose the final recovery disposition.</li>
   <li><b>The global commit marker is outside Gym.</b> One Gym component can commit before another fails. The <code>SingleController</code> must select a checkpoint only after every required participant manifest validates.</li>
   <li><b>Deadlines use synchronized wall clocks.</b> Every request carries one absolute <code>deadline_ts</code>. Excessive clock skew can shorten or extend a participant's effective budget.</li>
   <li><b>Only bounded waits enforce the deadline in the current stack.</b> Prepare and model-drain paths consult <code>deadline_ts</code>. Component commit, restore, and resume still need explicit checks around potentially long filesystem or backend operations.</li>
   <li><b>Checkpoint paths identify the same storage namespace.</b> Server processes must see the controller-provided directory consistently. A remote or differently mounted worker cannot interpret a process-local path.</li>
   <li><b>An unsuccessful mutation must not hide a committed effect.</b> The resources middleware increments revisions only for successful HTTP responses. An environment that mutates state and then returns an error needs rollback or an explicit outcome record before it can claim continuation support.</li>
   <li><b>Atomic resources activation is an environment callback contract.</b> The shared participant passes the complete replacement set to <code>restore_checkpoint_states</code>. Each adapter must validate everything before replacing live maps; the framework cannot make a sequence of arbitrary environment mutations atomic on its own.</li>
-  <li><b>Completed results need a shared acknowledgement contract.</b> The agent participant retains and reports completed-but-unacknowledged results, and retirement refuses to stand in for acknowledgement. NeMo-RL must durably accept the result before Gym can remove it from the recoverable live set. Resources tombstone cleanup depends on the same shared ownership decision.</li>
-  <li><b>Capability discovery is necessary but not sufficient.</b> A custom whitebox agent must actually call <code>commit_boundary</code>; inheriting checkpoint routes without emitting boundaries does not make it resumable.</li>
+  <li><b>Completed results need a shared acknowledgement contract.</b> The episode processor retains and reports completed-but-unacknowledged results, and retirement refuses to stand in for acknowledgement. NeMo-RL must durably accept the result before Gym can remove it from the recoverable live set. Component-session tombstone cleanup depends on the same ownership decision.</li>
+  <li><b>Capability discovery is necessary but not sufficient.</b> A processor must commit a boundary after complete protocol operations, and each referenced stateful agent or resources session must implement its advertised snapshot contract. Inheriting checkpoint routes does not make a protocol resumable.</li>
 </ul>
 </section>
 <section class="tab" id="tab-api">
 <h2>APIs required to coordinate the checkpoint</h2>
-<p>The checkpoint API is delivered in four additive milestones. Each milestone produces a useful recovery guarantee and becomes the foundation for the next one. <span class="pill exists">Exists</span> means the behavior is on the main branch. <span class="pill pr">PR</span> means the <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2946">Gym checkpoint stack ending at #2946</a> contains the behavior. <span class="pill new">New</span> means it still needs to be built.</p>
-<p>The <code>SingleController</code> calls the <code>NemoGym</code> actor. The actor calls Gym control endpoints, and agents call resources servers. This boundary keeps checkpoint coordination out of individual rollout implementations.</p>
-<div class="card"><h3>Scope of the current Gym stack</h3><p>PRs <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2939">#2939</a> through <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2946">#2946</a> implement stable execution identity, shared fenced control contracts, single-worker policy-model admission, the multi-worker coordinator protocol and test harness, namespaced model-ledger commit and restore, whitebox agent boundaries, resources snapshots, the Gymnasium base and initial stateful adapters, and the production-route end-to-end test in #2946. The experimental checkpoint modules are grouped under <code>nemo_gym._checkpoint</code>; no public Python import contract is claimed. Companion NeMo-RL orchestration and actual <code>TransferQueue</code> checkpoint durability are intentionally outside this stack. Production launcher wiring for the multi-worker coordinator and blackbox runtime snapshots are also outside it.</p></div>
+<p>The checkpoint API is delivered in four additive milestones. Each milestone produces a useful recovery guarantee and becomes the foundation for the next one. <span class="pill exists">Exists</span> means the behavior is on the main branch. <span class="pill pr">PR</span> means the <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2946">Gym checkpoint stack ending at #2946</a> or its linked NeMo-RL drafts contains the behavior. <span class="pill new">New</span> means it still needs to be built.</p>
+<p>The <code>SingleController</code> calls the <code>NemoGym</code> actor. The actor calls Gym control endpoints. Episode processors call resources and agent session endpoints, and agents call model and tool endpoints while servicing <code>/v1/responses</code>. This keeps global checkpoint coordination out of protocol implementations while preserving component-owned state.</p>
+<div class="card"><h3>Scope of the current Gym stack</h3><p>PRs <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2939">#2939</a> through <a href="https://github.com/NVIDIA-NeMo/Gym/pull/2946">#2946</a> implement stable execution identity, response-egress and stale-attempt fences, exact worker-membership cuts, typed durable generation receipts, namespaced model-ledger commit and restore, receipt-bound agent completion acknowledgement, pending-model and turn-complete boundaries, exact-once resources mutation receipts, resources snapshots, initial stateful adapters, and the production-route end-to-end test in #2946. The experimental checkpoint modules are grouped under <code>nemo_gym._checkpoint</code>; no public Python import contract is claimed. NeMo-RL actor orchestration is in <a href="https://github.com/NVIDIA-NeMo/RL/pull/4093">#4093</a>. NeMo-RL already has native <code>TransferQueue</code> checkpointing and periodic rollout snapshots; adding Gym to that transaction, real inference-backend cuts, production multi-worker launcher wiring, and blackbox runtime snapshots remain outside these drafts.</p></div>
 
 <h3>Milestone 1 — Preserve captured tokens for stateless rollouts</h3>
-<p>This milestone supports direct-answer or otherwise restartable rollouts whose resources server and verifier retain no session state. It preserves exact token rows and their model-call lineage after they reach durable custody. It does not resume inside an unfinished generation and it does not serialize an agent loop. A rollout that has not returned its result to NeMo-RL at the checkpoint boundary starts again from its original input after restore.</p>
+<p>This milestone supports direct-answer or otherwise restartable rollouts whose resources server and verifier retain no session state. It preserves exact token rows and their model-call lineage after they reach durable custody. It does not resume an episode processor, private agent session, or unfinished generation. A rollout that has not returned its result to NeMo-RL at the checkpoint boundary starts again from its original input after restore.</p>
 <div class="tbl"><table>
 <tr><th>Owner</th><th>Required API or mechanism</th><th>Checkpoint behavior</th></tr>
 <tr><td>Gym identity and routing</td><td>Propagate <code>rollout_id</code>, <code>_ng_attempt_index</code>, and model-call IDs independently of observability settings. Reject stale attempts and preserve tombstones for abandoned call roots.</td><td>Every staged token row, custody record, result, and retry joins to one logical execution.</td></tr>
-<tr><td>NeMo-RL <code>NemoGym</code> actor</td><td>Live-execution registry; result-handoff acknowledgement; <code>prepare_checkpoint</code>, <code>commit_checkpoint</code>, <code>abort_checkpoint</code>, <code>restore_checkpoint</code>, <code>resume</code>, and <code>checkpoint_progress</code>.</td><td>Prepare freezes dispatch membership. Completed results transfer to NeMo-RL. Every remaining execution is recorded as <code>fresh_dispatch</code>; no agent continuation is claimed.</td></tr>
+<tr><td>NeMo-RL <code>NemoGym</code> actor</td><td>Live-execution registry; result-handoff acknowledgement; <code>prepare_checkpoint</code>, <code>commit_checkpoint</code>, <code>abort_checkpoint</code>, <code>restore_checkpoint</code>, <code>resume</code>, and <code>checkpoint_status</code>.</td><td>Prepare freezes dispatch membership and coordinates capability-selected participants. Completed results transfer to NeMo-RL only after exact receipt acknowledgement. The actor records and validates participant manifests but does not yet choose rollout dispositions inside <code>SingleController</code>.</td></tr>
 <tr><td>Gym policy model server</td><td>Service-wide <code>pause</code>, <code>status</code>, and <code>resume</code>; multi-worker acknowledgement and in-flight aggregation; capture-ledger <code>commit</code> and <code>restore</code>; call-ID echo.</td><td>New policy calls stop. Accepted calls finish staging exact token deltas into <code>TransferQueue</code> and recording token-free custody before the model ledger is sealed.</td></tr>
-<tr><td>NeMo-RL data plane</td><td>Content-addressed <code>TransferQueue</code> checkpoint and restore; finalizer quiescence; capture-manifest reconciliation after restore.</td><td>Restored custody records refer to the exact restored staging rows. Completed groups remain trainable. Orphan rows from abandoned attempts remain masked and are removed by normal cleanup.</td></tr>
+<tr><td>NeMo-RL data plane</td><td>Existing native <code>TransferQueue</code> checkpoint and restore, finalizer quiescence, and rollout-recovery inventory are reused. The new work is Gym-manifest reconciliation after restore.</td><td>Restored Gym custody records must refer to exact rows in the already-restored data-plane inventory. Completed groups remain trainable. Orphan rows from abandoned attempts remain masked and are removed by normal cleanup.</td></tr>
 <tr><td>Stateless resources server and verifier</td><td>Declare <code>checkpoint_mode: stateless</code>. No state export, restore, or resources-admission API is required in this milestone.</td><td>An unfinished verifier invocation may be discarded and run again as part of the fresh rollout attempt. This milestone therefore excludes verifiers whose result must not be recomputed.</td></tr>
 </table></div>
-<div class="callout warn"><b>Milestone 1 is not multi-turn continuation</b>It makes token capture and completed training data checkpoint-safe. It does not reconstruct conversation state from token rows, resume an agent loop, or continue a partially generated response.</div>
+<div class="callout warn"><b>Milestone 1 is not multi-turn continuation</b>It makes token capture and completed training data checkpoint-safe. It does not restore processor protocol state, private agent state, or a partially generated response.</div>
 
-<h3>Milestone 2 — Resume a Gym-native whitebox agent at an operation boundary</h3>
-<p>This milestone adds continuation for a whitebox agent loop implemented inside Gym. Resources servers and verifiers remain stateless. The agent can therefore resume between model, tool, and verification operations without requiring an environment snapshot.</p>
+<h3>Milestone 2 — Resume an episode processor at a protocol boundary</h3>
+<p>This milestone adds continuation for a whitebox episode protocol implemented inside Gym. Resources servers remain stateless in this milestone. The processor can therefore resume between resources seed, agent seed, agent activation, agent close, verification, resources close, and result return without requiring an environment snapshot.</p>
 <div class="tbl"><table>
 <tr><th>Owner</th><th>Additional API or mechanism</th><th>Checkpoint behavior</th></tr>
-<tr><td>Gym agent-server base</td><td><code>prepare</code>, checkpoint <code>status</code>, <code>commit</code> and <code>restore</code>, <code>resume</code>, and <code>retire</code>; one active <code>/run</code> per rollout attempt.</td><td>Prepare succeeds only when every tracked run is parked with a committed boundary. Running work, a park without a boundary, or a completed result awaiting durable acknowledgement blocks publication.</td></tr>
-<tr><td>Whitebox agent implementation</td><td>Commit a versioned <code>AgentBoundaryRecord</code> after each complete nonterminal turn.</td><td>The checkpoint records conversation output, usage, cookies, model-call lineage, resource revisions, and agent-specific state. Restore creates a new attempt and continues after that boundary.</td></tr>
-<tr><td>Checkpoint reconciliation</td><td>Join the agent boundary's last committed model-call ID to the restored model custody chain and <code>TransferQueue</code> rows.</td><td>A missing or mismatched token row downgrades only that rollout to <code>fresh_dispatch</code>; it never produces a continuation with incomplete training data.</td></tr>
+<tr><td>Episode-processor base</td><td><code>prepare</code>, checkpoint <code>status</code>, <code>commit</code> and <code>restore</code>, <code>resume</code>, and <code>retire</code>; one active <code>/run</code> per episode attempt.</td><td>Prepare succeeds only when every tracked processor is parked with a committed <code>EpisodeBoundaryRecord</code>. Running work, a park without a boundary, or a completed result awaiting durable acknowledgement blocks publication.</td></tr>
+<tr><td>Episode protocol implementation</td><td>Commit a typed boundary after each complete protocol operation. Record the next operation, open participant handles, completed inputs and outputs, cleanup obligations, and cross-component join fields.</td><td>Restore creates attempt N+1, reconnects dependencies, and continues with the next operation without repeating a completed seed, activation, verification, or close.</td></tr>
+<tr><td>Agent-session participant</td><td>Export and restore only private state behind <code>agent_session_id</code>: native continuation state, dependency descriptors, untransferred observations, and activation deduplication receipts.</td><td>A stateless agent may have no payload. A stateful agent restores before the processor and rejects calls from attempt N.</td></tr>
+<tr><td>Checkpoint reconciliation</td><td>Join the processor boundary's last model-call ID, resources revision, and agent activation to restored model, resources, agent-session, and <code>TransferQueue</code> records.</td><td>A missing or mismatched dependency downgrades only that rollout to <code>fresh_dispatch</code>; it never produces a continuation from an incomplete combination.</td></tr>
 </table></div>
 
 <h3>Milestone 3 — Resume a whitebox agent with stateful resources</h3>
@@ -793,7 +857,7 @@ StagedPrefix:
 <div class="tbl"><table>
 <tr><th>Owner</th><th>Additional API or mechanism</th><th>Checkpoint behavior</th></tr>
 <tr><td>Gym resources-server base</td><td>Checkpoint <code>prepare</code>, <code>commit</code>, <code>restore</code>, and <code>resume</code>; session registry keyed by <code>(rollout_id, attempt)</code>; per-session mutation lock; stale-attempt rejection.</td><td>No new mutation starts after prepare closes admission. Prepare waits for accepted mutations by acquiring each session lock, then exports the sessions that the process owns.</td></tr>
-<tr><td>Stateful environment implementation</td><td>Explicit <code>checkpoint_state_enabled</code> opt-in plus versioned <code>export_checkpoint_state</code>, <code>restore_checkpoint_states</code>, and <code>retire_checkpoint_state</code> hooks.</td><td>Restore validates and installs the complete logical state set under replacement attempts before any agent continuation becomes runnable.</td></tr>
+<tr><td>Stateful environment implementation</td><td>Explicit <code>checkpoint_state_enabled</code> opt-in plus versioned <code>export_checkpoint_state</code>, <code>restore_checkpoint_states</code>, and <code>retire_checkpoint_state</code> hooks.</td><td>Restore validates and installs the complete logical state set under replacement attempts before any episode processor continuation becomes runnable.</td></tr>
 <tr><td>Nested model calls</td><td>Resources operations call dedicated auxiliary judge or simulator model instances rather than the paused policy instance.</td><td>An accepted operation may finish its nested calls while policy-model admission is closed. The first implementation does not define admission leases.</td></tr>
 <tr><td>Deadline handling</td><td><code>deadline_policy: restart_safe_rollouts</code> plus a component capability declaring whether partial state can be discarded safely.</td><td>A restart-safe session is fenced and discarded when its operation misses the deadline. Non-transactional external effects or shared mutable state abort the global checkpoint.</td></tr>
 </table></div>
@@ -804,7 +868,7 @@ StagedPrefix:
 <tr><th>Owner</th><th>Additional API or mechanism</th><th>Checkpoint behavior</th></tr>
 <tr><td>Runtime provider</td><td>Capability negotiation for <code>full_runtime_snapshot</code>; freeze, checkpoint, restore-paused, resume, detach, and destroy; provider compatibility fingerprint.</td><td>The snapshot includes the harness process tree and memory. Filesystem-only snapshots remain <code>restart_only</code>.</td></tr>
 <tr><td>Checkpoint-aware egress relay</td><td>Pause and resume forwarding; capture pending requests and cached responses; remap endpoints and attempt identity after restore.</td><td>No request can escape the snapshotted runtime without appearing in relay state. An unfinished forwarded call is tombstoned and reissued under the replacement attempt.</td></tr>
-<tr><td>Blackbox-capable agent server</td><td>Associate each <code>/run</code> with its runtime and relay descriptors; coordinate runtime freeze only after external calls drain or are classified for reissue.</td><td>Restore reconnects the runtime, relay, model lineage, resources state, and new attempt before execution resumes.</td></tr>
+<tr><td>Blackbox-capable agent session</td><td>Associate the agent session with its runtime and relay descriptors; coordinate runtime freeze only after external calls drain or are classified for reissue.</td><td>Restore reconnects the runtime, relay, model lineage, resources state, and agent session before the episode processor resumes.</td></tr>
 </table></div>
 
 <h3>Detailed component contracts</h3>
@@ -813,20 +877,20 @@ StagedPrefix:
 <h3>NeMo-RL NemoGym actor (Ray methods)</h3>
 <div class="tbl"><table>
 <tr><th>API</th><th>Request → response</th><th>Phase</th><th>Status</th></tr>
-<tr><td><code>prepare_checkpoint</code></td><td><code>{checkpoint_id, deadline, deadline_policy: restart_safe_rollouts}</code> → <code>{state, rollouts{rid: disposition}, restarted_rollouts[]}</code>. The default restarts only rollouts whose partial state can be discarded completely; an unsafe unfinished operation aborts the checkpoint.</td><td>P2–P13</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>commit_checkpoint</code></td><td><code>{checkpoint_id, checkpoint_dir}</code> → <code>{state: committed_paused}</code></td><td>S3–S5</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>abort_checkpoint</code></td><td><code>{checkpoint_id, reason}</code> → resume all controls, delete temp</td><td>any pre-publish failure</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>restore_checkpoint</code></td><td><code>{checkpoint_dir}</code> → <code>{phase: restored_paused, per-component states}</code></td><td>T4–T9</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>resume</code></td><td><code>{checkpoint_id}</code> → <code>{state: running}</code>; reopens components in dependency order</td><td>S10 / T10</td><td><span class="pill new">new</span></td></tr>
-<tr><td><code>checkpoint_progress</code></td><td><code>{checkpoint_id}</code> → phase + per-component status, so long commits stay observable and no Ray call blocks unbounded</td><td>any</td><td><span class="pill new">new</span></td></tr>
-<tr><td>internal machinery</td><td>live-execution registry (phase field <code>queued→issued→running→parked|transferred</code>, registered <em>before</em> the semaphore); result-handoff ACK; participant server registry from resolved config with stable instance ids and roles; archive writer</td><td>runtime + all</td><td><span class="pill new">new</span></td></tr>
+<tr><td><code>prepare_checkpoint</code></td><td><code>{checkpoint_id, deadline_ts}</code> → prepared participant results while actor dispatch remains frozen; yielded but unacknowledged results block prepare.</td><td>P2–P13</td><td><span class="pill pr">RL #4093</span></td></tr>
+<tr><td><code>commit_checkpoint</code></td><td><code>{checkpoint_id, checkpoint_dir}</code> → <code>{phase: committed_paused, manifest_path, participant_results}</code></td><td>S3–S5</td><td><span class="pill pr">RL #4093</span></td></tr>
+<tr><td><code>abort_checkpoint</code></td><td><code>{checkpoint_id}</code> → resume reached participants and reopen actor dispatch</td><td>any pre-publish failure</td><td><span class="pill pr">RL #4093</span></td></tr>
+<tr><td><code>restore_checkpoint</code></td><td><code>{checkpoint_id, checkpoint_dir}</code> → <code>{phase: restored_paused, participant_results}</code></td><td>T4–T9</td><td><span class="pill pr">RL #4093</span></td></tr>
+<tr><td><code>resume</code></td><td><code>{checkpoint_id}</code> → <code>{phase: idle}</code>; reopens dependencies, agents, then actor dispatch</td><td>S10 / T10</td><td><span class="pill pr">RL #4093</span></td></tr>
+<tr><td><code>checkpoint_status</code></td><td><code>{checkpoint_id}</code> → actor phase, bounded participant results, manifest path, and registry counts</td><td>any</td><td><span class="pill pr">RL #4093</span></td></tr>
+<tr><td>internal machinery</td><td>stable logical identity from <a href="https://github.com/NVIDIA-NeMo/RL/pull/4092">RL #4092</a>; atomic live-execution registry; exact completion-receipt lookup and acknowledgement; capability-driven participant discovery; deadline-bounded transport; aggregate manifest integrity</td><td>runtime + all</td><td><span class="pill pr">RL #4093</span></td></tr>
 </table></div>
 
 <h3>Shared Gym server infrastructure (every server)</h3>
 <div class="tbl"><table>
 <tr><th>API / mechanism</th><th>Contract</th><th>Status</th></tr>
 <tr><td><code>GET /ng-control/v1/capabilities</code></td><td>component kind, admission states, checkpoint mode, schema version, concurrency contract, multi-process mode, active checkpoint ID, and current phase</td><td><span class="pill pr">PR #2940</span></td></tr>
-<tr><td><code>AdmissionLimiter</code></td><td>changes atomically between accepting, draining, and paused; rejects new policy requests with <code>409 checkpoint_parked</code>; counts accepted requests until their ASGI response finishes; fences stale attempts</td><td><span class="pill pr">PR #2940</span></td></tr>
+<tr><td><code>AdmissionLimiter</code></td><td>changes atomically between accepting, draining, and paused; rejects new policy requests with <code>409 checkpoint_parked</code>; tracks response lifetime separately from durable generation readiness; fences pre-cut response egress, cancellation, and stale attempts</td><td><span class="pill pr">PR #2940</span></td></tr>
 <tr><td>control fencing</td><td>every mutating control route carries <code>checkpoint_id</code> and an absolute deadline; successful calls are idempotent by operation; stale and concurrent checkpoint IDs are rejected; bearer-authenticated routes remain reachable while data admission is paused</td><td><span class="pill pr">PR #2940</span></td></tr>
 <tr><td>multi-process aggregation</td><td>the coordinator protocol and real two-worker test exist; production startup does not yet launch or route the coordinator, so <code>num_workers &gt; 1</code> reports <code>unmanaged</code></td><td><span class="pill pr">protocol</span> <span class="pill new">launcher wiring</span></td></tr>
 <tr><td>checkpoint writer</td><td>writes payloads through temporary names, <code>fsync</code>, and rename, then publishes a digest-bearing manifest last; the prototype uses per-rollout files</td><td><span class="pill pr">PRs #2941, #2942, #2945</span></td></tr>
@@ -840,23 +904,33 @@ StagedPrefix:
 <tr><td><code>GET …/model-admission/status</code></td><td>optional bounded long-poll → <code>{state, inflight_total, waiters_total}</code>; coordinator mode additionally reports per-worker state</td><td><span class="pill pr">PR #2941</span></td></tr>
 <tr><td><code>POST …/model-admission/resume</code></td><td><code>{checkpoint_id, deadline_ts}</code> → accepting; valid after prepare, commit, or restore remains paused</td><td><span class="pill pr">PR #2941</span></td></tr>
 <tr><td><code>POST …/model-admission/abort_inflight</code></td><td>cancels matching ASGI tasks and tombstones <code>(rollout_id, attempt_index)</code>; the request remains counted until cancellation unwinds</td><td><span class="pill pr">PR #2941</span></td></tr>
-<tr><td><code>POST …/model-checkpoint/commit</code> / <code>restore</code></td><td>export and install the token-free custody ledger under <code>model-ledger/&lt;server_name&gt;</code>; typed results carry the manifest digest, tombstones, and source attempts. A commit retry must present the same exclusions and source-attempt set. A failed restore remains observable and paused.</td><td><span class="pill pr">PR #2941</span></td></tr>
+<tr><td><code>POST …/model-checkpoint/commit</code> / <code>restore</code></td><td>export and install the token-free custody ledger under <code>model-ledger/&lt;server_name&gt;</code>; typed results carry the manifest digest, tombstones, source attempts, and durable single-worker or aggregate generation-cut receipt. A commit retry must present the same exclusions, source-attempt set, and frozen worker proof. A failed restore remains observable and paused.</td><td><span class="pill pr">PR #2941</span></td></tr>
 <tr><td>call-id echo</td><td><code>x-ng-model-call-id</code> response header on capture routes — the boundary join key</td><td><span class="pill pr">PR #2941</span></td></tr>
 <tr><td>capture middleware + custody ledger</td><td>call-id minting, token-free custody rows, rollout manifests, terminal attribution</td><td><span class="pill exists">exists</span> <span class="pill pr">PR</span></td></tr>
 <tr><td>backend-specific prefix delivery</td><td><code>CaptureAdmission</code> carries exactly one of an inline token prefix or a staged <code>TransferQueue</code> chain. Backend handlers declare which form they accept and reject an unsupported or ambiguous child-call prefix.</td><td><span class="pill new">contract cleanup</span></td></tr>
 <tr><td>Megatron prefix materialization</td><td>At checkpoint time, detach or fetch each active Megatron prefix, stage it in <code>TransferQueue</code>, and record the durable coordinate in Gym. On restore, materialize that coordinate into inline token IDs unless Megatron gains direct staged-prefix support.</td><td><span class="pill new">Gym + RL + MInf</span></td></tr>
 </table></div>
 
-<h3>Gym agent server</h3>
+<h3>Gym episode processor</h3>
 <div class="tbl"><table>
 <tr><th>API</th><th>Contract</th><th>Status</th></tr>
-<tr><td><code>POST …/agent-checkpoint/prepare</code></td><td><code>{checkpoint_id, deadline_ts}</code>; closes new <code>/run</code> admission and reports running, parked-with-boundary, parked-without-boundary, and completed-unacknowledged executions. The latter two states block publication.</td><td><span class="pill pr">PR #2942</span></td></tr>
-<tr><td><code>POST …/agent-checkpoint/commit</code> / <code>restore</code></td><td>commit writes only safe parked boundaries under <code>agent/instance-&lt;name-hash&gt;</code>; restore registers each source boundary as the continuation for <code>attempt_index + 1</code> and tombstones the source attempt</td><td><span class="pill pr">PR #2942</span></td></tr>
-<tr><td><code>POST …/agent-checkpoint/resume</code> / <code>retire</code></td><td>resume releases parked tasks and reopens <code>/run</code> admission; retire cancels the outer <code>/run</code> and active inner park task. It refuses a completed result because retirement is not durable acknowledgement.</td><td><span class="pill pr">PR #2942</span></td></tr>
-<tr><td>failed execution cleanup</td><td>a failed or non-parked cancelled execution is tombstoned and removed after its cached boundary, continuation, result, and task references are released</td><td><span class="pill pr">PR #2942</span></td></tr>
-<tr><td>loop contract</td><td>one active <code>/run</code> per rollout attempt; each supported agent calls <code>commit_boundary</code> after a complete nonterminal turn; the participant blocks there when prepare requested parking</td><td><span class="pill pr">PRs #2943 and #2944</span></td></tr>
-<tr><td><code>AgentBoundaryRecord</code></td><td>versioned output items, usage, last committed model-call ID, resources revisions, and agent-specific serializable state</td><td><span class="pill pr">PR #2942</span></td></tr>
-<tr><td>blackbox orchestration</td><td><code>pause_egress</code>, <code>checkpoint_runtime</code>, <code>restore_runtime</code>, <code>resume_egress</code> with endpoint remap + attempt rewrite</td><td><span class="pill new">new</span></td></tr>
+<tr><td><code>POST …/episode-checkpoint/prepare</code></td><td><code>{checkpoint_id, deadline_ts}</code>; closes new episode <code>/run</code> admission and reports running, parked-with-boundary, parked-without-boundary, and completed-unacknowledged episodes. The latter two states block publication.</td><td><span class="pill new">adapt PR #2942</span></td></tr>
+<tr><td><code>POST …/episode-checkpoint/commit</code> / <code>restore</code></td><td>commit writes only safe parked boundaries under <code>episode/instance-&lt;name-hash&gt;</code>; restore registers each source boundary for attempt N+1 after its component sessions restore and tombstones attempt N</td><td><span class="pill new">adapt PR #2942</span></td></tr>
+<tr><td><code>POST …/episode-checkpoint/resume</code> / <code>retire</code></td><td>resume releases parked processors and reopens episode dispatch; retire cancels the processor task and retires every open participant handle recorded by its boundary. It refuses a completed result because retirement is not durable acknowledgement.</td><td><span class="pill new">adapt PR #2942</span></td></tr>
+<tr><td><code>POST …/episode-checkpoint/acknowledge</code></td><td>validates episode ID, attempt, execution generation, result identity, and result digest before releasing a completed result; duplicate exact acknowledgements are idempotent</td><td><span class="pill new">adapt PR #2942 + RL #4093</span></td></tr>
+<tr><td>processor contract</td><td>one active <code>/run</code> per episode attempt; commit a boundary after each complete protocol operation; never rely on process-local <code>EpisodeContext</code> cleanup callbacks as the only record of open sessions</td><td><span class="pill new">episode stack integration</span></td></tr>
+<tr><td><code>EpisodeBoundaryRecord</code></td><td>versioned task and episode identity, next operation, invocation index, open participant handles, cookies and descriptors, completed operation results, cleanup obligations, last model-call ID, and expected resources revision</td><td><span class="pill new">new</span></td></tr>
+</table></div>
+
+<h3>Gym agent server</h3>
+<div class="tbl"><table>
+<tr><th>API or state</th><th>Contract</th><th>Status</th></tr>
+<tr><td><code>POST /v1/agent_sessions</code></td><td>seed one private agent session from <code>EpisodeId</code>, <code>TaskId</code>, resources access, and sandbox access; return <code>agent_session_id</code></td><td><span class="pill pr">episode PR #3485</span></td></tr>
+<tr><td><code>POST /v1/responses</code></td><td>run one processor-selected activation inside the named session. A checkpointable stateful agent needs a logical activation ID so a lost response can be replayed without repeating private state changes or external effects.</td><td><span class="pill new">idempotency extension</span></td></tr>
+<tr><td><code>POST /v1/agent_sessions/close</code></td><td>close the private session and return observations plus any resources cookies changed by the agent. Close must be idempotent because the processor may retry after losing the response.</td><td><span class="pill pr">episode PR #3485</span></td></tr>
+<tr><td><code>AgentSessionSnapshot</code></td><td>versioned episode and task binding, private continuation state, serializable dependency descriptors, accumulated untransferred observations, and latest activation receipt. Stateless agents have no payload.</td><td><span class="pill new">new</span></td></tr>
+<tr><td>prepare / commit / restore / resume / retire</td><td>operate on private agent sessions referenced by selected processor boundaries. Prepare drains active <code>/v1/responses</code> calls to a declared activation boundary or reports the session as restart-only.</td><td><span class="pill new">split from PR #2942</span></td></tr>
+<tr><td>blackbox runtime state</td><td>an opaque harness is not made resumable by an agent-session JSON snapshot. It requires provider-owned process and sandbox state plus checkpoint-aware egress.</td><td><span class="pill new">runtime provider</span></td></tr>
 </table></div>
 
 <h3>Gym resources server base</h3>
@@ -865,7 +939,7 @@ StagedPrefix:
 <tr><td><code>POST …/resources-checkpoint/prepare</code></td><td>closes mutation admission, acquires each session lock, calls the environment export hook, and retains one frozen <code>ResourceSnapshot</code> per live session</td><td><span class="pill pr">PR #2945</span></td></tr>
 <tr><td><code>POST …/resources-checkpoint/commit</code> / <code>restore</code></td><td>commit writes the prepared snapshot set under <code>resources/&lt;server_name&gt;</code>; restore requires a fresh process, validates every file, installs the complete replacement set under <code>attempt_index + 1</code>, tombstones source attempts, and stays paused</td><td><span class="pill pr">PR #2945</span></td></tr>
 <tr><td><code>POST …/resources-checkpoint/resume</code></td><td>clears the prepared snapshot set and reopens mutation admission after commit or restore</td><td><span class="pill pr">PR #2945</span></td></tr>
-<tr><td>session registry + revision</td><td>successful state creation binds <code>(rollout_id, attempt_index)</code>; later mutations require that binding, use one per-session lock, advance the revision, unregister terminal sessions, and reject stale attempts. Unknown POST data routes default to mutation. Prepare refuses to omit any stateful traffic that was served without tracked execution identity.</td><td><span class="pill pr">PR #2945</span></td></tr>
+<tr><td>session registry + revision</td><td>successful state creation binds <code>(rollout_id, attempt_index)</code>; later mutations require that binding, use one per-session lock, advance the revision only after a complete replayable response, unregister terminal sessions, and reject stale attempts. Request IDs bind semantic inputs, including cookies and content type, to durable response receipts. A retry replays the receipt without re-executing; incomplete handler or streaming outcomes poison the session and block checkpoint publication. Bounded receipt eviction leaves a compact fail-closed tombstone.</td><td><span class="pill pr">PR #2945</span></td></tr>
 <tr><td>MCP dispatch</td><td>the signed session token carries rollout and attempt identity; direct MCP tools use the same mutation lock, stale-attempt checks, admission check, binding check, rollout context, and revision update as HTTP data routes</td><td><span class="pill pr">PRs #2945–#2946</span></td></tr>
 <tr><td><code>POST …/resources-checkpoint/retire</code></td><td>valid only while the matching checkpoint is preparing or prepared; tombstones the attempt, waits for its mutation lock, removes adapter state, and removes any frozen snapshot for that execution</td><td><span class="pill pr">PR #2945</span></td></tr>
 <tr><td>environment hooks</td><td><code>export_checkpoint_state</code>, <code>restore_checkpoint_states</code>, and <code>retire_checkpoint_state</code>; the Gymnasium base supplies restart-portable hooks, with concrete state support in Blackjack, the session counter, and Workplace Assistant</td><td><span class="pill pr">PR #2946</span></td></tr>
@@ -892,75 +966,103 @@ StagedPrefix:
 </section>
 
 <section class="tab" id="tab-impl">
-<h2>How each Gym server can recover</h2>
-<p>The shared APIs are not enough for servers that keep rollout state. Each concrete server needs one recovery disposition:</p>
+<h2>The completed audit has an issue-backed disposition for every server</h2>
+<p>The audit was reconciled against the then-current <code>upstream/main</code> and accounts for 121 resources-server directories and 47 agent directories. <a href="https://github.com/NVIDIA-NeMo/Gym/issues/3024">#3024 — Partial rollout checkpointing for long-running Gym executions</a> is the umbrella. Its first-level issues separate generation cuts, logical resources state, whitebox agents, opaque runtimes, sandbox state, coordinated or drain-only services, inference engines, and training frameworks.</p>
+<div class="callout warn"><b>Issues record work; they do not prove support</b>Every child listed below is open implementation or validation work unless this section explicitly marks the adapter implemented. A server with no child is still required to advertise and satisfy its audited capability before checkpointing is enabled.</div>
+<div class="card"><h3>The whitebox audit now has two questions</h3><p>For each protocol, determine what the episode processor must retain to choose its next operation. Separately, determine whether the selected agent server has private state behind <code>agent_session_id</code>. A processor can be resumable while using a stateless agent, and a stateful or opaque agent session can force an otherwise simple processor to restart. Existing whitebox-agent issues should be reclassified along this boundary instead of assuming that every agent owns its complete episode loop.</p></div>
+
+<h3>Native issue hierarchy</h3>
+<div class="tbl"><table>
+<tr><th>First-level issue</th><th>Responsibility</th></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3218">#3218 — Generation-safe policy model checkpoint cuts</a></td><td>Define the active-generation cut and response-publication boundary.</td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3219">#3219 — Stateful resources server checkpoint adapters</a></td><td>Track versioned logical-state adapters for resources servers.</td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3220">#3220 — Whitebox agent checkpoint continuation adapters</a></td><td>Track operation boundaries owned by Gym-native loops.</td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3221">#3221 — Opaque agent runtime checkpoint provider contract</a></td><td>Track native session and process-runtime continuation.</td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3222">#3222 — Sandbox snapshot and reattachment checkpoint contract</a></td><td>Track provider snapshots, cloning, restoration, and reattachment.</td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3223">#3223 — Checkpoint capability for grouped and drain-only services</a></td><td>Track global, grouped, drain-only, and restart-only state.</td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3224">#3224 — Inference-engine integrations for generation-prefix checkpoint cuts</a></td><td>Adapt staged and inline prefix delivery to each inference engine.</td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3225">#3225 — Training-framework integrations for partial rollout checkpointing</a></td><td>Own the global transaction, token-store reconciliation, and publication order.</td></tr>
+</table></div>
+
+<h3>Generation and framework children</h3>
 <ul>
-  <li><b><code>no_op</code>:</b> the server has no checkpoint state and needs only shared admission middleware.</li>
-  <li><b><code>export_restore</code>:</b> the server implements versioned state encoding and restoration hooks.</li>
-  <li><b><code>reconnect_descriptor</code>:</b> the server reconnects to sandbox-backed state through a <code>ConnectableProvider</code>.</li>
-  <li><b><code>restart_only</code>:</b> the server cannot restore a valid continuation, so the rollout starts again from its input.</li>
-  <li><b><code>full_runtime_snapshot</code>:</b> the provider captures and restores an opaque agent runtime.</li>
+<li><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3227">#3227 — Implement active-prefix checkpoint cuts for NeMo-RL vLLM generation</a></li>
+<li><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3228">#3228 — Support inline-prefix checkpoint recovery for Megatron inference</a></li>
+<li><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3229">#3229 — Integrate the NeMo-RL NemoGym actor with Gym checkpoint participants</a></li>
 </ul>
-<p>The table below records servers that need more than the shared identity and control middleware. It is a compatibility inventory, not a claim that every listed future disposition is implemented.</p>
 
-<div class="card"><h3>Implemented whitebox and stateful adapters</h3>
-<p><code>simple_agent</code> and <code>gymnasium_agent</code> commit nonterminal turn boundaries and restore their conversation, cookies, usage, model-call parent, resources revision, and agent-specific loop state. The Gymnasium resources base supplies export, restore, and retirement hooks for restart-portable dictionary state. Blackjack, <code>example_session_state_mgmt</code>, and Workplace Assistant provide concrete codecs and identity-to-session maps. Other servers remain stateless, restart-only, descriptor candidates, or full-runtime-snapshot candidates until they adopt an explicit contract.</p></div>
-
-<h3>Agents that still need more than the implemented whitebox path</h3>
+<h3>Resources-server children</h3>
 <div class="tbl"><table>
-<tr><th>Agent</th><th>State model</th><th>Disposition</th><th>Required work / hazards</th></tr>
-<tr><td>anyswe_agent</td><td>sandbox-backed blackbox harness</td><td><span class="pill new">full_runtime_snapshot</span></td><td>external SWE harness inside a sandbox; harness state opaque</td></tr>
-<tr><td>anyterminal_agent</td><td>sandbox-backed blackbox harness</td><td><span class="pill new">full_runtime_snapshot</span></td><td>terminal harness in Docker/Apptainer; provider-specific create configs</td></tr>
-<tr><td>harbor_agent</td><td>in-process harbor library + sandbox</td><td><span class="pill new">full_runtime_snapshot</span></td><td>library trial state in process memory; background tasks; per-episode HTTP client affinity</td></tr>
-<tr><td>osworld_agent</td><td>desktop-VM blackbox</td><td><span class="pill new">full_runtime_snapshot</span></td><td>needs VM snapshotting; local HTTP proxy thread and subprocess</td></tr>
-<tr><td>swe_agents</td><td>container/subprocess multi-harness</td><td><span class="pill new">full_runtime_snapshot</span></td><td>global pid/mtime dicts shared across sessions; container lifecycles</td></tr>
-<tr><td>cvdp_agent</td><td>sandbox per run, native loop over sandbox tools</td><td><span class="pill new">reconnect_descriptor</span></td><td>needs ConnectableProvider; Apptainer is the default provider today (not connectable)</td></tr>
-<tr><td>mini_swe_agent_2</td><td>third-party loop + sandbox</td><td><span class="pill new">reconnect_descriptor</span></td><td>background tasks; image rewrite at launch</td></tr>
-<tr><td>opencode_sandboxed_agent</td><td>opencode server inside a sandbox</td><td><span class="pill new">reconnect_descriptor</span></td><td>sandbox-id maps held in agent memory; also a runtime-snapshot candidate</td></tr>
-<tr><td>pinchbench</td><td>skill tasks in a sandbox; judge at verify</td><td><span class="pill new">reconnect_descriptor</span></td><td>sandbox-killed error handling exists; descriptor path fits</td></tr>
-<tr><td>vcqa_agent</td><td>own Apptainer wrapper, not nemo_gym.sandbox</td><td><span class="pill new">reconnect_descriptor</span></td><td>must migrate to the sandbox API before any descriptor path applies</td></tr>
-<tr><td>claude_code_agent</td><td>local CLI subprocess + workspace + session files</td><td><span class="pill pr">restart_only</span></td><td>transcript-watcher task; CLI session files unmanaged; harness-native resume is the later extension</td></tr>
-<tr><td>codex_agent / opencode_agent / openclaw_agent / cline_agent / kilocode_agent / pi_agent / prime_agent</td><td>local CLI subprocess + on-disk workspace (7 agents, one shape)</td><td><span class="pill pr">restart_only</span></td><td>one shared strategy possible later: workspace archive + CLI session file; today restart from input</td></tr>
-<tr><td>hermes_agent</td><td>pinned third-party agent object</td><td><span class="pill pr">restart_only</span></td><td>observer threads, logging-handler patching</td></tr>
-<tr><td>langgraph_agent</td><td>in-run graph state</td><td><span class="pill pr">restart_only</span></td><td>could later adopt the langgraph checkpointer; today graph state dies with the process</td></tr>
-<tr><td>stirrup_agent</td><td>persistent shell sessions per episode</td><td><span class="pill pr">restart_only</span></td><td>long-lived Apptainer shell processes cannot be recovered from a filesystem snapshot</td></tr>
-<tr><td>tau2</td><td>third-party runner + user-simulator model</td><td><span class="pill pr">restart_only</span></td><td>simulation state inside the tau2 library; litellm translation layer</td></tr>
-<tr><td>verifiers_agent</td><td>third-party environments, global caches</td><td><span class="pill pr">restart_only</span></td><td>env and client caches shared across sessions — a cross-session state hazard</td></tr>
+<tr><th>Issue</th><th>Issue</th></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3230">#3230 — Restore Aviary environment sessions</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3231">#3231 — Restore BrowseComp advanced harness metrics and workspace</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3232">#3232 — Restore conversational tool-use simulation trajectories</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3233">#3233 — Restore example MCP weather call history</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3234">#3234 — Restore example multi-turn Gymnasium turn state</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3235">#3235 — Restore finance_agent_v2 tool state and budgets</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3236">#3236 — Restore finance_sec_search session state</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3237">#3237 — Restore GRL Sokoban episodes</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3238">#3238 — Restore GRL Tetris episodes</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3239">#3239 — Enable Indian Banking Gymnasium snapshots</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3240">#3240 — Restore indirect prompt-injection environments</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3241">#3241 — Restore math_with_code Python sessions safely</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3242">#3242 — Restore Newton Bench Python sessions</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3243">#3243 — Define checkpoint adapters for ns_tools sessions</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3244">#3244 — Restore OpenAir congestion backend episodes</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3245">#3245 — Define a checkpointable environment protocol for OpenEnv</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3246">#3246 — Restore TALES sessions by validated replay</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3247">#3247 — Restore Tavily session metrics and fetched pages</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3248">#3248 — Restore ToolSandbox execution contexts</a></td><td></td></tr>
 </table></div>
-<p>Agents not listed here do not automatically become resumable. Only an agent that installs the checkpoint participant and commits a complete <code>AgentBoundaryRecord</code> can continue from a whitebox boundary. Others must be classified explicitly as stateless restart, descriptor reconnect, or full runtime snapshot by the future controller.</p>
 
-<h3>Resources servers that need explicit state handling</h3>
+<h3>Whitebox-agent children</h3>
 <div class="tbl"><table>
-<tr><th>Server</th><th>State model</th><th>Disposition</th><th>Required work / hazards</th></tr>
-<tr><td>blackjack</td><td>per-session env + seeded RNG</td><td><span class="pill proto">export_restore — done</span></td><td>reference GymnasiumServer implementation</td></tr>
-<tr><td>example_session_state_mgmt</td><td>per-session counter</td><td><span class="pill proto">export_restore — done</span></td><td>prototype exemplar</td></tr>
-<tr><td>workplace_assistant</td><td>per-session pandas DataFrames; exposes MCP</td><td><span class="pill proto">export_restore — done</span></td><td>proves the DataFrame codec pattern toolsandbox needs; MCP exposure must survive restore</td></tr>
-<tr><td>gymnasium (base class)</td><td>per-session state dict, abstract env server</td><td><span class="pill proto">export_restore — implemented</span></td><td>supplies JSON-safe export, atomic replacement, identity-to-session rebinding, and retirement; subclasses still opt in only when their state is restart-portable</td></tr>
-<tr><td>grl_sokoban / grl_tetris</td><td>per-session seeded env state</td><td><span class="pill new">export_restore</span></td><td>serialize NumPy-compatible state through the base hook</td></tr>
-<tr><td>example_multi_turn_gymnasium / example_mcp_weather / indirect_prompt_injection</td><td>per-session dicts</td><td><span class="pill new">export_restore</span></td><td>encode and restore plain dictionaries</td></tr>
-<tr><td>conversational_tool_use_simulation</td><td>per-session pydantic state; user/tool simulator + judge models</td><td><span class="pill new">export_restore</span></td><td>encode Pydantic state; simulator regeneration after restart is nondeterministic</td></tr>
-<tr><td>openair_congestion</td><td>per-session episode cursor, RNG, step cache</td><td><span class="pill new">export_restore</span></td><td>restore replay backend state and coordinate retirement with the stale-episode reaper</td></tr>
-<tr><td>browsecomp_advanced_harness</td><td>per-session memory + per-session disk workspace</td><td><span class="pill new">export_restore</span></td><td>include both in-memory state and the per-session workspace in the codec</td></tr>
-<tr><td>toolsandbox</td><td>per-session DataFrames + contextvar role scoping; user-simulator model during step</td><td><span class="pill new">export_restore — hard</span></td><td>largest in-memory server; workplace_assistant hooks are the template; simulator nondeterminism</td></tr>
-<tr><td>swebench</td><td>sandbox handle per session, seed to verify</td><td><span class="pill new">reconnect_descriptor</span></td><td>reconnect by sandbox descriptor so SWE rollouts can retain their environment state</td></tr>
-<tr><td>litmus_agent</td><td>sandbox + per-session locks</td><td><span class="pill new">reconnect_descriptor</span></td><td>descriptor plus lock rebinding at restore</td></tr>
-<tr><td>aviary</td><td>remote env handles to an upstream task server</td><td><span class="pill new">reconnect_descriptor</span></td><td>needs a reconnect-by-env-id protocol with the upstream server</td></tr>
-<tr><td>math_with_code / newton_bench</td><td>persistent Python interpreter subprocess per session</td><td><span class="pill pr">restart_only</span></td><td>live interpreters are unserializable; optional later path: replay executed code; orphan-process cleanup on restore</td></tr>
-<tr><td>tales</td><td>third-party interpreter envs (Z-machine, C-backed)</td><td><span class="pill pr">restart_only</span></td><td>state not exportable; declare non-support via the gymnasium base hook</td></tr>
-<tr><td>openenv</td><td>third-party env objects, possibly container/MCP-backed</td><td><span class="pill pr">restart_only</span></td><td>env-dependent; reconnect only where an env exposes stable ids</td></tr>
+<tr><th>Issue</th><th>Issue</th></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3249">#3249 — Continue aviary_agent episodes</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3250">#3250 — Continue browsecomp_agent trajectories</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3251">#3251 — Continue conversational_tool_use agent phases</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3252">#3252 — Continue critpt_agent after committed turns</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3253">#3253 — Continue finance_agent tool loops</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3254">#3254 — Continue image_tools_agent with durable artifacts</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3255">#3255 — Continue langgraph_agent at typed node boundaries</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3256">#3256 — Continue proof_refinement_agent after verification</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3257">#3257 — Continue remote_agent with remote session state</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3258">#3258 — Continue scicode_agent after verified sub-steps</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3259">#3259 — Continue simple_agent_with_compaction</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3260">#3260 — Continue speed_bench_agent turns</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3261">#3261 — Continue toolsandbox_agent sessions</a></td><td></td></tr>
 </table></div>
-<p>A resources server that does not opt into session-state checkpointing is not represented by a resources manifest. The future controller must treat it as stateless or restart-only based on an explicit capability, rather than infer safety from the absence of hooks.</p>
-<p>Several servers still need explicit compatibility checks. <code>speed_bench</code> measures wall-clock windows, so pausing changes its metric and should make the server report that it cannot checkpoint. <code>code_gen</code> and <code>verifiers_agent</code> keep mutable global state across sessions. <code>ns_tools</code> runs a shared sidecar process. <code>longmt_eval</code> and <code>wmt_translation</code> require their Ray actor pools on the restore host. Finance servers record wall-clock session durations that a pause changes.</p>
 
-<div class="card"><h3>Recommended implementation order</h3>
-<ol>
-<li><b>gymnasium base-class hook</b> — one change covers the whole gymnasium family and gives non-exportable subclasses a declaration point.</li>
-<li><b>swebench reconnect descriptor</b> — unblocks the SWE rollout class end to end; litmus_agent follows the same pattern.</li>
-<li><b>toolsandbox codec</b> — serialize its DataFrames and role-scoped state by following the existing <code>workplace_assistant</code> pattern.</li>
-<li><b>The blackbox cluster</b> (anyswe, anyterminal, harbor, osworld, swe_agents) — full-runtime snapshot through one provider, restart_only until then.</li>
-<li><b>The CLI-agent cluster</b> (8 agents, one shape) — a single workspace-archive + session-file strategy later; restart_only now.</li>
-<li><b>aviary reconnect-by-env-id</b> with its upstream server.</li>
-</ol></div>
+<h3>Opaque-runtime children</h3>
+<div class="tbl"><table>
+<tr><th>Issue</th><th>Issue</th></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3262">#3262 — Resume claude_code_agent sessions</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3263">#3263 — Resume cline_agent sessions</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3264">#3264 — Resume codex_agent threads</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3265">#3265 — Bridge hermes_agent native checkpoints</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3266">#3266 — Resume kilocode_agent sessions</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3267">#3267 — Classify or resume mini_swe_agent runner state</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3268">#3268 — Resume openclaw_agent sessions and workspaces</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3269">#3269 — Resume opencode_agent from durable OpenCode sessions</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3270">#3270 — Resume pi_agent sessions and workspaces</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3271">#3271 — Resume prime_agent daemon sessions</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3272">#3272 — Resume swe_agents harness sessions</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3273">#3273 — Define Tau2 turn and environment checkpoints</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3274">#3274 — Resume terminus_2_agent tmux sessions</a></td><td></td></tr>
+</table></div>
+
+<h3>Sandbox and external-runtime children</h3>
+<div class="tbl"><table>
+<tr><th>Issue</th><th>Issue</th></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3275">#3275 — Add AsyncSandbox snapshot, clone, and reattach contract</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3276">#3276 — Restore anyswe_agent sandboxes</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3277">#3277 — Restore anyterminal_agent task runtimes</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3278">#3278 — Restore cvdp_agent RTL runtimes</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3279">#3279 — Restore DeepSWE resources sandboxes</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3280">#3280 — Restore Harbor agent jobs</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3281">#3281 — Restore litmus_agent code sandboxes</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3282">#3282 — Restore mini_swe_agent_2 sandbox sessions</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3283">#3283 — Restore nemo_fabric_agent sessions</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3284">#3284 — Restore opencode_sandboxed_agent sessions</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3285">#3285 — Restore osworld_agent VM episodes</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3286">#3286 — Restore pinchbench sandbox runs</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3287">#3287 — Restore simple_strands_agent sessions</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3288">#3288 — Restore stirrup_agent jobs and deliverables</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3289">#3289 — Restore SWE-bench resources workspaces</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3290">#3290 — Restore terminus_2_sandboxed_agent sessions</a></td></tr>
+<tr><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3291">#3291 — Restore vcqa_agent build workspaces</a></td><td><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3292">#3292 — Restore vibench_agent build sessions</a></td></tr>
+</table></div>
+
+<h3>Coordinated, grouped, and drain-only children</h3>
+<ul>
+<li><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3293">#3293 — Make CritPt global batching checkpoint-safe</a></li>
+<li><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3294">#3294 — Preserve SpeedBench aggregate metric intervals</a></li>
+<li><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3295">#3295 — Drain VLMEvalKit grouped verification safely</a></li>
+<li><a href="https://github.com/NVIDIA-NeMo/Gym/issues/3296">#3296 — Declare and test LongMT restart-only actor pools</a></li>
+</ul>
+
+<h3>Implemented adapters that do not need new issues</h3>
+<div class="card">
+<p><code>blackjack</code>, <code>example_session_state_mgmt</code>, and <code>workplace_assistant</code> already have resources-state adapters in the draft stack. The <code>GymnasiumServer</code> base also has shared resources hooks. The existing <code>simple_agent</code> and <code>gymnasium_agent</code> continuation changes prove useful state fields, but their protocol position must move into episode processors. Only private state that remains inside their seeded agent sessions should stay in agent-side adapters. <code>labbench2_vlm_agent</code> inherits the <code>SimpleAgent</code> behavior and should follow the same split.</p>
+</div>
+
+<h3>Explicit restart-only agents without continuation children</h3>
+<p><code>non_executing_simple_agent</code>, <code>tool_simulation_agent</code>, and <code>verifiers_agent</code> intentionally have no per-agent continuation issue. Their advertised behavior must remain restart-only unless a later design proves a valid continuation boundary.</p>
+
+<h3>Resources servers that need no adapter issue</h3>
+<p>These resources servers are stateless for checkpointing or can safely reconstruct their local state. This classification means that no server-specific export/restore adapter is planned. It does not make an unfinished rollout resumable, and it does not remove the need for explicit capability reporting.</p>
+<p><code>aalcr</code>, <code>abstention</code>, <code>agentif</code>, <code>arc_agi</code>, <code>arena</code>, <code>arena_judge</code>, <code>asr_with_pc</code>, <code>bbq</code>, <code>bigcodebench</code>, <code>bird_sql</code>, <code>bunsenbench_chemistry_mcq</code>, <code>calendar</code>, <code>circle_click</code>, <code>circle_count</code>, <code>citation_if</code>, <code>code_fim</code>, <code>code_gen</code>, <code>competitive_coding_challenges</code>, <code>cvdp</code>, <code>equivalence_llm_judge</code>, <code>equivalence_rule</code>, <code>ether0</code>, <code>evalplus</code>, <code>example_multi_step</code>, <code>example_single_tool_call</code>, <code>example_tool_call_multireward</code>, <code>format_verification</code>, <code>frontierscience_judge</code>, <code>gdpval</code>, <code>genrm_compare</code>, <code>google_search</code>, <code>gpqa_diamond</code>, <code>graphwalks</code>, <code>gui_coordinate</code>, <code>hotpotqa_qa</code>, <code>ifbench</code>, <code>iheval</code>, the <code>image_tools</code> resources app, <code>imo_gradingbench</code>, <code>imo_proofbench_judge</code>, <code>instruction_following</code>, <code>inverse_if</code>, <code>jailbreak_detection</code>, <code>labbench2_vlm</code>, <code>lc_niah</code>, the <code>legal_agent_bench</code> resources app, <code>longmemeval</code>, <code>math_advanced_calculations</code>, <code>math_formal_lean</code>, <code>math_proof_judgement</code>, <code>math_with_autograder</code>, <code>math_with_judge</code>, <code>mcqa</code>, <code>mrcr</code>, <code>multichallenge</code>, <code>nvarc</code>, <code>omniscience</code>, <code>over_refusal_detection</code>, <code>physics_judge</code>, <code>polymath</code>, <code>proof_genselect</code>, <code>proof_judge</code>, <code>proof_verification</code>, <code>ragtruth</code>, <code>reasoning_gym</code>, <code>rolemrc</code>, <code>ruler</code>, <code>ruler2</code>, <code>scicode</code>, <code>simpleqa</code>, <code>single_step_tool_use_with_argument_comparison</code>, <code>spartqa</code>, <code>spider2_lite</code>, <code>string_match</code>, <code>structeval</code>, <code>structured_outputs</code>, <code>swe_pivot</code>, <code>swerl_gen</code>, <code>swerl_llm_judge</code>, <code>terminal_multi_harness</code>, <code>terminus_judge</code>, <code>text_to_sql</code>, <code>ugphysics_judge</code>, <code>verifif</code>, <code>vibench</code>, <code>wmt_translation</code>, <code>xlam_fc</code>, and <code>xstest</code>.</p>
 
 </section>
 
@@ -973,9 +1075,9 @@ StagedPrefix:
 <li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2939">#2939 — propagate stable execution identity</a></li>
 <li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2940">#2940 — add fenced control contracts</a></li>
 <li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2941">#2941 — add the policy model participant</a></li>
-<li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2942">#2942 — add the whitebox agent participant</a></li>
-<li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2943">#2943 — resume SimpleAgent turns</a></li>
-<li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2944">#2944 — resume Gymnasium agent turns</a></li>
+<li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2942">#2942 — current whitebox agent participant; re-cut into episode-processor and agent-session participants</a></li>
+<li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2943">#2943 — current SimpleAgent continuation; move protocol position into the single-agent episode processor</a></li>
+<li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2944">#2944 — current Gymnasium continuation; split episode-step orchestration from private agent session state</a></li>
 <li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2945">#2945 — add the resources state participant</a></li>
 <li><a href="https://github.com/NVIDIA-NeMo/Gym/pull/2946">#2946 — adapt initial stateful environments and add the end-to-end checkpoint cycle</a></li>
 </ol></div>
@@ -983,33 +1085,43 @@ StagedPrefix:
 <h3>Integration work after the Gym stack</h3>
 <p>The following milestones describe remaining cross-repository work. They are not additional claims about what PRs #2939–#2946 already implement.</p>
 
-<div class="card"><h3>Remaining milestone 1 — Controller and token-store publication</h3>
+<div class="card"><h3>Two NeMo-RL draft pull-request layers</h3>
 <ol>
-<li>Add the <code>NemoGym</code> live-execution registry, durable result acknowledgement, and checkpoint participant methods.</li>
-<li>Connect worker-owned token staging, model custody lineage, terminal attribution, and the NeMo-RL finalizer.</li>
-<li>Make inline and staged prefix delivery explicit and mutually exclusive. Preserve one integrity contract while allowing vLLM to fetch a staging chain and Megatron Inference to receive inline tokens.</li>
-<li>For Megatron checkpoint support, add an active-prefix cut and checkpoint-time <code>TransferQueue</code> flush. The existing rollout-end deferred-ledger flush is not a checkpoint boundary.</li>
-<li>Make the real <code>TransferQueue</code> snapshot durable after RL-side finalizers quiesce, then reconcile restored model manifests against the restored staging rows.</li>
-<li>Publish a global controller marker only after every required Gym manifest and training-framework artifact validates.</li>
+<li><b><a href="https://github.com/NVIDIA-NeMo/RL/pull/4092">RL #4092 — identity layer</a>:</b> propagates stable <code>_ng_rollout_id</code> and numeric <code>_ng_attempt_index</code> through dispatch, result handling, token staging, and recovery. Attempt zero uses the logical capture key; later attempts use <code>-aN</code>.</li>
+<li><b><a href="https://github.com/NVIDIA-NeMo/RL/pull/4093">RL #4093 — <code>NemoGym</code> participant layer</a>:</b> adds the live-execution registry, exact result acknowledgement, participant discovery, deadline-bounded lifecycle methods, manifest integrity, the Gym #2946 pin, and cross-repository tests. It depends on #4092 and excludes <code>SingleController</code>. It currently discovers model, agent, and resources participants and must be revised to include episode processors plus private agent-session participants.</li>
+</ol>
+<p>Both layers implement work under <a href="https://github.com/NVIDIA-NeMo/Gym/issues/3225">#3225 — Training-framework integrations for partial rollout checkpointing</a>. The second layer addresses <a href="https://github.com/NVIDIA-NeMo/Gym/issues/3229">#3229 — Integrate the NeMo-RL NemoGym actor with Gym checkpoint participants</a>.</p></div>
+
+<div class="card"><h3>Remaining milestone 1 — Add Gym to the existing controller transaction</h3>
+<ol>
+<li>Land <a href="https://github.com/NVIDIA-NeMo/RL/pull/4092">NeMo-RL #4092</a> and its dependent actor participant in <a href="https://github.com/NVIDIA-NeMo/RL/pull/4093">#4093</a>, then wire that actor into <code>SingleController</code>.</li>
+<li>Prepare Gym before the existing data-plane checkpoint barrier so every selected completed call or cut prefix reaches durable custody. Commit Gym manifests into the same temporary checkpoint bundle while the existing TQ, replay, recovery-ledger, and dataloader state are frozen.</li>
+<li>Make inline and staged prefix delivery explicit and mutually exclusive. Preserve one integrity contract while allowing vLLM to fetch a staging chain under <a href="https://github.com/NVIDIA-NeMo/Gym/issues/3227">#3227</a> and Megatron Inference to receive inline tokens under <a href="https://github.com/NVIDIA-NeMo/Gym/issues/3228">#3228</a>.</li>
+<li>For Megatron checkpoint support, build the active-prefix cut on top of the unified completed-call staging in <a href="https://github.com/NVIDIA-NeMo/RL/pull/3869">NeMo-RL #3869</a>.</li>
+<li>On restore, load the existing native data-plane checkpoint before Gym participants, then reconcile every restored model coordinate against the restored inventory.</li>
+<li>Extend the existing atomic controller publication so its global marker names and authenticates every required Gym manifest.</li>
 </ol>
 <p><b>Exit condition:</b> completed captured rollouts and groups survive a controller restart with the same exact token rows. An unfinished rollout restarts from input without selecting staged rows from its abandoned attempt.</p></div>
 
-<div class="card"><h3>Remaining milestone 2 — Controller-selected whitebox continuation</h3>
+<div class="card"><h3>Remaining milestone 2 — Controller-selected episode continuation</h3>
 <ol>
-<li>Call the implemented agent prepare, commit, restore, retirement, and resume routes in dependency order.</li>
-<li>Do not publish while agent status reports parked-without-boundary or completed-unacknowledged executions.</li>
-<li>Reconcile each boundary's last model-call ID and resources revisions with the model manifest, resources manifests, and restored <code>TransferQueue</code> rows before making the continuation runnable.</li>
+<li>Adopt <code>EpisodeId</code> as the stable rollout and attempt contract shared by rollout collection, checkpoint control, agent sessions, resources sessions, and model lineage.</li>
+<li>Move active <code>/run</code> tracking, parking, result acknowledgement, and protocol-boundary persistence from the agent participant into an episode-processor participant.</li>
+<li>Split private agent state into <code>AgentSessionSnapshot</code>. Stateless agents need no payload; stateful agents export only data that cannot be reconstructed from processor-owned requests and responses.</li>
+<li>Do not publish while processor status reports parked-without-boundary or completed-unacknowledged episodes, or while a referenced component session cannot produce a compatible snapshot.</li>
+<li>Restore model lineage, resources sessions, agent sessions, and runtimes before restoring episode processor boundaries.</li>
+<li>Reconcile each boundary's last model-call ID, resources revision, and agent activation with the model manifest, resources manifests, agent-session manifests, and restored <code>TransferQueue</code> rows before releasing the processor.</li>
 </ol>
-<p><b>Exit condition:</b> a supported multi-turn whitebox agent resumes between operations with its conversation and control-flow state intact while using a stateless resources server.</p></div>
+<p><b>Exit condition:</b> a supported episode processor resumes between protocol operations without repeating a completed seed, activation, verification, or close. Any private agent session it references restores first.</p></div>
 
 <div class="card"><h3>Remaining milestone 3 — Stateful resources reconciliation</h3>
 <ol>
 <li>Start restore-expected resources servers as fresh paused processes and pass their namespaced manifests to the implemented restore routes.</li>
-<li>Verify the agent boundary's recorded resources revision before dispatch and define the shared acknowledgement that permits completed-session tombstone cleanup.</li>
+<li>Verify each processor boundary's recorded resources revision and resources-session identity before dispatch, and define the shared acknowledgement that permits completed-session tombstone cleanup.</li>
 <li>Require nested judge and simulator calls to use auxiliary model instances that remain available during policy-model prepare.</li>
 <li>Apply the deadline policy only to sessions whose implementation declares that its partial state and external effects can be discarded safely.</li>
 </ol>
-<p><b>Exit condition:</b> a whitebox agent and its logical environment session restore under a replacement attempt. The resources state is installed before the agent resumes.</p></div>
+<p><b>Exit condition:</b> an episode processor and its logical environment session restore under a replacement attempt. Resources state and any private agent session install before the processor resumes.</p></div>
 
 <div class="card"><h3>Milestone 4 — Blackbox runtime continuation</h3>
 <ol>
@@ -1020,21 +1132,23 @@ StagedPrefix:
 </ol>
 <p><b>Exit condition:</b> an opaque harness resumes from a full runtime snapshot without losing, duplicating, or misattributing a model or resources request.</p></div>
 
-<h3>Validation applied at every milestone</h3>
-<p>Inject crashes before and after every manifest publication boundary. Exercise stale checkpoint IDs, prepare deadlines, and worker loss. Verify that a continuation is selected only when its agent, resources, model-lineage, and <code>TransferQueue</code> links required by that milestone are all present.</p>
+<h3>Existing evidence and the new integration gap</h3>
+<p>The checkpoint stack tests model, agent-owned boundary, resources, stale-attempt, manifest, and restore mechanics. The <a href="https://github.com/NVIDIA-NeMo/Gym/pull/3482">episode orchestration stack beginning at #3482</a> separately tests processor admission, typed episode identity, resources and agent session setup, <code>/v1/responses</code> activation, verification, cleanup, routing, and one real Hermes plus SWE Pro rollout. Neither stack tests a checkpoint where the episode processor owns the boundary and the agent server owns only private session state. That joined crash-and-restore test is now required before claiming episode continuation.</p>
 
 <h3>Known limitations of the current draft</h3>
 <ul>
-  <li>No NeMo-RL controller calls these routes, acknowledges completed results, reconciles participant manifests, or publishes a global checkpoint yet.</li>
-  <li>The end-to-end test simulates controller ordering and token staging coordinates. It does not exercise real <code>TransferQueue</code> save and restore.</li>
-  <li>Multi-worker admission coordination has a protocol and test harness, but production launcher and control-URL wiring are absent. Model-ledger aggregation across those workers is also absent.</li>
+  <li>The existing Gym checkpoint stack puts active <code>/run</code> ownership and protocol boundaries in agent servers. It must be re-cut around the episode processor architecture in the <a href="https://github.com/NVIDIA-NeMo/Gym/pull/3482">public Gym stack beginning at #3482</a>.</li>
+  <li><code>EpisodeContext</code> cleanup callbacks are process-local and always unwind from <code>BaseEpisodeProcessor.run</code>. The episode stack does not yet persist protocol position, participant handles, or cleanup obligations.</li>
+  <li>The <code>NemoGym</code> actor in NeMo-RL #4093 discovers model, agent, and resources participants. It must include episode processors and private agent-session participants, and <code>SingleController</code> still does not invoke it or publish a global checkpoint.</li>
+  <li>The Gym and actor end-to-end tests simulate token staging coordinates. NeMo-RL separately exercises real native <code>TransferQueue</code> save and restore, but no current test joins that path to these Gym manifests or a real vLLM or Megatron active-generation cut.</li>
+  <li>Multi-worker admission and exact receipt aggregation have a protocol and test harness, but production launcher and control-URL wiring are absent.</li>
   <li>Commit, restore, and resume carry deadlines but do not bound every filesystem or adapter callback with them.</li>
   <li>The artifact format writes individual rollout files. A bounded archive format is still needed before adopting it for large live sets.</li>
   <li>Opaque blackbox harnesses still need a full runtime snapshot and egress relay. Descriptor reconnect alone cannot preserve process memory or pending calls.</li>
 </ul>
 </section>
 
-<div class="foot">Partial-rollout checkpointing · proposed NeMo-RL and NeMo Gym architecture · self-contained HTML, inline CSS/JS/SVG · sources: public NVIDIA-NeMo/Gym and NVIDIA-NeMo/RL repositories</div>
+<div class="foot">Partial-rollout checkpointing · proposed NeMo-RL and NeMo Gym architecture · aligned with public Gym PR stack #3482–#3492 · self-contained HTML, inline CSS/JS/SVG</div>
 </div>
 
 <script>
