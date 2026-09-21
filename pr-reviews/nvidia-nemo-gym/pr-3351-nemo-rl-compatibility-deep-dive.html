@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Will Gym PR 3351 break current NeMo RL?</title>
+  <script>
+    (() => {
+      try {
+        if (localStorage.getItem("engineering-notes-theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch {}
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-2: #1d2530;
+      --border: #30363d;
+      --text: #e6edf3;
+      --dim: #9aa4af;
+      --accent: #58a6ff;
+      --diagram-ok: #5bc0eb;
+      --diagram-problem: #ffb000;
+      --diagram-alt: #d98bc3;
+      --diagram-neutral: #c7ced8;
+      --code-bg: #090d12;
+      --shadow: rgba(0, 0, 0, .24);
+    }
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --surface-2: #eef2f6;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --dim: #59636e;
+      --accent: #0969da;
+      --diagram-ok: #005a8d;
+      --diagram-problem: #9a4d00;
+      --diagram-alt: #7a3e6d;
+      --diagram-neutral: #4b5563;
+      --code-bg: #f0f3f6;
+      --shadow: rgba(31, 35, 40, .10);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.62 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+    main { max-width: 980px; margin: 0 auto; padding: 38px 22px 80px; }
+    h1 { max-width: 820px; margin: 0 0 10px; font-size: clamp(2rem, 5vw, 3.35rem); line-height: 1.06; letter-spacing: -.035em; }
+    h2 { margin: 54px 0 14px; font-size: clamp(1.45rem, 3vw, 2rem); line-height: 1.18; }
+    h3 { margin: 28px 0 9px; font-size: 1.15rem; }
+    p { margin: 10px 0; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    code { font-size: .92em; }
+    pre {
+      margin: 12px 0;
+      padding: 15px 17px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--code-bg);
+      font-size: .86rem;
+      line-height: 1.5;
+    }
+    .theme-toggle {
+      position: fixed;
+      z-index: 5;
+      top: 14px;
+      right: 14px;
+      min-width: 92px;
+      padding: 9px 12px;
+      color: var(--text);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      box-shadow: 0 5px 18px var(--shadow);
+      cursor: pointer;
+    }
+    .eyebrow { color: var(--diagram-ok); font-weight: 720; letter-spacing: .08em; text-transform: uppercase; font-size: .78rem; }
+    .lede { max-width: 850px; color: var(--dim); font-size: 1.14rem; }
+    .provenance {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      margin: 18px 0 0;
+      padding: 12px 0;
+      border-block: 1px solid var(--border);
+      color: var(--dim);
+      font-size: .88rem;
+    }
+    .verdict {
+      margin: 24px 0;
+      padding: 20px;
+      border: 2px solid var(--diagram-problem);
+      border-radius: 14px;
+      background: var(--surface);
+      box-shadow: 0 9px 28px var(--shadow);
+    }
+    .verdict strong { color: var(--diagram-problem); }
+    .summary-grid, .two-col, .evidence-grid {
+      display: grid;
+      gap: 14px;
+    }
+    .summary-grid { grid-template-columns: repeat(3, 1fr); margin-top: 15px; }
+    .two-col { grid-template-columns: repeat(2, 1fr); }
+    .evidence-grid { grid-template-columns: repeat(2, 1fr); }
+    .card {
+      min-width: 0;
+      padding: 17px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    .card h3 { margin-top: 0; }
+    .label { display: inline-block; margin-bottom: 7px; font-size: .75rem; font-weight: 750; letter-spacing: .065em; text-transform: uppercase; }
+    .ok { color: var(--diagram-ok); }
+    .warn { color: var(--diagram-problem); }
+    .alt { color: var(--diagram-alt); }
+    .muted { color: var(--dim); }
+    .toc {
+      margin: 28px 0 0;
+      padding: 15px 18px;
+      border-left: 4px solid var(--diagram-neutral);
+      background: var(--surface);
+    }
+    .toc ol { margin: 7px 0 0; padding-left: 22px; columns: 2; }
+    .figure {
+      margin: 22px 0;
+      padding: 18px;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--surface);
+    }
+    .figure figcaption { margin-bottom: 14px; font-weight: 700; }
+    .flow {
+      display: grid;
+      grid-template-columns: minmax(145px, 1fr) 42px minmax(165px, 1fr) 42px minmax(165px, 1fr) 42px minmax(145px, 1fr);
+      align-items: stretch;
+      min-width: 810px;
+    }
+    .node {
+      display: flex;
+      min-height: 118px;
+      flex-direction: column;
+      justify-content: center;
+      padding: 13px;
+      border: 2px solid var(--diagram-neutral);
+      border-radius: 11px;
+      background: var(--bg);
+    }
+    .node.active { border-color: var(--diagram-ok); }
+    .node.problem { border-color: var(--diagram-problem); border-style: dashed; }
+    .node.alt { border-color: var(--diagram-alt); }
+    .arrow { display: grid; place-items: center; color: var(--diagram-neutral); font-size: 1.65rem; }
+    .legend { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 14px; color: var(--dim); font-size: .84rem; }
+    .legend span::before { content: ""; display: inline-block; width: 18px; margin-right: 7px; border-top: 3px solid var(--diagram-neutral); vertical-align: middle; }
+    .legend .l-ok::before { border-color: var(--diagram-ok); }
+    .legend .l-warn::before { border-color: var(--diagram-problem); border-top-style: dashed; }
+    .legend .l-alt::before { border-color: var(--diagram-alt); }
+    .trace { min-width: 710px; }
+    .trace-row {
+      display: grid;
+      grid-template-columns: 148px 1fr 190px;
+      gap: 12px;
+      align-items: center;
+      padding: 11px 0;
+      border-top: 1px solid var(--border);
+    }
+    .trace-row:first-child { border-top: 0; }
+    .trace-value {
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .82rem;
+    }
+    .trace-value.problem { border: 2px dashed var(--diagram-problem); }
+    .trace-value.active { border: 2px solid var(--diagram-ok); }
+    .before-after { display: grid; grid-template-columns: 1fr 52px 1fr; min-width: 680px; }
+    .before-after .panel { padding: 15px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+    .before-after .middle { display: grid; place-items: center; color: var(--diagram-alt); font-size: 1.7rem; }
+    .value-list { margin: 10px 0 0; padding: 0; list-style: none; }
+    .value-list li { margin: 7px 0; }
+    .value-list li::before { content: "•"; color: var(--diagram-neutral); margin-right: 8px; }
+    .finding {
+      margin: 16px 0;
+      padding: 17px 18px;
+      border-left: 5px solid var(--diagram-problem);
+      background: var(--surface);
+    }
+    .finding h3 { margin-top: 0; }
+    .decision {
+      margin: 18px 0;
+      padding: 18px;
+      border: 2px solid var(--diagram-ok);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+    .checks { padding-left: 22px; }
+    .checks li { margin: 8px 0; }
+    .ledger { width: 100%; min-width: 760px; border-collapse: collapse; font-size: .88rem; }
+    .ledger th, .ledger td { padding: 10px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+    .ledger th { background: var(--surface-2); }
+    .scroll { overflow-x: auto; }
+    .callout { padding: 14px 16px; border: 1px solid var(--diagram-alt); border-radius: 10px; background: var(--surface); }
+    footer { margin-top: 58px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--dim); font-size: .86rem; }
+    @media (max-width: 760px) {
+      main { padding: 28px 15px 60px; }
+      .summary-grid, .two-col, .evidence-grid { grid-template-columns: 1fr; }
+      .toc ol { columns: 1; }
+      .theme-toggle { position: static; float: right; margin: 0 0 12px 12px; }
+    }
+  </style>
+</head>
+<body>
+  <button class="theme-toggle" type="button" aria-label="Toggle color theme">Light theme</button>
+  <main>
+    <div class="eyebrow">Compatibility review · 21 September 2026</div>
+    <h1>Will Gym PR 3351 break current NeMo RL?</h1>
+    <p class="lede">A critical review of the GenRM cohort deadline and failure-cleanup change, traced through the exact Gym revision NeMo RL pins, current NeMo RL <code>main</code>, and current Gym <code>main</code>.</p>
+    <div class="provenance">
+      <span><a href="https://github.com/NVIDIA-NeMo/Gym/pull/3351">Gym PR 3351</a> head <code>f3bda346baf869f9c51df02e6b7939e6f3f7ebd9</code></span>
+      <span>Gym main <a href="https://github.com/NVIDIA-NeMo/Gym/commit/9164de0efacdafc67b5f21900cca05673b989751"><code>9164de0efacdafc67b5f21900cca05673b989751</code></a></span>
+      <span>NeMo RL main <a href="https://github.com/NVIDIA-NeMo/RL/commit/612d5274059c821dc09c2c90767b546b6f2d50b5"><code>612d5274059c821dc09c2c90767b546b6f2d50b5</code></a></span>
+    </div>
+
+    <section class="verdict" aria-labelledby="answer">
+      <div class="label warn">Answer first</div>
+      <h2 id="answer" style="margin-top:0">Not an API break for current NeMo RL, but not a safe blind submodule bump</h2>
+      <p><strong>Current NeMo RL already implements the identities, full-group retry, and nested sample mask that PR 3351 expects.</strong> The successful GenRM path is compatible. The failure path is intentionally behavior-changing: judge failures that previously became ordinary default scores now become zero-valued, masked failure rows.</p>
+      <p>Two cautions remain. First, a clean merge with current Gym <code>main</code> leaves the new standard top-level <code>mask_sample</code> field false while the legacy RL-specific nested mask is true. This is not a current-RL blocker—RL still masks correctly—but it is a real shared Gym contract gap for direct clients. Second, current NeMo RL GenRM recipes inherit the PR's new 300-second judge deadline while permitting 16,384 or 24,576 output tokens. That can convert slow but healthy judge calls into masked groups.</p>
+      <div class="summary-grid">
+        <div class="card"><div class="label ok">Compatible</div><br><strong>Group coordinates</strong><br><span class="muted">RL stamps group ID, shared attempt, and local rollout index.</span></div>
+        <div class="card"><div class="label ok">Compatible</div><br><strong>RL loss mask</strong><br><span class="muted">RL reads the nested flag and zeroes the loss multiplier.</span></div>
+        <div class="card"><div class="label warn">Review the bump</div><br><strong>Mainline seam + timeouts</strong><br><span class="muted">Fix the shared mask contract and size recipe deadlines explicitly.</span></div>
+      </div>
+    </section>
+
+    <figure class="figure">
+      <figcaption>Primary path: one failed GenRM group after PR 3351</figcaption>
+      <div class="flow" role="img" aria-label="NeMo RL stamps cohort coordinates, Gym retains answers on judge failure, and NeMo RL masks the failed samples">
+        <div class="node active"><strong>NeMo RL</strong><span>8 siblings</span><code>group=math-42<br>attempt=0<br>slot=0…7</code></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="node active"><strong>Gym cohort</strong><span>collect all slots</span><span>judge concurrently</span></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="node problem"><strong>Judge failure</strong><span>answers preserved</span><code>reward=0<br>judge_failed<br>mask=true</code></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="node alt"><strong>RL training</strong><span>nested mask read</span><code>loss_multiplier=0</code></div>
+      </div>
+      <div class="legend"><span class="l-ok">compatible contract</span><span class="l-warn">failure boundary</span><span class="l-alt">consumer action</span></div>
+    </figure>
+
+    <nav class="toc" aria-label="Contents">
+      <strong>Contents</strong>
+      <ol>
+        <li><a href="#concrete-change">The concrete behavior change</a></li>
+        <li><a href="#rl-contract">Why current RL is compatible</a></li>
+        <li><a href="#mainline-finding">Current-main integration finding</a></li>
+        <li><a href="#timeouts">Timeout risk in RL recipes</a></li>
+        <li><a href="#evidence">What was reproduced</a></li>
+        <li><a href="#decision">Bump decision and checklist</a></li>
+      </ol>
+    </nav>
+
+    <section id="concrete-change">
+      <h2>The concrete behavior change</h2>
+      <p>Consider one pairwise judge call that returns HTTP 200 with an empty JSON object. The exact answer-generation inputs are unchanged. Only the disposition of the unusable judge reply changes.</p>
+      <figure class="figure">
+        <figcaption>Before and after for the same empty judge reply</figcaption>
+        <div class="before-after">
+          <div class="panel">
+            <div class="label muted">Pinned base</div>
+            <h3>Ordinary fallback score</h3>
+            <pre>judge reply: {}
+result: (3.0, 3.0, 3.5)
+sample remains trainable</pre>
+            <p class="muted">The base catches the parse failure and publishes configured defaults.</p>
+          </div>
+          <div class="middle" aria-hidden="true">→</div>
+          <div class="panel" style="border:2px dashed var(--diagram-problem)">
+            <div class="label warn">PR head</div>
+            <h3>Judge failure</h3>
+            <pre>judge reply: {}
+result: JudgeError
+cohort row: reward 0, masked</pre>
+            <p class="muted">The PR retries within one shared budget, then marks the whole cohort unusable.</p>
+          </div>
+        </div>
+      </figure>
+      <p>This is intentionally behavior-breaking for GenRM failure cases. It is also the safer semantic choice: an unavailable judge did not measure policy quality. The relevant paths are the PR's <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f3bda346baf869f9c51df02e6b7939e6f3f7ebd9/resources_servers/genrm_compare/app.py#L947-L979">bounded judge call and retry loop</a>, <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f3bda346baf869f9c51df02e6b7939e6f3f7ebd9/resources_servers/genrm_compare/app.py#L581-L642">cohort evaluation boundary</a>, and <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f3bda346baf869f9c51df02e6b7939e6f3f7ebd9/resources_servers/genrm_compare/app.py#L679-L718">failure cleanup</a>.</p>
+      <div class="callout"><strong>What does not change:</strong> a completed, non-empty but malformed judge answer still falls back to configured defaults after parsing retries. Empty, unsuccessful, transport-failed, or timed-out replies become failures.</div>
+    </section>
+
+    <section id="rl-contract">
+      <h2>Why current NeMo RL is compatible</h2>
+      <p>NeMo RL <code>main</code> pins Gym at <code>267305e…</code>, the merged cohort-identity change that PR 3351 extends. RL itself carries the same three wire keys in <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/interfaces.py#L20-L23">its public integration constants</a>.</p>
+      <figure class="figure">
+        <figcaption>One replacement attempt, traced through current RL</figcaption>
+        <div class="trace">
+          <div class="trace-row"><strong>1 · prepare</strong><div>RL mints one ID per prompt group and slots every sibling.</div><div class="trace-value active">group=math-42<br>attempt=0<br>slot=0…7</div></div>
+          <div class="trace-row"><strong>2 · Gym fails</strong><div>An incomplete cohort returns an upstream error; a judge failure returns preserved answers with a mask.</div><div class="trace-value problem">cohort or judge failure</div></div>
+          <div class="trace-row"><strong>3 · retry</strong><div>For a retryable thrown failure, RL increments the shared group attempt before re-running the complete group.</div><div class="trace-value active">group=math-42<br>attempt=1<br>slot=0…7</div></div>
+          <div class="trace-row"><strong>4 · train</strong><div>For a completed judge-failure row, RL reads <code>instance_config.mask_sample</code> and zeroes its loss.</div><div class="trace-value active">loss_multiplier=0</div></div>
+        </div>
+      </figure>
+      <div class="two-col">
+        <div class="card">
+          <h3>Identity and replacement are aligned</h3>
+          <p><a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/rollouts.py#L2369-L2428">The batched path stamps the three coordinates</a>. <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/rollout_manager.py#L1972-L1983">The retry path increments the shared attempt</a> after a retryable failure.</p>
+        </div>
+        <div class="card">
+          <h3>Mask consumption is aligned</h3>
+          <p><a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/rollouts.py#L301-L309">RL reads the nested environment flag</a>, carries it into the final batch, and <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/algorithms/grpo.py#L2356-L2371">sets the corresponding loss multiplier to zero</a>. Its default is to honor flagged samples.</p>
+        </div>
+      </div>
+      <p class="muted">Compatibility here means the current code can interpret the PR's output. It does not mean every old NeMo RL release can. A consumer that neither reads the mask nor routes <code>judge_failed</code> rows would train on the placeholder zero.</p>
+    </section>
+
+    <section id="mainline-finding">
+      <h2>Finding: the clean merge hides a mask contract split</h2>
+      <div class="finding">
+        <div class="label warn">High-confidence integration finding · not a current-RL blocker</div>
+        <h3>PR 3351 only sets the legacy nested mask; current Gym expects the standard top-level mask</h3>
+        <p>Current Gym <code>main</code> added <a href="https://github.com/NVIDIA-NeMo/Gym/blob/9164de0efacdafc67b5f21900cca05673b989751/nemo_gym/base_resources_server.py#L104-L137"><code>BaseVerifyResponse.mask_sample</code></a> specifically for unavailable judges and other infrastructure failures. PR 3351's failure path sets only <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f3bda346baf869f9c51df02e6b7939e6f3f7ebd9/resources_servers/genrm_compare/app.py#L421-L432"><code>instance_config.mask_sample</code></a>.</p>
+        <p>A synthetic merge was conflict-free and 401 focused tests passed, but the serialized judge-failure row was:</p>
+        <pre>{
+  "reward": 0.0,
+  "_ng_failure_class": "judge_failed",
+  "mask_sample": false,
+  "instance_config": {"mask_sample": true}
+}
+
+current NeMo RL consumes mask: true</pre>
+        <p><strong>Consequence:</strong> current NeMo RL is protected by its compatibility read. Gym's own collector is also protected because <a href="https://github.com/NVIDIA-NeMo/Gym/blob/9164de0efacdafc67b5f21900cca05673b989751/nemo_gym/rollout_collection.py#L1504-L1527"><code>_ng_failure_class</code> routes the row to the failure sidecar</a>. A direct <code>/verify</code> or <code>/run</code> client following current Gym's standard response contract still sees <code>false</code> and may treat the placeholder zero as usable. The clean git merge and passing suites do not detect this semantic disagreement.</p>
+        <p><strong>Requested fix in the shared Gym boundary:</strong> update <a href="https://github.com/NVIDIA-NeMo/Gym/blob/9164de0efacdafc67b5f21900cca05673b989751/nemo_gym/judge.py#L84-L109"><code>judge_failsafe</code></a> to set top-level <code>mask_sample=true</code>, <code>failure_kind="judge_failed"</code>, and the human-readable reason, while retaining the nested flag for RL migration. Add one integration test that validates the serialized agent <code>/run</code> result against current <code>BaseVerifyResponse</code>. PR 3351 exposes the gap but need not own the general fix.</p>
+      </div>
+    </section>
+
+    <section id="timeouts">
+      <h2>The operational breaking change is the new finite deadline</h2>
+      <p>The PR makes collection, evaluation, and each judge request finite. The shipped judge-request value is 300 seconds. The PR's own guide notes that 16,384 output tokens at 40 tokens/second need about 410 seconds before queueing. Current RL recipes configure up to 24,576 tokens and do not override the new timeout.</p>
+      <figure class="figure">
+        <figcaption>Configured output ceiling versus inherited judge deadline</figcaption>
+        <div class="trace">
+          <div class="trace-row"><strong>Gym default</strong><div><a href="https://github.com/NVIDIA-NeMo/Gym/blob/f3bda346baf869f9c51df02e6b7939e6f3f7ebd9/resources_servers/genrm_compare/configs/genrm_compare.yaml#L34-L50">PR config</a></div><div class="trace-value problem">300 s deadline</div></div>
+          <div class="trace-row"><strong>RL stage 3</strong><div><a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/examples/nemo_gym/nemotron-3-super/stage3_rlhf.yaml#L323-L347">16,384 max tokens</a> at 40 tok/s</div><div class="trace-value">≈ 410 s + queue</div></div>
+          <div class="trace-row"><strong>RL ultra</strong><div><a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/examples/nemo_gym/nemotron-3-ultra/rlhf_teacher.yaml#L437-L460">24,576 max tokens</a> at 40 tok/s</div><div class="trace-value">≈ 614 s + queue</div></div>
+        </div>
+        <div class="legend"><span class="l-warn">deadline can expire first</span><span>token count is a ceiling, so actual exposure depends on output length and queueing</span></div>
+      </figure>
+      <p>This is not a Python API break. It is a runtime policy change: a previously unbounded slow call now becomes a masked full-group failure. That can reduce usable batch size, trigger replacement work, or exhaust retry budgets. It deserves explicit recipe values rather than silently inheriting 300 seconds.</p>
+      <pre># Derive these from measured queue time and minimum expected throughput.
+genrm_compare_resources_server:
+  resources_servers:
+    genrm_compare:
+      judge_request_timeout_s: &lt;queue + max_generation + margin&gt;
+      cohort_evaluation_timeout_s: &lt;judge_deadline + retry_sleeps + margin&gt;</pre>
+      <p>All comparisons run concurrently, so the evaluation deadline need not multiply by the number of pairs. It must still cover the slowest judge call, retry sleeps, aggregation, and scheduling delay. The <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f3bda346baf869f9c51df02e6b7939e6f3f7ebd9/resources_servers/genrm_compare/app.py#L810-L844">concurrent comparison implementation</a> supports that sizing rule.</p>
+    </section>
+
+    <section id="evidence">
+      <h2>Evidence and remaining uncertainty</h2>
+      <div class="scroll">
+        <table class="ledger">
+          <thead><tr><th>Claim</th><th>Revision(s)</th><th>Reproduction</th><th>Observed result</th><th>What it proves</th></tr></thead>
+          <tbody>
+            <tr><td>Empty judge reply changes disposition</td><td>Gym base <code>1fc109…</code><br>PR head <code>f3bda3…</code></td><td>Call <code>_run_single_comparison([], {}, {})</code> with HTTP 200 body <code>{}</code></td><td>Base returned <code>(3,3,3.5)</code>; head raised <code>JudgeError</code></td><td>The failure path is behavior-changing.</td></tr>
+            <tr><td>PR-focused lifecycle tests</td><td>PR head</td><td><code>pytest test_cohort_lifecycle.py test_http_lifecycle.py test_review_fixes.py test_reward_profile.py</code></td><td>110 passed</td><td>Focused deadline, retry, cleanup, HTTP, and profiling behavior passes.</td></tr>
+            <tr><td>PR plus current Gym main</td><td>Synthetic merge of <code>9164de…</code> + <code>f3bda3…</code></td><td>Merge tree; seven focused test modules</td><td>Conflict-free; 401 passed</td><td>The revisions compose mechanically and their existing focused suites pass.</td></tr>
+            <tr><td>Serialized failure contract</td><td>Synthetic merge + RL main</td><td>Run a failed cohort through judge failsafe, response validation, and RL mask extraction</td><td>Top-level false; nested true; RL consumed true</td><td>RL is protected, but the current Gym contract is inconsistent.</td></tr>
+            <tr><td>Current RL identity and mask helpers</td><td>RL main <code>612d52…</code></td><td>Four focused unit tests</td><td>4 passed</td><td>Coordinates are stamped; nested mask is carried and zeroes loss.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Author-provided public evidence</h3>
+      <p>The PR description reports complete CI, focused GenRM tests, real policy/judge calls, failure preservation, resume, and recognition by the unchanged RL mask consumer. Those claims are useful but remain author-provided; the public PR does not link a replayable full RL training artifact.</p>
+      <h3>Not independently reproduced</h3>
+      <ul class="checks">
+        <li>Full RL training, checkpoint restart, token-capture integration, or comparative throughput.</li>
+        <li>A long judge generation that crosses the 300-second boundary.</li>
+        <li>The entire future Gym submodule delta. Current Gym <code>main</code> does not yet contain PR 3351. Even pinning the open PR head spans <a href="https://github.com/NVIDIA-NeMo/Gym/compare/267305e2a7bf88153e8ebbca1029ecc1e0f67b25...f3bda346baf869f9c51df02e6b7939e6f3f7ebd9">30 commits and 190 files</a>; current Gym <code>main</code> spans <a href="https://github.com/NVIDIA-NeMo/Gym/compare/267305e2a7bf88153e8ebbca1029ecc1e0f67b25...9164de0efacdafc67b5f21900cca05673b989751">55 commits and 435 files</a>. A future post-merge bump is much broader than PR 3351.</li>
+      </ul>
+    </section>
+
+    <section id="decision">
+      <h2>Bump decision</h2>
+      <div class="decision">
+        <div class="label ok">Recommendation</div>
+        <h3>Proceed only as a staged compatibility bump, not as a routine pin refresh</h3>
+        <p>PR 3351 itself is compatible with current RL's group identity and mask behavior. The top-level mask seam should be fixed in Gym's shared failsafe, but it does not block current RL. The operational gate is to declare measured GenRM deadlines and then test the exact future Gym merge SHA that RL will pin.</p>
+      </div>
+      <ol class="checks">
+        <li><strong>Wait for and pin the merged SHA.</strong> Current Gym <code>main</code> does not contain PR 3351. Keep the exact resulting revision; do not validate only the old PR head or today's unrelated main.</li>
+        <li><strong>Unify failure fields in Gym's shared failsafe.</strong> Assert top-level and nested masks are both true during migration, with <code>failure_kind="judge_failed"</code>. This protects direct consumers even though current RL and Gym collection are already safe.</li>
+        <li><strong>Set explicit RL recipe deadlines.</strong> Derive them from queue latency, token ceiling, and observed minimum judge throughput.</li>
+        <li><strong>Run three end-to-end cases.</strong> Healthy judge; transient 503 that recovers without policy regeneration; persistent judge failure that yields masked rows and zero policy loss.</li>
+        <li><strong>Exercise incomplete membership.</strong> Confirm RL retries the complete group with one incremented shared attempt, not a subset under attempt zero.</li>
+        <li><strong>Validate checkpoint/restart if the target recipe uses it.</strong> The PR explicitly does not provide durable server state.</li>
+        <li><strong>Review the whole submodule range.</strong> A bump from <code>267305e…</code> to a future current-main merge includes hundreds of files beyond this PR.</li>
+      </ol>
+      <p><strong>Bottom line:</strong> this is a deliberate failure-semantics break, not a current-NeMo-RL wire break. With the two integration gates above, it should improve correctness. Without them, the bump can silently mask healthy slow judges or expose unusable zeros to consumers that follow Gym's new top-level contract.</p>
+    </section>
+
+    <footer>
+      Public-source review only. All source links are pinned to immutable SHAs. Reproductions were CPU-focused and did not use private runs, logs, dashboards, tickets, or infrastructure details.
+    </footer>
+  </main>
+  <script>
+    (() => {
+      const button = document.querySelector(".theme-toggle");
+      const sync = () => {
+        button.textContent = document.documentElement.dataset.theme === "light" ? "Dark theme" : "Light theme";
+      };
+      button.addEventListener("click", () => {
+        const light = document.documentElement.dataset.theme !== "light";
+        if (light) document.documentElement.dataset.theme = "light";
+        else delete document.documentElement.dataset.theme;
+        try { localStorage.setItem("engineering-notes-theme", light ? "light" : "dark"); } catch {}
+        sync();
+      });
+      sync();
+    })();
+  </script>
+</body>
+</html>
