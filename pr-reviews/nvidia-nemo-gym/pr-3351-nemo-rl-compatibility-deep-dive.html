@@ -236,35 +236,36 @@
 
     <section class="verdict" aria-labelledby="answer">
       <div class="label warn">Answer first</div>
-      <h2 id="answer" style="margin-top:0">Not an API break for current NeMo RL, but not a safe blind submodule bump</h2>
-      <p><strong>Current NeMo RL already implements the identities, full-group retry, and nested sample mask that PR 3351 expects.</strong> The successful GenRM path is compatible. The failure path is intentionally behavior-changing: judge failures that previously became ordinary default scores now become zero-valued, masked failure rows.</p>
-      <p>Two cautions remain. First, a clean merge with current Gym <code>main</code> leaves the new standard top-level <code>mask_sample</code> field false while the legacy RL-specific nested mask is true. This is not a current-RL blocker—RL still masks correctly—but it is a real shared Gym contract gap for direct clients. Second, current NeMo RL GenRM recipes inherit the PR's new 300-second judge deadline while permitting 16,384 or 24,576 output tokens. That can convert slow but healthy judge calls into masked groups.</p>
+      <h2 id="answer" style="margin-top:0">No wire break, but behavior-breaking for two current NeMo RL training paths</h2>
+      <p><strong>Current NeMo RL already implements the identities and retry coordinates that PR 3351 expects.</strong> The successful GenRM path is compatible. The failure path is intentionally different: judge failures that previously became ordinary default scores now become zero-valued, masked failure rows.</p>
+      <p>The mask is not safely consumed everywhere. The synchronous data-plane GRPO path drops <code>mask_sample</code> and can train the failed trajectory. The traditional GRPO path zeroes that trajectory's own loss, but still includes its placeholder zero in the sibling baseline and changes valid siblings' advantages. SingleController is the compatible path. The new 300-second judge deadline and Gym's split top-level/nested failure contract add two more integration cautions.</p>
       <div class="summary-grid">
         <div class="card"><div class="label ok">Compatible</div><br><strong>Group coordinates</strong><br><span class="muted">RL stamps group ID, shared attempt, and local rollout index.</span></div>
-        <div class="card"><div class="label ok">Compatible</div><br><strong>RL loss mask</strong><br><span class="muted">RL reads the nested flag and zeroes the loss multiplier.</span></div>
-        <div class="card"><div class="label warn">Review the bump</div><br><strong>Mainline seam + timeouts</strong><br><span class="muted">Fix the shared mask contract and size recipe deadlines explicitly.</span></div>
+        <div class="card"><div class="label warn">Blocking</div><br><strong>Synchronous GRPO</strong><br><span class="muted">The data-plane conversion drops the mask and trains the placeholder zero.</span></div>
+        <div class="card"><div class="label warn">Blocking</div><br><strong>Traditional GRPO</strong><br><span class="muted">The failed row shifts sibling baselines even though its own loss is zero.</span></div>
       </div>
     </section>
 
     <figure class="figure">
       <figcaption>Primary path: one failed GenRM group after PR 3351</figcaption>
-      <div class="flow" role="img" aria-label="NeMo RL stamps cohort coordinates, Gym retains answers on judge failure, and NeMo RL masks the failed samples">
+      <div class="flow" role="img" aria-label="NeMo RL stamps cohort coordinates, Gym retains answers on judge failure, and RL training paths consume the mask differently">
         <div class="node active"><strong>NeMo RL</strong><span>8 siblings</span><code>group=math-42<br>attempt=0<br>slot=0…7</code></div>
         <div class="arrow" aria-hidden="true">→</div>
         <div class="node active"><strong>Gym cohort</strong><span>collect all slots</span><span>judge concurrently</span></div>
         <div class="arrow" aria-hidden="true">→</div>
         <div class="node problem"><strong>Judge failure</strong><span>answers preserved</span><code>reward=0<br>judge_failed<br>mask=true</code></div>
         <div class="arrow" aria-hidden="true">→</div>
-        <div class="node alt"><strong>RL training</strong><span>nested mask read</span><code>loss_multiplier=0</code></div>
+        <div class="node problem"><strong>RL consumer fork</strong><span>SingleController: safe</span><span>sync GRPO: trains row</span><span>traditional GRPO: biases siblings</span></div>
       </div>
-      <div class="legend"><span class="l-ok">compatible contract</span><span class="l-warn">failure boundary</span><span class="l-alt">consumer action</span></div>
+      <div class="legend"><span class="l-ok">compatible contract</span><span class="l-warn">failure or training correctness boundary</span></div>
     </figure>
 
     <nav class="toc" aria-label="Contents">
       <strong>Contents</strong>
       <ol>
         <li><a href="#concrete-change">The concrete behavior change</a></li>
-        <li><a href="#rl-contract">Why current RL is compatible</a></li>
+        <li><a href="#rl-contract">Compatible RL contracts</a></li>
+        <li><a href="#rl-findings">RL training blockers</a></li>
         <li><a href="#mainline-finding">Current-main integration finding</a></li>
         <li><a href="#timeouts">Timeout risk in RL recipes</a></li>
         <li><a href="#evidence">What was reproduced</a></li>
@@ -302,7 +303,7 @@ cohort row: reward 0, masked</pre>
     </section>
 
     <section id="rl-contract">
-      <h2>Why current NeMo RL is compatible</h2>
+      <h2>What is compatible in current NeMo RL</h2>
       <p>NeMo RL <code>main</code> pins Gym at <code>267305e…</code>, the merged cohort-identity change that PR 3351 extends. RL itself carries the same three wire keys in <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/interfaces.py#L20-L23">its public integration constants</a>.</p>
       <figure class="figure">
         <figcaption>One replacement attempt, traced through current RL</figcaption>
@@ -310,7 +311,7 @@ cohort row: reward 0, masked</pre>
           <div class="trace-row"><strong>1 · prepare</strong><div>RL mints one ID per prompt group and slots every sibling.</div><div class="trace-value active">group=math-42<br>attempt=0<br>slot=0…7</div></div>
           <div class="trace-row"><strong>2 · Gym fails</strong><div>An incomplete cohort returns an upstream error; a judge failure returns preserved answers with a mask.</div><div class="trace-value problem">cohort or judge failure</div></div>
           <div class="trace-row"><strong>3 · retry</strong><div>For a retryable thrown failure, RL increments the shared group attempt before re-running the complete group.</div><div class="trace-value active">group=math-42<br>attempt=1<br>slot=0…7</div></div>
-          <div class="trace-row"><strong>4 · train</strong><div>For a completed judge-failure row, RL reads <code>instance_config.mask_sample</code> and zeroes its loss.</div><div class="trace-value active">loss_multiplier=0</div></div>
+          <div class="trace-row"><strong>4 · train</strong><div>The next consumer must compose <code>mask_sample</code> into both policy loss and group statistics. Only SingleController completes both steps.</div><div class="trace-value problem">path-dependent</div></div>
         </div>
       </figure>
       <div class="two-col">
@@ -319,17 +320,41 @@ cohort row: reward 0, masked</pre>
           <p><a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/rollouts.py#L2369-L2428">The batched path stamps the three coordinates</a>. <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/rollout_manager.py#L1972-L1983">The retry path increments the shared attempt</a> after a retryable failure.</p>
         </div>
         <div class="card">
-          <h3>Mask consumption is aligned</h3>
-          <p><a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/rollouts.py#L301-L309">RL reads the nested environment flag</a>, carries it into the final batch, and <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/algorithms/grpo.py#L2356-L2371">sets the corresponding loss multiplier to zero</a>. Its default is to honor flagged samples.</p>
+          <h3>The mask reaches RL's rollout batch</h3>
+          <p><a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/rollouts.py#L301-L309">RL reads the nested environment flag</a> and <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/rollouts.py#L3158-L3163">puts it in the final rollout batch</a>. Correctness then depends on the training path retaining and applying it.</p>
         </div>
       </div>
-      <p class="muted">Compatibility here means the current code can interpret the PR's output. It does not mean every old NeMo RL release can. A consumer that neither reads the mask nor routes <code>judge_failed</code> rows would train on the placeholder zero.</p>
+      <p class="muted">Compatibility here is limited to wire identity, replacement attempts, and initial mask extraction. It does not establish correct training behavior.</p>
+      <div class="callout"><strong>Known legacy limitation outside current RL:</strong> the server removes failed legacy groups. A reproduced delayed old member then joined a newly created replacement group under the reused prompt key, producing a hybrid cohort. The PR <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f3bda346baf869f9c51df02e6b7939e6f3f7ebd9/fern/versions/latest/pages/evaluation/genrm-cohorts.mdx#L30-L33">documents that legacy identities cannot isolate late requests</a>. Current RL avoids this specific bug because it supplies explicit group IDs.</div>
+    </section>
+
+    <section id="rl-findings">
+      <h2>Two current RL paths mishandle the new failure row</h2>
+      <div class="finding">
+        <div class="label warn">High · reproduced</div>
+        <h3>Synchronous data-plane GRPO drops the mask and trains the placeholder zero</h3>
+        <p>Gym correctly produces <code>mask_sample=true</code>. RL's rollout postprocessor carries it, but <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/experience/sync_rollout_actor.py#L315-L383"><code>SyncRolloutActor</code> initializes TQ <code>sample_mask</code> only from <code>loss_multiplier</code>, skips the remaining tensor fields, and omits <code>mask_sample</code> from <code>driver_carry</code></a>. <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/algorithms/grpo_sync.py#L931-L970"><code>grpo_sync</code> then trains with that unchanged loss multiplier.</a></p>
+        <pre>Gym mask_sample       [true]
+TQ sample_mask        [1.0]
+grpo_sync sample_mask [1.0]</pre>
+        <p><strong>Consequence:</strong> a persistent judge outage can train an invalid zero-reward trajectory. Before bumping, compose <code>mask_sample</code> into <code>sample_mask</code> before the TQ write and retain it in the driver inputs.</p>
+      </div>
+      <div class="finding">
+        <div class="label warn">Medium · reproduced</div>
+        <h3>Traditional GRPO masks the failed row's loss but lets its zero alter sibling advantages</h3>
+        <p>The traditional path <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/algorithms/grpo.py#L2356-L2371">sets the failed row's loss multiplier to zero</a>. Its advantage call, however, <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/algorithms/grpo.py#L3550-L3561">does not pass <code>valid_mask</code></a>, so the estimator <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/algorithms/advantage_estimator.py#L90-L115">defaults every reward to valid for the per-prompt baseline</a>.</p>
+        <pre>valid rewards                     [1, 3, 2]
+judge-failure placeholder          0
+valid-row advantages, current   [-0.5, 1.5, 0.5]
+valid-row advantages, excluded  [-1.0, 1.0, 0.0]</pre>
+        <p><strong>Consequence:</strong> the invalid row receives no direct policy loss, but it changes the learning signal for every valid sibling. Pass the final sample mask as <code>valid_mask</code>, as SingleController already does when <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/algorithms/single_controller.py#L4964-L4980">composing environment masks</a> and <a href="https://github.com/NVIDIA-NeMo/RL/blob/612d5274059c821dc09c2c90767b546b6f2d50b5/nemo_rl/algorithms/single_controller.py#L5064-L5070">passing the result to the estimator</a>.</p>
+      </div>
     </section>
 
     <section id="mainline-finding">
       <h2>Finding: the clean merge hides a mask contract split</h2>
       <div class="finding">
-        <div class="label warn">High-confidence integration finding · not a current-RL blocker</div>
+        <div class="label warn">Additional shared Gym contract finding</div>
         <h3>PR 3351 only sets the legacy nested mask; current Gym expects the standard top-level mask</h3>
         <p>Current Gym <code>main</code> added <a href="https://github.com/NVIDIA-NeMo/Gym/blob/9164de0efacdafc67b5f21900cca05673b989751/nemo_gym/base_resources_server.py#L104-L137"><code>BaseVerifyResponse.mask_sample</code></a> specifically for unavailable judges and other infrastructure failures. PR 3351's failure path sets only <a href="https://github.com/NVIDIA-NeMo/Gym/blob/f3bda346baf869f9c51df02e6b7939e6f3f7ebd9/resources_servers/genrm_compare/app.py#L421-L432"><code>instance_config.mask_sample</code></a>.</p>
         <p>A synthetic merge was conflict-free and 401 focused tests passed, but the serialized judge-failure row was:</p>
@@ -341,7 +366,7 @@ cohort row: reward 0, masked</pre>
 }
 
 current NeMo RL consumes mask: true</pre>
-        <p><strong>Consequence:</strong> current NeMo RL is protected by its compatibility read. Gym's own collector is also protected because <a href="https://github.com/NVIDIA-NeMo/Gym/blob/9164de0efacdafc67b5f21900cca05673b989751/nemo_gym/rollout_collection.py#L1504-L1527"><code>_ng_failure_class</code> routes the row to the failure sidecar</a>. A direct <code>/verify</code> or <code>/run</code> client following current Gym's standard response contract still sees <code>false</code> and may treat the placeholder zero as usable. The clean git merge and passing suites do not detect this semantic disagreement.</p>
+        <p><strong>Consequence:</strong> Gym's own collector is protected because <a href="https://github.com/NVIDIA-NeMo/Gym/blob/9164de0efacdafc67b5f21900cca05673b989751/nemo_gym/rollout_collection.py#L1504-L1527"><code>_ng_failure_class</code> routes the row to the failure sidecar</a>. RL can read the nested flag, although the training-path bugs above still apply. A direct <code>/verify</code> or <code>/run</code> client following current Gym's standard response contract sees <code>false</code> and may treat the placeholder zero as usable. The clean git merge and passing suites do not detect this semantic disagreement.</p>
         <p><strong>Requested fix in the shared Gym boundary:</strong> update <a href="https://github.com/NVIDIA-NeMo/Gym/blob/9164de0efacdafc67b5f21900cca05673b989751/nemo_gym/judge.py#L84-L109"><code>judge_failsafe</code></a> to set top-level <code>mask_sample=true</code>, <code>failure_kind="judge_failed"</code>, and the human-readable reason, while retaining the nested flag for RL migration. Add one integration test that validates the serialized agent <code>/run</code> result against current <code>BaseVerifyResponse</code>. PR 3351 exposes the gap but need not own the general fix.</p>
       </div>
     </section>
@@ -378,7 +403,9 @@ genrm_compare_resources_server:
             <tr><td>PR-focused lifecycle tests</td><td>PR head</td><td><code>pytest test_cohort_lifecycle.py test_http_lifecycle.py test_review_fixes.py test_reward_profile.py</code></td><td>110 passed</td><td>Focused deadline, retry, cleanup, HTTP, and profiling behavior passes.</td></tr>
             <tr><td>PR plus current Gym main</td><td>Synthetic merge of <code>9164de…</code> + <code>f3bda3…</code></td><td>Merge tree; seven focused test modules</td><td>Conflict-free; 401 passed</td><td>The revisions compose mechanically and their existing focused suites pass.</td></tr>
             <tr><td>Serialized failure contract</td><td>Synthetic merge + RL main</td><td>Run a failed cohort through judge failsafe, response validation, and RL mask extraction</td><td>Top-level false; nested true; RL consumed true</td><td>RL is protected, but the current Gym contract is inconsistent.</td></tr>
-            <tr><td>Current RL identity and mask helpers</td><td>RL main <code>612d52…</code></td><td>Four focused unit tests</td><td>4 passed</td><td>Coordinates are stamped; nested mask is carried and zeroes loss.</td></tr>
+            <tr><td>Current RL identity and mask helpers</td><td>RL main <code>612d52…</code></td><td>Four focused unit tests</td><td>4 passed</td><td>Coordinates are stamped and the nested mask reaches the rollout batch.</td></tr>
+            <tr><td>Synchronous GRPO mask</td><td>RL main <code>612d52…</code></td><td>Replay the actor and trainer's exact field selections with a flagged sample</td><td><code>mask_sample=true</code>; training <code>sample_mask=1</code></td><td>The invalid row remains trainable.</td></tr>
+            <tr><td>Traditional GRPO baseline</td><td>RL main <code>612d52…</code></td><td>Compute one four-row prompt group with rewards <code>[1,3,2,0]</code></td><td>Valid advantages changed from <code>[-1,1,0]</code> to <code>[-.5,1.5,.5]</code></td><td>The placeholder zero biases valid siblings.</td></tr>
           </tbody>
         </table>
       </div>
@@ -387,6 +414,7 @@ genrm_compare_resources_server:
       <h3>Not independently reproduced</h3>
       <ul class="checks">
         <li>Full RL training, checkpoint restart, token-capture integration, or comparative throughput.</li>
+        <li>Automatic full-group replacement after an exhausted judge failure. Gym returns that disposition as HTTP 200 with a mask, while RL retries thrown failures; current tests manually submit the newer attempt. Decide explicitly whether masked acceptance or automatic replacement is the intended training policy.</li>
         <li>A long judge generation that crosses the 300-second boundary.</li>
         <li>The entire future Gym submodule delta. Current Gym <code>main</code> does not yet contain PR 3351. Even pinning the open PR head spans <a href="https://github.com/NVIDIA-NeMo/Gym/compare/267305e2a7bf88153e8ebbca1029ecc1e0f67b25...f3bda346baf869f9c51df02e6b7939e6f3f7ebd9">30 commits and 190 files</a>; current Gym <code>main</code> spans <a href="https://github.com/NVIDIA-NeMo/Gym/compare/267305e2a7bf88153e8ebbca1029ecc1e0f67b25...9164de0efacdafc67b5f21900cca05673b989751">55 commits and 435 files</a>. A future post-merge bump is much broader than PR 3351.</li>
       </ul>
@@ -397,18 +425,20 @@ genrm_compare_resources_server:
       <div class="decision">
         <div class="label ok">Recommendation</div>
         <h3>Proceed only as a staged compatibility bump, not as a routine pin refresh</h3>
-        <p>PR 3351 itself is compatible with current RL's group identity and mask behavior. The top-level mask seam should be fixed in Gym's shared failsafe, but it does not block current RL. The operational gate is to declare measured GenRM deadlines and then test the exact future Gym merge SHA that RL will pin.</p>
+        <p>Do not bump the Gym submodule for GenRM training until RL's synchronous path carries the failure mask into <code>sample_mask</code> and the traditional path excludes masked rewards from group statistics. Then fix the shared Gym failure fields, declare measured GenRM deadlines, and test the exact future Gym merge SHA.</p>
       </div>
       <ol class="checks">
         <li><strong>Wait for and pin the merged SHA.</strong> Current Gym <code>main</code> does not contain PR 3351. Keep the exact resulting revision; do not validate only the old PR head or today's unrelated main.</li>
-        <li><strong>Unify failure fields in Gym's shared failsafe.</strong> Assert top-level and nested masks are both true during migration, with <code>failure_kind="judge_failed"</code>. This protects direct consumers even though current RL and Gym collection are already safe.</li>
+        <li><strong>Unify failure fields in Gym's shared failsafe.</strong> Assert top-level and nested masks are both true during migration, with <code>failure_kind="judge_failed"</code>. This protects direct consumers; the separate RL training fixes remain necessary.</li>
+        <li><strong>Fix RL's synchronous data-plane mask.</strong> Compose <code>mask_sample</code> into <code>sample_mask</code> before TQ storage and cover a <code>judge_failed</code> row end to end.</li>
+        <li><strong>Fix RL's group statistics.</strong> Pass the final sample mask as <code>valid_mask</code> for GRPO/GDPO/Reinforce++ paths so placeholder rewards cannot move sibling advantages.</li>
         <li><strong>Set explicit RL recipe deadlines.</strong> Derive them from queue latency, token ceiling, and observed minimum judge throughput.</li>
         <li><strong>Run three end-to-end cases.</strong> Healthy judge; transient 503 that recovers without policy regeneration; persistent judge failure that yields masked rows and zero policy loss.</li>
         <li><strong>Exercise incomplete membership.</strong> Confirm RL retries the complete group with one incremented shared attempt, not a subset under attempt zero.</li>
         <li><strong>Validate checkpoint/restart if the target recipe uses it.</strong> The PR explicitly does not provide durable server state.</li>
         <li><strong>Review the whole submodule range.</strong> A bump from <code>267305e…</code> to a future current-main merge includes hundreds of files beyond this PR.</li>
       </ol>
-      <p><strong>Bottom line:</strong> this is a deliberate failure-semantics break, not a current-NeMo-RL wire break. With the two integration gates above, it should improve correctness. Without them, the bump can silently mask healthy slow judges or expose unusable zeros to consumers that follow Gym's new top-level contract.</p>
+      <p><strong>Bottom line:</strong> this is not a wire-format break, but it is a training-correctness break for current RL paths that did not previously need to consume judge-failure masks. A bump before the RL fixes can train invalid samples or corrupt valid siblings' advantages. After those fixes, the new failure semantics should improve correctness.</p>
     </section>
 
     <footer>
