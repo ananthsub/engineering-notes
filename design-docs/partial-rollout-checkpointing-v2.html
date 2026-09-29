@@ -1,0 +1,945 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Partial-rollout checkpointing v2: lifecycle walkthrough</title>
+<script>
+  (() => {
+    try {
+      if (localStorage.getItem("engineering-notes-theme") === "light") {
+        document.documentElement.dataset.theme = "light";
+      }
+    } catch {}
+  })();
+</script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+    --diagram-ok: #5bc0eb;
+    --diagram-problem: #ffb000;
+    --diagram-alt: #d98bc3;
+    --diagram-neutral: #c7ced8;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --surface: #f6f8fa;
+    --border: #d0d7de;
+    --text: #1f2328;
+    --dim: #59636e;
+    --accent: #0969da;
+    --diagram-ok: #005a8d;
+    --diagram-problem: #9a4d00;
+    --diagram-alt: #7a3e6d;
+    --diagram-neutral: #4b5563;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 80px; }
+  h1 { font-size: 1.9rem; line-height: 1.25; margin: 40px 0 8px; }
+  h2 { font-size: 1.35rem; margin: 48px 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; margin: 24px 0 8px; }
+  p, li { max-width: 72ch; }
+  a { color: var(--accent); }
+  code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  .dim { color: var(--dim); }
+  .lede { font-size: 1.08rem; }
+  #theme-toggle {
+    position: fixed; top: 12px; right: 12px; z-index: 10;
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 12px; font: inherit; cursor: pointer;
+  }
+  nav.toc { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; margin: 20px 0; }
+  nav.toc ol { margin: 0; padding-left: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin: 14px 0; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 600; }
+  .pill { display: inline-block; border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; font-size: 0.85rem; color: var(--dim); }
+
+  /* Scenario player */
+  .player-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+  .player-controls select, .player-controls button {
+    font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 12px; min-height: 40px; cursor: pointer;
+  }
+  .player-controls button:disabled { opacity: 0.45; cursor: default; }
+  .step-counter { color: var(--dim); }
+  .step-text { min-height: 7.5em; }
+  .step-text h3 { margin-top: 4px; }
+  .seq-wrap { overflow: auto; max-height: 72vh; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+  .seq-wrap svg { display: block; }
+  .seq-head { position: sticky; top: 0; z-index: 1; background: var(--bg); border-bottom: 1px solid var(--border); }
+  .states { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; margin-top: 12px; }
+  .state-box { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: var(--surface); font-size: 0.92rem; }
+  .state-box b { display: block; font-size: 0.8rem; color: var(--dim); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+  .state-box.changed { border: 2px solid var(--diagram-ok); }
+  .state-box.problem { border: 2px dashed var(--diagram-problem); }
+  .step-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+  .step-list button { font: inherit; font-size: 0.85rem; min-width: 36px; min-height: 36px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+  .step-list button.current { border: 2px solid var(--accent); font-weight: 700; }
+
+  /* SVG */
+  svg text { fill: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  svg .dimtext { fill: var(--dim); }
+  svg .lane-line { stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 2 4; }
+  svg .lane-head { fill: var(--surface); stroke: var(--diagram-neutral); stroke-width: 1.5; }
+  svg .msg-data { stroke: var(--diagram-ok); stroke-width: 2; fill: none; }
+  svg .msg-control { stroke: var(--diagram-alt); stroke-width: 2; stroke-dasharray: 7 4; fill: none; }
+  svg .msg-reply { stroke: var(--diagram-neutral); stroke-width: 1.5; stroke-dasharray: 2 3; fill: none; }
+  svg .msg-problem { stroke: var(--diagram-problem); stroke-width: 2.5; stroke-dasharray: 10 3 2 3; fill: none; }
+  svg .msg-local { stroke: var(--diagram-neutral); stroke-width: 1.5; fill: none; }
+  svg .old { opacity: 0.28; }
+  svg .current-row { fill: var(--surface); }
+  svg .ah-data { fill: var(--diagram-ok); }
+  svg .ah-control { fill: var(--diagram-alt); }
+  svg .ah-reply { fill: var(--diagram-neutral); }
+  svg .ah-problem { fill: var(--diagram-problem); }
+  svg .ah-local { fill: var(--diagram-neutral); }
+  svg .node { fill: var(--surface); stroke: var(--diagram-neutral); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  svg .node.active { stroke: var(--diagram-ok); stroke-width: 3; stroke-dasharray: none; }
+  svg .node.bad { stroke: var(--diagram-problem); stroke-width: 2.5; stroke-dasharray: 8 3; }
+  svg .edge { stroke: var(--diagram-neutral); stroke-width: 1.5; fill: none; }
+  svg .edge.bad { stroke: var(--diagram-problem); stroke-dasharray: 8 3; }
+  svg .edge-arrow { fill: var(--diagram-neutral); }
+  svg .edge-arrow.bad { fill: var(--diagram-problem); }
+  svg .box { fill: var(--surface); stroke: var(--diagram-neutral); stroke-width: 1.5; }
+  svg .box.gym { stroke: var(--diagram-ok); stroke-width: 2; }
+  svg .box.rl { stroke: var(--diagram-alt); stroke-width: 2; stroke-dasharray: 7 4; }
+  svg .box.selected { stroke-width: 4; }
+  svg .clickable { cursor: pointer; }
+  .sm-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .sm-tabs button { font: inherit; min-height: 40px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+  .sm-tabs button.current { border: 2px solid var(--accent); font-weight: 700; }
+  @media (max-width: 640px) { h1 { font-size: 1.5rem; } }
+</style>
+</head>
+<body>
+<button id="theme-toggle" type="button" aria-label="Switch color theme">Light theme</button>
+<main>
+
+<h1>Partial-rollout checkpointing v2: how the pieces talk</h1>
+<p class="dim">Design v2 · environment-server architecture · draft for review, not yet merged</p>
+
+<p class="lede">
+A long agentic rollout should survive a trainer checkpoint and a crash without being thrown away.
+This page walks through the lifecycle message by message: a normal episode, a checkpoint taken
+in place, a crash followed by a restore, a straggler that misses the deadline, and a generation
+that is cut mid-decode. Each step shows who sends what to whom and what every component's state
+machine is doing.
+</p>
+
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><a href="#components">Components and what each owns</a></li>
+    <li><a href="#player">Step through the lifecycle</a></li>
+    <li><a href="#modes">Wait or replay: steps in flight at a checkpoint</a></li>
+    <li><a href="#machines">State machines</a></li>
+    <li><a href="#records">What a checkpoint stores</a></li>
+    <li><a href="#failures">Failures and edge cases</a></li>
+    <li><a href="#apis">Control API</a></li>
+    <li><a href="#changes">What changed from the earlier design</a></li>
+  </ol>
+</nav>
+
+<div class="card">
+  <b>The rule that shapes everything:</b> the component that decides the next operation owns
+  the state needed to make that decision. The environment server owns where an episode is in its
+  protocol. The agent owns its turn loop. The resources server owns environment state. The policy
+  model server owns token-free lineage. The training framework owns tokens and the global
+  checkpoint. No component persists another component's facts.
+</div>
+
+<h2 id="components">1. Components and what each owns</h2>
+<p>Select a component to see what it owns, what it checkpoints, and what it never does.</p>
+<div class="scroll">
+<svg id="component-map" viewBox="0 0 940 400" role="img" aria-labelledby="cm-title">
+  <title id="cm-title">Component map: the training framework calls Gym's checkpoint coordination, which calls one participant per Gym server</title>
+</svg>
+</div>
+<div class="card" id="component-detail" aria-live="polite"></div>
+
+<h2 id="player">2. Step through the lifecycle</h2>
+<p>
+Pick a scenario and step through it. In the diagram, the current step's messages are drawn at full
+strength; earlier steps are faded. The boxes under the diagram show each component's state after the
+step; a thick solid border marks a change and a dashed border marks a problem state.
+</p>
+
+<div class="player-controls">
+  <label for="scenario-select" class="dim">Scenario</label>
+  <select id="scenario-select"></select>
+  <button id="prev-step" type="button">◀ Back</button>
+  <button id="next-step" type="button">Next ▶</button>
+  <span class="step-counter" id="step-counter"></span>
+</div>
+<ul class="step-list" id="step-list" aria-label="Jump to step"></ul>
+
+<div class="card step-text" id="step-text" aria-live="polite"></div>
+
+<div class="seq-wrap">
+  <svg id="sequence-head" class="seq-head" viewBox="0 0 960 70" width="960" height="70" aria-hidden="true"></svg>
+  <svg id="sequence" role="img" aria-labelledby="seq-title"><title id="seq-title">Sequence diagram for the selected scenario</title></svg>
+</div>
+<div class="states" id="states"></div>
+
+<h2 id="modes">3. Wait or replay: steps in flight at a checkpoint</h2>
+<p>
+An episode is a sequence of steps. After each completed step the owner records a <b>boundary</b>:
+the next step and the results it needs. A checkpoint can always be taken at a boundary. The question
+is what to do with a step that is still running when prepare arrives. Each step has one of two modes.
+</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Mode</th><th>While the checkpoint runs</th><th>After a crash</th><th>When to use</th></tr></thead>
+  <tbody>
+    <tr><td><b>wait</b> (default)</td><td>Prepare waits for the step to finish, then the episode parks at the boundary after it, with the step's result recorded. Past the deadline, the rollout is a blocker and the framework retires it.</td><td>Continue after the step; it is not repeated.</td><td>Always correct. The default for any step nobody has declared replayable.</td></tr>
+    <tr><td><b>replay</b> (optimization)</td><td>Prepare does not wait: the episode counts as parked at the boundary before the step. The step keeps running; its result is held and acted on only after resume.</td><td>The step is re-issued from the boundary before it.</td><td>Steps that are safe to run again and do not change checkpointed state: idempotent seeds, pure or judge-based verification, policy calls.</td></tr>
+  </tbody>
+</table>
+</div>
+<p>The environment server owns the episode's steps, so it decides. Whoever implements a step declares whether it may be replayed:</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Step implemented by</th><th>Declared by</th><th>Replay allowed when</th></tr></thead>
+  <tbody>
+    <tr><td>The environment server itself (for example, verification computed in process)</td><td>the environment-server implementation</td><td>it declares the step safe to re-run</td></tr>
+    <tr><td>A resources server (<code>/verify</code>, <code>/seed_session</code>)</td><td>the resources server; the environment server reads the declaration at startup</td><td>the resources server declares it replay-safe (seeds are idempotent by contract); the environment server may still choose to wait</td></tr>
+    <tr><td>An agent (one activation)</td><td>the agent's own turn-loop boundaries</td><td>always covered: the agent parks itself, and an in-flight policy call is held</td></tr>
+    <tr><td>A tool call that mutates environment state</td><td>—</td><td>never: accepted mutations finish before state is exported</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="card">
+  <b>Why the two modes are not interchangeable.</b> In wait mode the boundary after the step must carry the
+  step's <i>result</i>, never "still pending". The resources server exports its state after the step finished,
+  and the environment server may receive the reply slightly later. A record that said "pending" would make a
+  restore re-run a possibly state-changing verification against state that already includes its effects. In
+  replay mode either record is correct, because running the step again is declared safe.
+</div>
+<p>The resources server follows the same declaration for its own readiness: an in-flight verification it declared replayable does not block its prepare; one in wait mode does. Environment servers that verify in process need no resources server at all.</p>
+
+<h2 id="machines">4. State machines</h2>
+<p>
+Every participant runs the same control-phase machine. Agent sessions, policy calls, and episodes
+have their own small machines. While a scenario plays, the machine that the current step affects
+highlights its current state with a thick solid border.
+</p>
+<div class="sm-tabs" id="sm-tabs" role="tablist"></div>
+<div class="scroll"><svg id="state-machine" role="img" aria-labelledby="sm-title"><title id="sm-title">Selected state machine</title></svg></div>
+<div class="card" id="sm-text"></div>
+
+<h2 id="records">5. What a checkpoint stores</h2>
+<p>
+Each participant writes one records file and then a manifest carrying the file's digest, under
+<code>&lt;checkpoint_dir&gt;/gym/&lt;kind&gt;/&lt;server&gt;/</code>. A directory with a manifest never
+changes. The training framework saves its token store next to it and publishes the whole
+checkpoint last.
+</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Participant</th><th>One record per</th><th>Record contents</th><th>Never stored</th></tr></thead>
+  <tbody>
+    <tr><td>Environment server</td><td>episode at a step boundary</td><td>episode ID, task digest, the next step and the results it needs (for example, the final agent response and observations before verification, or the verification result after it), and open session handles (resources and agent session IDs and cookies)</td><td>anything the agent or resources server owns</td></tr>
+    <tr><td>Agent server</td><td>agent session</td><td>episode ID, agent-owned session data (tool access, cookies), and the latest turn-loop boundary</td><td>the episode's protocol position, environment state, token arrays</td></tr>
+    <tr><td>Policy model server</td><td>continued episode</td><td>token-free capture-ledger rows up to the checkpoint, minus undelivered calls, plus the generation cut of an undelivered call</td><td>token IDs, logprobs, masks (the token store owns these)</td></tr>
+    <tr><td>Resources server</td><td>live session (exported mode only)</td><td>episode ID and the environment's typed session state</td><td>sessions of stateless or restart-only servers</td></tr>
+    <tr><td>Training framework</td><td>—</td><td>token store snapshot, replay and dataloader state, and the published marker naming every Gym manifest</td><td>—</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="failures">6. Failures and edge cases</h2>
+<p>Every path fails closed: nothing is published unless every participant committed a consistent cut.</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Situation</th><th>What happens</th><th>Who decides next</th></tr></thead>
+  <tbody id="failure-rows"></tbody>
+</table>
+</div>
+
+<h2 id="apis">7. Control API</h2>
+<p>
+Every participating server exposes the same bearer-protected routes. Gym's checkpoint coordination calls them
+in the required order; the training framework calls the coordination.
+</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Route</th><th>Valid in phase</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>POST /ng-control/v1/checkpoint/prepare</code></td><td>idle, preparing</td><td>close admission, then wait until ready or the deadline; report blockers</td></tr>
+    <tr><td><code>POST …/retire</code></td><td>preparing, prepared, restored, idle</td><td>discard named attempts and fence them</td></tr>
+    <tr><td><code>POST …/commit</code></td><td>prepared</td><td>re-check readiness, write records then manifest; idempotent</td></tr>
+    <tr><td><code>POST …/restore</code></td><td>idle, fresh process</td><td>validate everything, install under the next attempt, stay closed</td></tr>
+    <tr><td><code>POST …/resume</code></td><td>any non-idle</td><td>reopen admission and release parked work; also the abort path</td></tr>
+    <tr><td><code>GET …/status</code></td><td>any</td><td>phase, checkpoint ID, readiness report, and checkpoint mode</td></tr>
+    <tr><td><code>POST /ng-control/v1/generation-cut</code> (inference worker)</td><td>—</td><td>stage the prefix of each in-flight call and return a receipt</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+Coordination order: <b>prepare</b> environment servers → policy model → agents → resources.
+<b>Commit</b> in any order, except that the model commit is scoped to the episodes the other
+participants exported. <b>Resume</b> resources → policy model → agents → environment servers.
+<b>Restore</b> is all or nothing: if any participant fails, every participant resumes empty and the
+training framework restarts those rollouts from their input.
+</p>
+
+<h2 id="changes">8. What changed from the earlier design</h2>
+<ul>
+  <li><b>The environment server owns the protocol boundary.</b> The earlier draft kept it inside the agent's <code>/run</code>. Legacy <code>/run</code> agents still continue, with the agent owning the whole episode.</li>
+  <li><b>Every episode step has a checkpoint mode.</b> The owner records a boundary after each step, and a step in flight is either waited on (the default) or replayed after a crash when its implementer declares that safe. This covers slow verification, whether it runs in a resources server or in the environment server itself.</li>
+  <li><b>Checkpoints no longer wait for generations to finish.</b> Undelivered responses are held; the agent is still at the boundary before the call, so the call is re-issued after a restore, and a generation cut can keep its prefix.</li>
+  <li><b>No completed-result acknowledgement.</b> A result the training framework did not receive before its barrier restarts from input. This is always correct and removes a class of stalls.</li>
+  <li><b>Lineage continues through the ledger itself.</b> Restored rows become the next attempt's ledger, so the first resumed call finds its parent normally; no one-shot parent header.</li>
+  <li><b>One control plane for every participant</b> and one records file per participant, instead of a copy per component and one file per rollout.</li>
+  <li><b>Gym owns the participant order</b>; the training framework calls Gym's checkpoint coordination instead of sequencing participants itself.</li>
+  <li><b>Unsupported means restart-only, never silent.</b> A server that cannot continue a rollout still participates and blocks until that rollout is retired.</li>
+</ul>
+
+</main>
+
+<script>
+(() => {
+  // ---------- theme ----------
+  const toggle = document.getElementById("theme-toggle");
+  const label = () => { toggle.textContent = document.documentElement.dataset.theme === "light" ? "Dark theme" : "Light theme"; };
+  label();
+  toggle.addEventListener("click", () => {
+    const light = document.documentElement.dataset.theme !== "light";
+    if (light) document.documentElement.dataset.theme = "light"; else delete document.documentElement.dataset.theme;
+    try { localStorage.setItem("engineering-notes-theme", light ? "light" : "dark"); } catch {}
+    label();
+  });
+
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs = {}, text) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+
+  // ---------- components ----------
+  const COMPONENTS = {
+    RL: { name: "Training framework", sub: "controller + Gym actor", group: "rl",
+      owns: "When to checkpoint, the token store (TransferQueue), replay and dataloader state, global publication, and every rollout's fate: continue, restart from input, or drop.",
+      stores: "Its own checkpoint, plus the published marker that names every Gym manifest and the token-store snapshot they reference.",
+      never: "Sequence Gym participants or read any environment's or agent's private state." },
+    ORC: { name: "Gym checkpoint coordination", sub: "prepare · commit · restore · resume", group: "gym",
+      owns: "The order in which Gym participants are prepared, committed, restored, and resumed, the model commit scope, fanning out retires, and all-or-nothing restore. The training framework calls it.",
+      stores: "Nothing. It is a set of stateless functions over the participants' control routes.",
+      never: "Decide a rollout's fate or touch the token store." },
+    ENV: { name: "Environment server", sub: "episode protocol", group: "gym",
+      owns: "One episode's protocol: seed resources, seed agent, invoke the agent, close, verify, clean up. It records a boundary after every completed step and decides, per step, whether a checkpoint waits for an in-flight step or replays it later.",
+      stores: "For each episode: its latest boundary (the next step and the results that step needs), the open resources and agent session IDs and cookies it would reuse, and the cleanup it still owes.",
+      never: "The agent's turn loop or environment state. Verification may run inside the environment server or in a resources server. Legacy relays are transparent and store nothing." },
+    AGT: { name: "Agent server", sub: "sessions · turn loop", group: "gym",
+      owns: "Its sessions and the turn loop inside one activation. It records a boundary before each model call and after each tool round, and parks there when a checkpoint asks.",
+      stores: "Per session: the agent's own session data and the latest boundary. For a legacy /run, the episode is keyed by its logical rollout.",
+      never: "Where the episode is in its protocol (native path) or environment state." },
+    POL: { name: "Policy model server", sub: "admission · token-free ledger", group: "gym",
+      owns: "Admission of policy generations, holding responses the agent has not received, the token-free capture ledger, and asking workers to cut in-flight generations.",
+      stores: "Ledger rows of each continued episode up to the cut, and the generation cut of an undelivered call.",
+      never: "Token arrays. Judge and simulator model servers do not participate and keep serving." },
+    WRK: { name: "Inference worker", sub: "vLLM worker", group: "rl",
+      owns: "Decoding, and staging each call's exact token delta in the token store before acknowledging it. On a cut, it stages the prefix generated so far.",
+      stores: "Everything it stages lives in the token store, which the training framework checkpoints.",
+      never: "Lineage decisions: it follows the admission the model server attaches." },
+    TQ: { name: "Token store", sub: "TransferQueue", group: "rl",
+      owns: "Token IDs, logprobs, and masks for every staged call and cut prefix.",
+      stores: "Snapshotted by the training framework at its own barrier, after Gym commits.",
+      never: "Decide which rows are live: Gym's restored ledger names the rows a continuation uses; others are orphaned and masked." },
+    RES: { name: "Resources server", sub: "tools · environment state", group: "gym",
+      owns: "Environment state per session, keyed by the session cookie. It declares a checkpoint mode (stateless, exported, or restart-only) and whether its verification may be replayed.",
+      stores: "Exported mode: typed state per live session. Stateless: nothing. Restart-only: nothing, and a live session blocks prepare until retired.",
+      never: "Where the agent or episode is. Accepted tool calls finish before its state is exported." },
+  };
+  const LANES = ["RL", "ORC", "ENV", "AGT", "POL", "WRK", "TQ", "RES"];
+
+  const componentDetail = document.getElementById("component-detail");
+  const drawComponentMap = (selected) => {
+    const svg = document.getElementById("component-map");
+    [...svg.querySelectorAll("g, text, line, path, rect, defs")].forEach((node) => node.remove());
+    const defs = el("defs");
+    const marker = el("marker", { id: "cm-arrow", viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+    marker.appendChild(el("path", { d: "M0,0 L10,5 L0,10 z", class: "edge-arrow" }));
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+    const pos = {
+      RL: [20, 50, 190, 64], ORC: [250, 50, 250, 64], WRK: [540, 50, 150, 64], TQ: [750, 50, 170, 64],
+      ENV: [20, 210, 205, 64], AGT: [252, 210, 205, 64], POL: [484, 210, 205, 64], RES: [716, 210, 205, 64],
+    };
+    const edges = [
+      ["M210,82 L246,82", "calls", 228, 74],
+      ["M375,114 L122,206", "", 0, 0], ["M375,114 L354,206", "", 0, 0], ["M375,114 L586,206", "", 0, 0], ["M375,114 L818,206", "", 0, 0],
+      ["M620,210 L620,118", "generate · cut", 630, 196],
+      ["M690,82 L746,82", "stage", 718, 104],
+      ["M115,50 L115,22 L835,22 L835,46", "snapshot + publish (training framework)", 300, 16],
+    ];
+    for (const [d, text, lx, ly] of edges) {
+      svg.appendChild(el("path", { d, class: "edge", "marker-end": "url(#cm-arrow)" }));
+      if (text) svg.appendChild(el("text", { x: lx, y: ly, "font-size": "13", class: "dimtext", "text-anchor": lx < 300 || text === "stage" ? "middle" : "start" }, text));
+    }
+    for (const [key, [x, y, w, h]] of Object.entries(pos)) {
+      const comp = COMPONENTS[key];
+      const g = el("g", { class: "clickable", tabindex: "0", role: "button", "aria-label": `${comp.name}: show details` });
+      g.appendChild(el("rect", { x, y, width: w, height: h, rx: "8", class: `box ${comp.group}${key === selected ? " selected" : ""}` }));
+      g.appendChild(el("text", { x: x + 12, y: y + 27, "font-size": "15", "font-weight": "700", "text-decoration": "underline" }, comp.name));
+      g.appendChild(el("text", { x: x + 12, y: y + 49, "font-size": "13", class: "dimtext" }, comp.sub));
+      const pick = () => { drawComponentMap(key); showComponent(key); };
+      g.addEventListener("click", pick);
+      g.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(); } });
+      svg.appendChild(g);
+    }
+    const legend = el("g");
+    legend.appendChild(el("rect", { x: "20", y: "305", width: "24", height: "16", rx: "3", class: "box gym" }));
+    legend.appendChild(el("text", { x: "52", y: "318", "font-size": "13" }, "Gym (solid border)"));
+    legend.appendChild(el("rect", { x: "240", y: "305", width: "24", height: "16", rx: "3", class: "box rl" }));
+    legend.appendChild(el("text", { x: "272", y: "318", "font-size": "13" }, "Training framework side (dashed border)"));
+    legend.appendChild(el("text", { x: "20", y: "350", "font-size": "13", class: "dimtext" }, "Arrows show who calls whom for checkpoint control. Episode traffic (environment → agent → model, tools)"));
+    legend.appendChild(el("text", { x: "20", y: "370", "font-size": "13", class: "dimtext" }, "is shown step by step in section 2."));
+    svg.appendChild(legend);
+  };
+  const showComponent = (key) => {
+    const comp = COMPONENTS[key];
+    componentDetail.innerHTML = `<h3>${comp.name}</h3>
+      <p><b>Owns.</b> ${comp.owns}</p><p><b>Checkpoints.</b> ${comp.stores}</p><p><b>Never.</b> ${comp.never}</p>`;
+  };
+  drawComponentMap("ENV");
+  showComponent("ENV");
+
+  // ---------- state machines ----------
+  const MACHINES = {
+    phase: {
+      title: "Participant control phase",
+      text: "Every participant (environment, agent, policy model, resources) runs this machine. Transitions are serialized by one lock; prepare waits for readiness outside the lock so retire and resume can interrupt it. A prepare that misses its deadline stays closed and reports blockers; a prepare that raises reopens admission. Resume is also the abort path, and it retires the checkpoint ID so a stale controller cannot reopen anything. If the controller stops renewing its lease, the participant resumes on its own.",
+      nodes: { idle: [20, 150], preparing: [250, 70], prepared: [490, 70], committed: [770, 70], restored: [390, 235] },
+      edges: [
+        ["idle", "preparing", "prepare"], ["preparing", "prepared", "ready"], ["prepared", "committed", "commit"],
+        ["preparing", "preparing", "deadline: blockers"], ["committed", "idle", "resume"], ["prepared", "idle", "resume · abort", "below"],
+        ["idle", "restored", "restore (fresh)"], ["restored", "idle", "resume"],
+      ],
+      bad: ["preparing->preparing"],
+    },
+    session: {
+      title: "Agent session",
+      text: "One agent session (or one legacy /run episode). An activation records a boundary before each model call and after each tool round. When a checkpoint asks it to park, it stops at the next boundary. A session whose model call is in flight is also at a boundary, because the policy model holds that response until resume.",
+      nodes: { idle: [20, 150], running: [260, 150], park_requested: [510, 50], at_boundary: [780, 150], retired: [260, 255] },
+      edges: [
+        ["idle", "running", "activation"], ["running", "park_requested", "prepare"], ["park_requested", "at_boundary", "next boundary"],
+        ["running", "at_boundary", "awaiting held call"], ["at_boundary", "running", "resume"], ["running", "idle", "done"],
+        ["running", "retired", "retire"],
+      ],
+      bad: ["running->retired"],
+    },
+    call: {
+      title: "Policy call",
+      text: "One generation request at the policy model server. It is refused while admission is closed. An admitted call that has not started responding when a checkpoint closes admission becomes undelivered: its response is held, its ledger row is left out of the cut, and with generation cuts its prefix is staged. A response that already started streaming must finish before prepare is ready.",
+      nodes: { admitted: [20, 150], generating: [270, 150], held: [510, 50], cut: [780, 50], delivered: [780, 245], refused: [270, 255] },
+      edges: [
+        ["admitted", "generating", "dispatch"], ["generating", "held", "checkpoint closes"], ["held", "cut", "stage prefix"],
+        ["held", "delivered", "resume"], ["cut", "delivered", "resume"], ["generating", "delivered", "no checkpoint"], ["admitted", "refused", "closed: 409"],
+      ],
+      bad: ["admitted->refused"],
+    },
+    episode: {
+      title: "Environment episode",
+      text: "One episode at the environment server. After each completed step it is at a boundary, which is always checkpointable. A step in flight is either waited on (the checkpoint waits, then the episode parks at the boundary after it, with the result recorded) or replayable (the episode counts as parked at the boundary before it, and the step's result is held until resume). During the agent activation, the agent's own boundaries cover the episode. A restored record resumes at its boundary.",
+      nodes: { boundary: [370, 140], wait_step: [40, 40], replay_step: [40, 245], agent_activation: [700, 40], done: [700, 245], restored: [370, 245] },
+      edges: [
+        ["boundary", "wait_step", "start (wait)"], ["wait_step", "boundary", "done: record result"],
+        ["boundary", "replay_step", "start (replay)"], ["replay_step", "boundary", "done: hold if closed"],
+        ["boundary", "agent_activation", "invoke agent"], ["agent_activation", "boundary", "agent returns"],
+        ["boundary", "done", "return result"], ["restored", "boundary", "restore"],
+      ],
+      bad: [],
+    },
+    resources: {
+      title: "Resources session",
+      text: "A resources session starts when /seed_session succeeds (Gymnasium: /reset) and ends at /close_session, /verify, or a terminal step. The server's checkpoint mode decides what a live session means for a checkpoint.",
+      nodes: { unbound: [20, 130], live: [300, 130], ended: [650, 130], fenced: [300, 245] },
+      edges: [["unbound", "live", "seed"], ["live", "ended", "close · verify · end"], ["live", "fenced", "retire"]],
+      bad: ["live->fenced"],
+    },
+  };
+
+  let currentMachine = "phase";
+  let machineHighlight = {};
+  const smTabs = document.getElementById("sm-tabs");
+  for (const [key, machine] of Object.entries(MACHINES)) {
+    const button = document.createElement("button");
+    button.type = "button"; button.textContent = machine.title; button.dataset.key = key; button.setAttribute("role", "tab");
+    button.addEventListener("click", () => { currentMachine = key; drawMachine(); });
+    smTabs.appendChild(button);
+  }
+  const drawMachine = () => {
+    const machine = MACHINES[currentMachine];
+    [...smTabs.children].forEach((b) => { b.classList.toggle("current", b.dataset.key === currentMachine); b.setAttribute("aria-selected", b.dataset.key === currentMachine); });
+    const svg = document.getElementById("state-machine");
+    svg.setAttribute("viewBox", "0 0 940 325");
+    [...svg.querySelectorAll("g, text, path, rect, defs")].forEach((node) => node.remove());
+    const defs = el("defs");
+    for (const bad of [false, true]) {
+      const marker = el("marker", { id: `sm-arrow${bad ? "-bad" : ""}`, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+      marker.appendChild(el("path", { d: "M0,0 L10,5 L0,10 z", class: `edge-arrow${bad ? " bad" : ""}` }));
+      defs.appendChild(marker);
+    }
+    svg.appendChild(defs);
+    const W = 130, H = 44;
+    for (const [from, to, text, side] of machine.edges) {
+      const bad = machine.bad.includes(`${from}->${to}`);
+      const [fx, fy] = machine.nodes[from]; const [tx, ty] = machine.nodes[to];
+      let d; let lx; let ly;
+      if (from === to) {
+        d = `M${fx + 40},${fy} C${fx + 40},${fy - 45} ${fx + 110},${fy - 45} ${fx + 110},${fy}`;
+        lx = fx + 20; ly = fy - 42;
+      } else {
+        const reverse = machine.edges.some(([a, b]) => a === to && b === from);
+        const x1 = fx + W / 2, y1 = fy + H / 2, x2 = tx + W / 2, y2 = ty + H / 2;
+        const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy);
+        const ux = dx / len, uy = dy / len;
+        const clip = (cx, cy, sx) => {
+          const tX = Math.abs(W / 2 / (ux || 1e-9)), tY = Math.abs(H / 2 / (uy || 1e-9));
+          const t = Math.min(tX, tY);
+          return [cx + sx * ux * t, cy + sx * uy * t];
+        };
+        const [sx, sy] = clip(x1, y1, 1); const [ex, ey] = clip(x2, y2, -1);
+        const off = reverse ? 10 : 0;
+        const ox = -uy * off, oy = ux * off;
+        d = `M${sx + ox},${sy + oy} L${ex + ox},${ey + oy}`;
+        // Centre the label on the edge, pushed off it along the edge's upward normal.
+        let nx = -uy, ny = ux;
+        if (ny > 0 || (ny === 0 && nx > 0)) { nx = -nx; ny = -ny; }
+        if (reverse && (ox * nx + oy * ny) < 0) { nx = -nx; ny = -ny; }
+        if (side === "below") { nx = -nx; ny = -ny; }
+        lx = (sx + ex) / 2 + ox + nx * 12; ly = (sy + ey) / 2 + oy + ny * 12 + 4;
+      }
+      svg.appendChild(el("path", { d, class: `edge${bad ? " bad" : ""}`, "marker-end": `url(#sm-arrow${bad ? "-bad" : ""})` }));
+      svg.appendChild(el("text", { x: lx, y: ly, "font-size": "12.5", class: "dimtext", "text-anchor": from === to ? "start" : "middle" }, (bad ? "⚠ " : "") + text));
+    }
+    const active = machineHighlight[currentMachine];
+    for (const [name, [x, y]] of Object.entries(machine.nodes)) {
+      const isActive = active === name;
+      const isBad = ["retired", "refused", "fenced"].includes(name);
+      svg.appendChild(el("rect", { x, y, width: W, height: H, rx: "22", class: `node${isActive ? " active" : ""}${isBad && !isActive ? " bad" : ""}` }));
+      svg.appendChild(el("text", { x: x + W / 2, y: y + 28, "font-size": "15", "text-anchor": "middle", "font-weight": isActive ? "700" : "400" }, (isActive ? "● " : "") + name.replaceAll("_", " ")));
+    }
+    svg.appendChild(el("text", { x: "10", y: "318", "font-size": "12.5", class: "dimtext" }, "● thick solid border: current state in the scenario · dashed border and ⚠: failure or discard path · dotted border: other states"));
+    document.getElementById("sm-text").innerHTML = `<p>${machine.text}</p>`;
+  };
+
+  // ---------- scenarios ----------
+  // kind: data (solid), control (dashed), reply (dotted), problem (dash-dot), local (self note)
+  const S = (title, text, msgs, states = {}, machines = {}) => ({ title, text, msgs, states, machines });
+  const m = (from, to, label, kind = "data") => ({ from, to, label, kind });
+
+  const INITIAL_STATES = {
+    RL: "dispatching rollouts", ORC: "—", ENV: "idle", AGT: "idle", POL: "accepting", WRK: "serving", TQ: "—", RES: "accepting",
+  };
+
+  const SCENARIOS = {
+    native: {
+      name: "Native episode through an environment server",
+      steps: [
+        S("The training framework dispatches an episode",
+          "The framework assigns the logical rollout ID and attempt number before dispatch. Every downstream call carries the attempt-qualified capture key (<code>r</code> for attempt 0, <code>r-a1</code> for attempt 1) as a rollout path prefix.",
+          [m("RL", "ENV", "POST /run {episode_id: r·a0, task}")],
+          { RL: "episode r·a0 in flight", ENV: "episode r·a0: seeding (replayable)" }, { episode: "replay_step" }),
+        S("Seed the resources session",
+          "The environment server chooses the resources session ID and registers its cleanup before seeding, so a lost reply cannot hide the session. The resources server binds the session to the episode.",
+          [m("ENV", "RES", "POST /seed_session {resources_session_id, episode_id}"), m("RES", "ENV", "200 + session cookie", "reply")],
+          { RES: "session live (bound to r·a0)" }, { resources: "live" }),
+        S("Seed the agent session",
+          "The agent receives tool access (the resources URL and cookie) and records a session. The agent owns only what the environment server cannot reconstruct.",
+          [m("ENV", "AGT", "POST /v1/agent_sessions {agent_session_id, tool_access}"), m("AGT", "ENV", "200 + agent cookie", "reply")],
+          { AGT: "session idle" }, { session: "idle" }),
+        S("Invoke one activation",
+          "The environment server records a boundary before invoking the agent, naming the session handles it would reuse. While the activation runs, the agent parks at its own boundaries, so the episode needs nothing more. The agent records boundary B0 before its first model call.",
+          [m("ENV", "AGT", "POST /ng-rollout/r/v1/responses"), m("AGT", "AGT", "boundary B0 (before first call)", "local")],
+          { ENV: "episode r·a0: in agent activation", AGT: "session running · B0" }, { episode: "agent_activation", session: "running" }),
+        S("Policy call with token capture",
+          "The policy model server admits the call, resolves its lineage parent (none: this is a root), and attaches a capture admission. The worker generates and stages the exact token delta in the token store before replying.",
+          [m("AGT", "POL", "POST /ng-rollout/r/…/chat/completions"), m("POL", "WRK", "generate + capture admission (root)"), m("WRK", "TQ", "stage token delta r/c1")],
+          { POL: "call c1 generating", WRK: "decoding c1", TQ: "row r/c1" }, { call: "generating" }),
+        S("The response reaches the agent; the ledger records c1",
+          "The worker acknowledges with staging coordinates. The model server writes a token-free ledger row for c1 and delivers the response. The agent records boundary B1: a model response whose tool calls are pending.",
+          [m("WRK", "POL", "response + commit coordinates", "reply"), m("POL", "POL", "ledger row c1 (token-free)", "local"), m("POL", "AGT", "response", "reply"), m("AGT", "AGT", "boundary B1 (tools pending)", "local")],
+          { POL: "ledger: c1", AGT: "session running · B1" }, { call: "delivered" }),
+        S("Tool call against the resources server",
+          "Tool calls go straight to the resources server with the session cookie. The resources server counts in-flight requests so a checkpoint can wait for them.",
+          [m("AGT", "RES", "POST /get_weather (session cookie)"), m("RES", "AGT", "tool output", "reply"), m("AGT", "AGT", "boundary B2 (turn complete)", "local")],
+          { RES: "state updated", AGT: "session running · B2" }),
+        S("Next turn continues the lineage",
+          "The next call's request ends with the previous response and tool output, so the ledger resolves c1 as its parent. The worker receives the parent's staging chain as a token-in prefix and stages only the new delta.",
+          [m("AGT", "POL", "POST …/chat/completions"), m("POL", "WRK", "generate + admission (token_in, parent c1)"), m("WRK", "TQ", "stage delta r/c2"), m("WRK", "POL", "response + coordinates", "reply"), m("POL", "AGT", "final answer", "reply")],
+          { POL: "ledger: c1 → c2", TQ: "rows r/c1, r/c2" }),
+        S("Close, verify, clean up, return",
+          "The activation returns. The environment server closes the agent session (collecting its observations) and records a boundary whose next step is verification, carrying the final response and observations. It verifies (here with the resources server; some environment servers verify in process), closes the resources session, and returns the result.",
+          [m("AGT", "ENV", "response", "reply"), m("ENV", "AGT", "POST /v1/agent_sessions/close"), m("ENV", "RES", "POST /verify"), m("ENV", "RES", "POST /close_session"), m("ENV", "RL", "episode result", "reply")],
+          { ENV: "episode r·a0: done", AGT: "session closed", RES: "session ended", RL: "result received" }, { episode: "done", resources: "ended", session: "idle" }),
+      ],
+    },
+    legacy: {
+      name: "Legacy /run agent",
+      steps: [
+        S("The framework dispatches a legacy row",
+          "Most existing benchmarks still run through a legacy relay: an environment server that forwards <code>/run</code> to the agent unchanged. The relay stores nothing.",
+          [m("RL", "ENV", "POST /run {row, _ng_rollout_id: r}"), m("ENV", "AGT", "relay POST /run")],
+          { ENV: "relay (stateless)", AGT: "legacy episode run:r" }, { session: "idle" }),
+        S("The agent owns the whole episode",
+          "A legacy <code>/run</code> seeds the resources session itself and records boundaries around seeding and verification, just like an environment server. Whether a checkpoint waits for an in-flight seed or verification follows the same wait-or-replay declaration (section 3).",
+          [m("AGT", "RES", "POST /ng-rollout/r/seed_session"), m("RES", "AGT", "cookie", "reply")],
+          { RES: "session live" }, { resources: "live" }),
+        S("The turn loop runs as an activation of run:r",
+          "The agent calls its own <code>/v1/responses</code>. The activation is keyed by the logical rollout (<code>run:r</code>), so a replacement attempt finds the restored boundary.",
+          [m("AGT", "AGT", "self-dispatch /ng-rollout/r/v1/responses", "local"), m("AGT", "POL", "policy calls, tools, boundaries…")],
+          { AGT: "run:r running · boundaries" }, { session: "running" }),
+        S("Verify and return",
+          "After the loop, the agent records a boundary with its final response, verifies, and returns the row. After a restore, the replacement attempt skips every step its boundary says is done: seeding, the turn loop, or verification.",
+          [m("AGT", "RES", "POST /verify"), m("AGT", "ENV", "result row", "reply"), m("ENV", "RL", "result row", "reply")],
+          { AGT: "done", RES: "session ended", RL: "result received" }, { session: "idle", resources: "ended" }),
+      ],
+    },
+    checkpoint: {
+      name: "Checkpoint in place (no crash)",
+      steps: [
+        S("Mid-episode: the agent is waiting on policy call c2",
+          "Episode r is inside its agent activation. The agent recorded boundary B2 and issued c2, which is still decoding.",
+          [m("AGT", "POL", "c2 in flight")],
+          { ENV: "episode r: in agent activation", AGT: "session awaiting c2 · B2", POL: "c2 generating", WRK: "decoding c2" }, { episode: "agent_activation", session: "running", call: "generating", phase: "idle" }),
+        S("The framework stops dispatch and asks Gym to prepare",
+          "The training framework closes its own dispatch and calls Gym's checkpoint coordination with a checkpoint ID and an absolute deadline.",
+          [m("RL", "ORC", "prepare(ckpt k, deadline)", "control")],
+          { RL: "dispatch closed", ORC: "preparing k" }, { phase: "idle" }),
+        S("1. Environment servers close episode admission",
+          "No new episode starts. Episode r is inside its agent activation, which the agent's boundaries cover. An episode in a replayable step counts as parked at the boundary before it; an episode in a wait step blocks prepare until the step finishes and its result is recorded (section 3). Parked episodes' deadlines stop counting while admission is closed.",
+          [m("ORC", "ENV", "POST …/checkpoint/prepare", "control"), m("ENV", "ORC", "ready", "reply")],
+          { ENV: "prepared · r in agent activation" }, { phase: "prepared", episode: "agent_activation" }),
+        S("2. The policy model closes admission and holds c2",
+          "New policy calls are refused with 409 <code>checkpoint_parked</code>. Call c2 has not started responding, so it is undelivered: it keeps decoding, but its response will be held until resume and its ledger row will be left out of the cut. Prepare does not wait for it to finish.",
+          [m("ORC", "POL", "POST …/checkpoint/prepare", "control"), m("POL", "POL", "c2 undelivered → held", "local")],
+          { POL: "closed · c2 held" }, { phase: "preparing", call: "held" }),
+        S("2b. Generation cut: stage c2's prefix",
+          "With generation cuts on, the model server asks the worker to stage what c2 has generated so far. The worker writes the prefix to the token store and returns a receipt. If the worker cannot cut, c2 is simply regenerated after a restore.",
+          [m("POL", "WRK", "POST /ng-control/v1/generation-cut {inventory}", "control"), m("WRK", "TQ", "stage prefix of c2"), m("WRK", "POL", "receipt: durable_prefix", "reply"), m("POL", "ORC", "ready (held 1, cut 1)", "reply")],
+          { POL: "prepared · c2 cut", TQ: "rows + c2 prefix" }, { phase: "prepared", call: "cut" }),
+        S("3. Agents park at their boundaries",
+          "Running activations park at their next boundary. The session waiting on c2 is already at boundary B2, because the model holds its response. An agent whose next call is refused parks at the boundary it just recorded and retries after resume.",
+          [m("ORC", "AGT", "POST …/checkpoint/prepare", "control"), m("AGT", "ORC", "ready (1 at boundary)", "reply")],
+          { AGT: "prepared · session at B2" }, { phase: "prepared", session: "at_boundary" }),
+        S("4. Resources servers quiesce",
+          "No agent is between boundaries, so no new tool call arrives. The resources server closes data routes and waits until nothing is in flight. A restart-only server with a live session would report a blocker here.",
+          [m("ORC", "RES", "POST …/checkpoint/prepare", "control"), m("RES", "ORC", "ready (0 in flight)", "reply")],
+          { RES: "prepared" }, { phase: "prepared" }),
+        S("Commit: every participant writes its records",
+          "Each participant re-checks readiness, writes one records file, then its manifest. The model commit is scoped to the episodes the others exported, and it excludes undelivered c2 but keeps its cut.",
+          [m("ORC", "ENV", "commit", "control"), m("ORC", "AGT", "commit", "control"), m("ORC", "RES", "commit", "control"), m("ORC", "POL", "commit {episode_ids: [r]}", "control"), m("ORC", "RL", "manifests", "reply")],
+          { ENV: "committed", AGT: "committed", RES: "committed", POL: "committed · rows c1 + cut of c2" }, { phase: "committed" }),
+        S("The framework saves tokens and publishes",
+          "The framework snapshots the token store, validates that every Gym manifest refers to rows the snapshot contains, and publishes the checkpoint atomically. Gym is not involved.",
+          [m("RL", "TQ", "snapshot"), m("RL", "RL", "validate + publish", "local")],
+          { RL: "checkpoint k published", TQ: "snapshot k" }),
+        S("Resume in reverse dependency order",
+          "Resources reopen, then the policy model (c2's held response is delivered), then agents, then environment servers. The episode continues exactly as if nothing happened. The framework reopens dispatch.",
+          [m("RL", "ORC", "resume(k)", "control"), m("ORC", "RES", "resume", "control"), m("ORC", "POL", "resume", "control"), m("POL", "AGT", "c2 response released", "reply"), m("ORC", "AGT", "resume", "control"), m("ORC", "ENV", "resume", "control")],
+          { RL: "dispatching", POL: "accepting", AGT: "session running", ENV: "episode r: in agent activation", RES: "accepting" }, { phase: "idle", call: "delivered", session: "running" }),
+      ],
+    },
+    restore: {
+      name: "Crash and restore",
+      steps: [
+        S("Every Gym process dies after checkpoint k was published",
+          "Any work after checkpoint k is lost. The training framework restores its own state and the token store from checkpoint k.",
+          [m("RL", "RL", "restore own state + token store", "local")],
+          { ORC: "—", ENV: "gone", AGT: "gone", POL: "gone", RES: "gone", RL: "restoring k" }, { phase: "idle" }),
+        S("Fresh Gym processes are restored, all paused",
+          "The framework starts fresh Gym servers and calls restore with the episodes it will continue. Each participant validates every file and digest before installing anything, installs state under the next attempt (r·a1), and fences attempt 0. All stay closed.",
+          [m("RL", "ORC", "restore(k, episode_ids: [r])", "control"), m("ORC", "POL", "restore", "control"), m("ORC", "RES", "restore", "control"), m("ORC", "AGT", "restore", "control"), m("ORC", "ENV", "restore", "control")],
+          { POL: "restored · ledger r-a1 = c1 · cut of c2", RES: "restored · session state", AGT: "restored · session at B2 (r·a1)", ENV: "restored · record for r·a1" }, { phase: "restored" }),
+        S("If any restore fails, nothing continues",
+          "Restore is all or nothing. If one participant rejects its files, the coordination resumes every participant empty and reports the failure; the framework restarts those rollouts from input instead of continuing a partial combination.",
+          [m("ORC", "RL", "restored (or: failed → all resumed empty)", "reply")],
+          {}, {}),
+        S("Resume, then re-dispatch attempt 1",
+          "After resume, the framework re-dispatches episode r as attempt 1. The environment server finds the restored record, skips seeding, and reuses the recorded sessions. A delayed request from attempt 0 would get 409 <code>stale_attempt</code>.",
+          [m("RL", "ORC", "resume(k)", "control"), m("RL", "ENV", "POST /run {episode_id: r·a1}"), m("ENV", "ENV", "restored record: reuse sessions", "local")],
+          { ENV: "episode r·a1: continuing from its boundary", RL: "episode r·a1 in flight" }, { phase: "idle", episode: "restored" }),
+        S("The agent resumes at boundary B2 and re-issues c2",
+          "The activation starts from the restored boundary: the same conversation it had before calling c2. It re-issues that call.",
+          [m("ENV", "AGT", "POST /ng-rollout/r-a1/v1/responses"), m("AGT", "POL", "re-issue call (same conversation)")],
+          { AGT: "session r·a1 running from B2" }, { session: "running", episode: "agent_activation" }),
+        S("Lineage continues and the cut prefix is reused",
+          "The restored ledger rows are attempt 1's ledger, so the call resolves c1 as its parent like any later turn. Because the request matches the cut call's request, the admission carries c2's cut: the worker reads the staged prefix and generates only the rest. The new ledger row c3 is a child of c1; c2 appears nowhere in the lineage.",
+          [m("POL", "WRK", "admission: parent c1 + generation_cut(c2)"), m("TQ", "WRK", "cut prefix", "reply"), m("WRK", "TQ", "stage delta r-a1/c3"), m("WRK", "POL", "response", "reply"), m("POL", "AGT", "response", "reply")],
+          { POL: "ledger r-a1: c1 → c3", TQ: "rows c1, c3 (+ orphaned c2)" }, { call: "delivered" }),
+        S("The episode finishes normally",
+          "Tools, verification, and cleanup proceed as usual. The environment server's cleanup closes the restored sessions, because their handles came from the record.",
+          [m("AGT", "ENV", "response", "reply"), m("ENV", "RES", "verify + close"), m("ENV", "RL", "result for r·a1", "reply")],
+          { ENV: "episode r·a1: done", RL: "result received" }, { episode: "done", resources: "ended" }),
+      ],
+    },
+    verify_replay: {
+      name: "Checkpoint during verification (replay)",
+      steps: [
+        S("Verification is running; the verifier declared it replayable",
+          "The agent finished. The environment server closed the agent session and recorded boundary V: next step is verification, carrying the final response and observations. It called <code>/verify</code> on a judge-based resources server that declared its verification replay-safe, because it does not change session state. Judging is slow.",
+          [m("ENV", "AGT", "POST /v1/agent_sessions/close"), m("ENV", "ENV", "boundary V: verify next (response, observations)", "local"), m("ENV", "RES", "POST /verify (slow judge)")],
+          { ENV: "episode r: verifying (replay)", AGT: "session closed", RES: "verify in flight" }, { episode: "replay_step", phase: "idle" }),
+        S("The environment server is ready at once",
+          "Prepare closes episode admission. Episode r counts as parked at boundary V, before the verification step, so prepare does not wait for the judge.",
+          [m("RL", "ORC", "prepare(ckpt k)", "control"), m("ORC", "ENV", "prepare", "control"), m("ENV", "ORC", "ready (r at boundary V)", "reply")],
+          { RL: "dispatch closed", ENV: "prepared · r at V (verify replayable)" }, { phase: "prepared", episode: "replay_step" }),
+        S("Resources prepare does not wait for the replayable verify",
+          "The model and agents have nothing of episode r left. The resources server closes data routes; the in-flight verification was declared replayable, so it does not count as a blocker. The session state is exported as is: verification does not change it.",
+          [m("ORC", "POL", "prepare", "control"), m("ORC", "AGT", "prepare", "control"), m("ORC", "RES", "prepare", "control"), m("RES", "ORC", "ready (verify replayable)", "reply")],
+          { POL: "prepared", AGT: "prepared", RES: "prepared · verify still running" }, { phase: "prepared" }),
+        S("Commit records boundary V",
+          "The environment server's record for r says: next step is verification, with this final response and these observations. The resources server exports r's session state.",
+          [m("ORC", "ENV", "commit", "control"), m("ORC", "RES", "commit", "control"), m("ORC", "AGT", "commit", "control"), m("ORC", "POL", "commit", "control")],
+          { ENV: "committed · r at V", RES: "committed" }, { phase: "committed" }),
+        S("The judge answers during the checkpoint; the result is held",
+          "The verification result reaches the environment server while the checkpoint is still open. It holds the result and does not call <code>/close_session</code>, because the resources server is closed.",
+          [m("RES", "ENV", "verify result", "reply"), m("ENV", "ENV", "hold result until resume", "local")],
+          { ENV: "committed · r result held", RES: "committed · verify finished" }, { episode: "boundary" }),
+        S("Resume: nothing is re-run",
+          "After the framework publishes and Gym resumes, the environment server acts on the held result: it closes the resources session and returns. Without a crash, the replay mode cost nothing.",
+          [m("RL", "ORC", "resume(k)", "control"), m("ENV", "RES", "POST /close_session"), m("ENV", "RL", "result for r", "reply")],
+          { RL: "result received", ENV: "episode r: done", RES: "session ended" }, { phase: "idle", episode: "done", resources: "ended" }),
+        S("If Gym had crashed instead: verification runs again",
+          "After a restore, attempt r·a1 resumes at boundary V and runs verification again with the recorded response. The first result was never delivered, so re-judging is as safe as regenerating an undelivered policy call.",
+          [m("RL", "ENV", "POST /run {episode_id: r·a1}"), m("ENV", "RES", "POST /verify (re-run from boundary V)"), m("RES", "ENV", "verify result", "reply"), m("ENV", "RL", "result for r·a1", "reply")],
+          { ENV: "episode r·a1: done", RL: "result received" }, { episode: "done", phase: "idle" }),
+      ],
+    },
+    verify_wait: {
+      name: "Checkpoint during verification (wait)",
+      steps: [
+        S("Verification changes state, so it runs in wait mode",
+          "This verifier runs a test suite that changes the session's sandbox, so it cannot be replayed safely and uses the default wait mode. The environment server recorded boundary V and called <code>/verify</code>.",
+          [m("ENV", "ENV", "boundary V: verify next", "local"), m("ENV", "RES", "POST /verify (runs tests)")],
+          { ENV: "episode r: verifying (wait)", RES: "verify in flight" }, { episode: "wait_step", phase: "idle" }),
+        S("Environment prepare waits",
+          "Episode r is inside a wait step, so it blocks prepare. The resources server is prepared last, so it is still open and the verification keeps running.",
+          [m("RL", "ORC", "prepare(ckpt k)", "control"), m("ORC", "ENV", "prepare", "control"), m("ENV", "ENV", "blocker r: waiting for verify", "local")],
+          { RL: "dispatch closed", ENV: "preparing · blocker r" }, { phase: "preparing", episode: "wait_step" }),
+        S("Verification finishes: the result is recorded at boundary W",
+          "The result reaches the environment server. It records boundary W: verification done, with the reward, next step is closing the session. Now r is parked and prepare is ready.",
+          [m("RES", "ENV", "verify result", "reply"), m("ENV", "ENV", "boundary W: verified (reward recorded)", "local"), m("ENV", "ORC", "ready", "reply")],
+          { ENV: "prepared · r at W", RES: "verify finished (state changed)" }, { phase: "prepared", episode: "boundary" }),
+        S("The rest of Gym prepares and commits",
+          "The resources server now has nothing in flight and exports state that includes the verification's effects. The environment server's record carries the result, not \"verify pending\", so a restore can never run the state-changing verification twice.",
+          [m("ORC", "POL", "prepare", "control"), m("ORC", "AGT", "prepare", "control"), m("ORC", "RES", "prepare", "control"), m("ORC", "ENV", "commit", "control"), m("ORC", "RES", "commit", "control")],
+          { RES: "committed · post-verify state", ENV: "committed · r at W" }, { phase: "committed" }),
+        S("After a crash: continue after verification",
+          "Attempt r·a1 resumes at boundary W. It closes the resources session and returns the recorded result. Verification is not repeated.",
+          [m("RL", "ENV", "POST /run {episode_id: r·a1}"), m("ENV", "RES", "POST /close_session"), m("ENV", "RL", "recorded result", "reply")],
+          { ENV: "episode r·a1: done", RL: "result received" }, { episode: "done", phase: "idle" }),
+        S("If verification outlasts the deadline",
+          "Prepare returns with blocker r. The framework either aborts the checkpoint or retires r, which then restarts from input. Declaring a verifier replayable is how an environment avoids this loss.",
+          [m("ENV", "ORC", "not ready: blockers [r]", "problem"), m("RL", "ORC", "retire [r·a0] or abort", "control")],
+          { ENV: "⚠ preparing · blocker r" }, { phase: "preparing", episode: "wait_step" }),
+      ],
+    },
+    straggler: {
+      name: "Deadline miss and retire",
+      steps: [
+        S("One episode is stuck in a long tool call",
+          "Episode s is between boundaries: its agent is waiting on a slow tool call. The other episodes park normally.",
+          [m("AGT", "RES", "slow tool call for s", "problem")],
+          { AGT: "s running (tool call)", RES: "1 in flight" }, { session: "running" }),
+        S("Agent prepare reaches its deadline with a blocker",
+          "Prepare returns with the phase still <i>preparing</i> and the blocker named. Admission stays closed, so nothing new starts while the framework decides.",
+          [m("ORC", "AGT", "prepare", "control"), m("AGT", "ORC", "not ready: blockers [s]", "problem")],
+          { AGT: "⚠ preparing · blocker s" }, { phase: "preparing", session: "park_requested" }),
+        S("The framework chooses to retire s",
+          "Only the framework decides a rollout's fate. It asks Gym to retire attempt s·a0 everywhere: the environment server cancels the episode, the agent cancels the activation, the model cancels its calls, and the resources server drops or fences the session. Attempt s·a0 is fenced in every participant.",
+          [m("RL", "ORC", "retire [s·a0]", "control"), m("ORC", "ENV", "retire", "problem"), m("ORC", "AGT", "retire", "problem"), m("ORC", "POL", "retire", "problem"), m("ORC", "RES", "retire", "problem")],
+          { ENV: "s cancelled", AGT: "s retired", RES: "s fenced" }, { session: "retired", resources: "fenced" }),
+        S("Prepare again succeeds; s restarts later",
+          "With the blocker gone, prepare becomes ready and the checkpoint proceeds without s. The framework later re-dispatches s from its input as a fresh attempt; no state from s·a0 is used.",
+          [m("ORC", "AGT", "prepare", "control"), m("AGT", "ORC", "ready", "reply")],
+          { AGT: "prepared" }, { phase: "prepared" }),
+        S("If the framework disappears instead",
+          "Every control call renews a lease. If the framework stops calling before commit or resume, each participant resumes on its own when the lease expires, which is the same as an abort. Held responses are released and parked work continues.",
+          [m("POL", "POL", "lease expired → resume", "local"), m("AGT", "AGT", "lease expired → resume", "local")],
+          { POL: "accepting (lease)", AGT: "accepting (lease)" }, { phase: "idle" }),
+      ],
+    },
+  };
+
+  // ---------- player ----------
+  const select = document.getElementById("scenario-select");
+  for (const [key, scenario] of Object.entries(SCENARIOS)) {
+    const option = document.createElement("option");
+    option.value = key; option.textContent = scenario.name;
+    select.appendChild(option);
+  }
+  let scenarioKey = "native";
+  let stepIndex = 0;
+
+  const LANE_X0 = 70, LANE_DX = 117, HEAD_Y = 12, HEAD_H = 46, ROW_H = 34, TOP = 28;
+  const laneX = (key) => LANE_X0 + LANES.indexOf(key) * LANE_DX;
+
+  const drawSequence = () => {
+    const scenario = SCENARIOS[scenarioKey];
+    const rows = [];
+    scenario.steps.forEach((step, index) => step.msgs.forEach((msg) => rows.push({ ...msg, index })));
+    const shown = rows.filter((row) => row.index <= stepIndex).length;
+    const height = TOP + shown * ROW_H + 40;
+    const svg = document.getElementById("sequence");
+    svg.setAttribute("viewBox", `0 0 960 ${height}`);
+    svg.setAttribute("width", "960");
+    svg.setAttribute("height", String(height));
+    [...svg.querySelectorAll("g, text, line, path, rect, defs")].forEach((node) => node.remove());
+
+    const defs = el("defs");
+    for (const kind of ["data", "control", "reply", "problem", "local"]) {
+      const marker = el("marker", { id: `ah-${kind}`, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+      marker.appendChild(el("path", { d: "M0,0 L10,5 L0,10 z", class: `ah-${kind}` }));
+      defs.appendChild(marker);
+    }
+    svg.appendChild(defs);
+
+    rows.forEach((row, i) => {
+      if (row.index === stepIndex) svg.appendChild(el("rect", { x: "0", y: TOP + i * ROW_H - 4, width: "960", height: ROW_H, class: "current-row" }));
+    });
+    const head = document.getElementById("sequence-head");
+    [...head.querySelectorAll("text, rect")].forEach((node) => node.remove());
+    for (const key of LANES) {
+      const x = laneX(key);
+      svg.appendChild(el("line", { x1: x, y1: 0, x2: x, y2: height - 10, class: "lane-line" }));
+      head.appendChild(el("rect", { x: x - 56, y: HEAD_Y, width: "112", height: HEAD_H, rx: "6", class: "lane-head" }));
+      const words = COMPONENTS[key].name.split(" ");
+      const first = words.length > 1 ? words.slice(0, Math.ceil(words.length / 2)).join(" ") : words[0];
+      const second = words.length > 1 ? words.slice(Math.ceil(words.length / 2)).join(" ") : "";
+      head.appendChild(el("text", { x, y: HEAD_Y + (second ? 19 : 28), "font-size": "12.5", "text-anchor": "middle", "font-weight": "700" }, first));
+      if (second) head.appendChild(el("text", { x, y: HEAD_Y + 36, "font-size": "12.5", "text-anchor": "middle", "font-weight": "700" }, second));
+    }
+    rows.forEach((row, i) => {
+      const y = TOP + i * ROW_H + 14;
+      const g = el("g", { class: row.index === stepIndex ? "" : "old" });
+      if (row.index > stepIndex) return;
+      const x1 = laneX(row.from), x2 = laneX(row.to);
+      if (row.from === row.to) {
+        g.appendChild(el("path", { d: `M${x1},${y - 8} h26 v14 h-22`, class: `msg-${row.kind}`, "marker-end": `url(#ah-${row.kind})` }));
+        g.appendChild(el("text", { x: x1 + 32, y: y + 4, "font-size": "12.5" }, row.label));
+      } else {
+        g.appendChild(el("line", { x1, y1: y, x2: x2 + (x2 > x1 ? -3 : 3), y2: y, class: `msg-${row.kind}`, "marker-end": `url(#ah-${row.kind})` }));
+        // Labels always start at the arrow's left end so they never run off the left edge.
+        g.appendChild(el("text", { x: Math.min(x1, x2) + 6, y: y - 6, "font-size": "12.5" }, (row.kind === "problem" ? "⚠ " : "") + row.label));
+      }
+      svg.appendChild(g);
+    });
+    const legend = [["data", "request"], ["control", "control plane"], ["reply", "reply"], ["problem", "⚠ problem path"]];
+    const lg = el("g");
+    let lx = 8;
+    for (const [kind, text] of legend) {
+      lg.appendChild(el("line", { x1: lx, y1: height - 16, x2: lx + 34, y2: height - 16, class: `msg-${kind}` }));
+      lg.appendChild(el("text", { x: lx + 40, y: height - 12, "font-size": "12" }, text));
+      lx += 60 + text.length * 6.5;
+    }
+    svg.appendChild(lg);
+    const current = rows.findIndex((row) => row.index === stepIndex);
+    if (current >= 0) {
+      const wrap = document.querySelector(".seq-wrap");
+      const target = TOP + current * ROW_H - 40;
+      wrap.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+    }
+  };
+
+  const drawStates = () => {
+    const scenario = SCENARIOS[scenarioKey];
+    const merged = { ...INITIAL_STATES };
+    let changed = new Set();
+    scenario.steps.slice(0, stepIndex + 1).forEach((step, index) => {
+      for (const [key, value] of Object.entries(step.states)) merged[key] = value;
+      if (index === stepIndex) changed = new Set(Object.keys(step.states));
+    });
+    const box = document.getElementById("states");
+    box.innerHTML = "";
+    for (const key of LANES) {
+      const div = document.createElement("div");
+      const text = merged[key];
+      const problem = text.startsWith("⚠") || text === "gone";
+      div.className = `state-box${changed.has(key) ? " changed" : ""}${problem ? " problem" : ""}`;
+      div.innerHTML = `<b>${COMPONENTS[key].name}</b>${changed.has(key) ? "▲ " : ""}${text}`;
+      box.appendChild(div);
+    }
+    machineHighlight = {};
+    scenario.steps.slice(0, stepIndex + 1).forEach((step) => Object.assign(machineHighlight, step.machines));
+    const affected = Object.keys(scenario.steps[stepIndex].machines);
+    if (affected.length) currentMachine = affected[affected.length - 1];
+    drawMachine();
+  };
+
+  const render = () => {
+    const scenario = SCENARIOS[scenarioKey];
+    const step = scenario.steps[stepIndex];
+    document.getElementById("step-text").innerHTML = `<h3>${step.title}</h3><p>${step.text}</p>`;
+    document.getElementById("step-counter").textContent = `Step ${stepIndex + 1} of ${scenario.steps.length}`;
+    document.getElementById("prev-step").disabled = stepIndex === 0;
+    document.getElementById("next-step").disabled = stepIndex === scenario.steps.length - 1;
+    const list = document.getElementById("step-list");
+    list.innerHTML = "";
+    scenario.steps.forEach((s, i) => {
+      const li = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button"; button.textContent = String(i + 1); button.title = s.title;
+      button.setAttribute("aria-label", `Step ${i + 1}: ${s.title}`);
+      if (i === stepIndex) { button.classList.add("current"); button.setAttribute("aria-current", "step"); }
+      button.addEventListener("click", () => { stepIndex = i; render(); });
+      li.appendChild(button); list.appendChild(li);
+    });
+    drawSequence();
+    drawStates();
+  };
+
+  select.addEventListener("change", () => { scenarioKey = select.value; stepIndex = 0; render(); });
+  document.getElementById("prev-step").addEventListener("click", () => { if (stepIndex > 0) { stepIndex -= 1; render(); } });
+  document.getElementById("next-step").addEventListener("click", () => { if (stepIndex < SCENARIOS[scenarioKey].steps.length - 1) { stepIndex += 1; render(); } });
+  document.addEventListener("keydown", (event) => {
+    if (event.target.closest("select, input, textarea")) return;
+    if (event.key === "ArrowRight") document.getElementById("next-step").click();
+    if (event.key === "ArrowLeft") document.getElementById("prev-step").click();
+  });
+
+  // ---------- failures ----------
+  const FAILURES = [
+    ["A participant misses the prepare deadline", "Prepare returns its blockers and stays closed; nothing new starts.", "The framework retires the blocking attempts (they restart from input) or aborts with resume."],
+    ["Prepare raises (for example, a hook fails)", "The participant reopens admission and returns to idle, so phase and admission never disagree.", "The framework retries or aborts."],
+    ["A participant became unready after prepare (out-of-order controller)", "Commit re-checks readiness and refuses; no manifest is written.", "Abort; Gym's checkpoint coordination owns the order so this is a backstop."],
+    ["Commit is retried after a lost reply", "The existing manifest is returned unchanged; a different commit into the same directory is refused.", "—"],
+    ["The framework dies mid-checkpoint", "Each participant's lease expires and it resumes on its own, releasing held responses.", "A restarted framework starts a new checkpoint."],
+    ["Restore finds a missing or corrupt file", "Digest and schema checks fail before anything is installed.", "Coordination resumes every participant empty; the framework restarts those rollouts from input."],
+    ["A request from a replaced attempt arrives", "409 <code>stale_attempt</code> from every participant; only the lowest live attempt per rollout is kept.", "Route all work through the new attempt."],
+    ["The worker cannot cut a generation", "The call is treated as undelivered without a prefix; after restore it is regenerated.", "Nothing; correctness never depends on a cut."],
+    ["A slow step (for example, verification or seeding) is in flight", "Replay mode: the checkpoint does not wait; the result is held and the step is re-run only after a crash. Wait mode: prepare waits, and the step's result is recorded at the boundary after it.", "Past the deadline in wait mode, the framework retires the rollout or aborts."],
+    ["A response was already streaming when admission closed", "It must finish sending; prepare waits for it.", "—"],
+    ["A server cannot continue rollouts (no hooks)", "It participates as restart-only: live rollouts block prepare.", "The framework retires them; they restart from input."],
+    ["A completed result never reached the framework", "No acknowledgement protocol: the framework's checkpoint still shows the rollout in flight.", "It restarts from input after restore."],
+    ["A resumed agent re-sends a different conversation", "Its first call cannot find a parent and is poisoned, so the rollout is not trained on a broken chain.", "Agents must re-issue exactly the recorded request; a conformance test checks this."],
+  ];
+  const tbody = document.getElementById("failure-rows");
+  for (const [situation, happens, next] of FAILURES) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${situation}</td><td>${happens}</td><td>${next}</td>`;
+    tbody.appendChild(tr);
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>
