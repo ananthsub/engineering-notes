@@ -295,13 +295,20 @@ participants exported. <b>Resume</b> resources → policy model → agents → e
 <b>Restore</b> is all or nothing: if any participant fails, every participant resumes empty and the
 training framework restarts those rollouts from their input.
 </p>
+<p>
+<b>Before its own barrier</b>, the training framework waits for the replies to its outstanding
+<code>/run</code> calls whose episodes no participant exported. Those episodes finished before prepare
+was ready, so their replies are already in flight. This replaces a completed-result acknowledgement
+protocol: Gym never holds a finished result waiting for an acknowledgement, and a lost reply can never
+block a checkpoint.
+</p>
 
 <h2 id="changes">8. What changed from the earlier design</h2>
 <ul>
   <li><b>The environment server owns the protocol boundary.</b> The earlier draft kept it inside the agent's <code>/run</code>. Legacy <code>/run</code> agents still continue, with the agent owning the whole episode.</li>
   <li><b>Every episode step has a checkpoint mode.</b> The owner records a boundary after each step, and a step in flight is either waited on (the default) or replayed after a crash when its implementer declares that safe. This covers slow verification, whether it runs in a resources server or in the environment server itself.</li>
   <li><b>Checkpoints no longer wait for generations to finish.</b> Undelivered responses are held; the agent is still at the boundary before the call, so the call is re-issued after a restore, and a generation cut can keep its prefix.</li>
-  <li><b>No completed-result acknowledgement.</b> A result the training framework did not receive before its barrier restarts from input. This is always correct and removes a class of stalls.</li>
+  <li><b>No completed-result acknowledgement.</b> No episode completes during a checkpoint: it parks at its final boundary, which carries its result. Episodes that finished earlier have already sent their replies, and the framework waits for those before its barrier. There is no acknowledgement traffic, and a lost reply is an ordinary <code>/run</code> failure instead of a stall.</li>
   <li><b>Lineage continues through the ledger itself.</b> Restored rows become the next attempt's ledger, so the first resumed call finds its parent normally; no one-shot parent header.</li>
   <li><b>One control plane for every participant</b> and one records file per participant, instead of a copy per component and one file per rollout.</li>
   <li><b>Gym owns the participant order</b>; the training framework calls Gym's checkpoint coordination instead of sequencing participants itself.</li>
@@ -928,7 +935,8 @@ training framework restarts those rollouts from their input.
     ["A slow step (for example, verification or seeding) is in flight", "Replay mode: the checkpoint does not wait; the result is held and the step is re-run only after a crash. Wait mode: prepare waits, and the step's result is recorded at the boundary after it.", "Past the deadline in wait mode, the framework retires the rollout or aborts."],
     ["A response was already streaming when admission closed", "It must finish sending; prepare waits for it.", "—"],
     ["A server cannot continue rollouts (no hooks)", "It participates as restart-only: live rollouts block prepare.", "The framework retires them; they restart from input."],
-    ["A completed result never reached the framework", "No acknowledgement protocol: the framework's checkpoint still shows the rollout in flight.", "It restarts from input after restore."],
+    ["A rollout finishes while a checkpoint is open", "It never completes during the checkpoint: it parks at its final boundary, which carries its result, and delivers the result after resume. After a crash, the replacement attempt returns the recorded result without redoing anything.", "—"],
+    ["A completed result is still in flight when the framework reaches its barrier", "No acknowledgement protocol. Every episode that finished before prepare was ready has already sent its reply. The framework waits for replies to its outstanding <code>/run</code> calls that no participant exported before its barrier.", "A reply actually lost in transit is an ordinary <code>/run</code> failure; the framework retries it from input as it would without checkpointing."],
     ["A resumed agent re-sends a different conversation", "Its first call cannot find a parent and is poisoned, so the rollout is not trained on a broken chain.", "Agents must re-issue exactly the recorded request; a conformance test checks this."],
   ];
   const tbody = document.getElementById("failure-rows");
