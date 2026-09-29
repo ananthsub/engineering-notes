@@ -149,7 +149,7 @@ machine is doing.
     <li><a href="#records">What a checkpoint stores</a></li>
     <li><a href="#failures">Failures and edge cases</a></li>
     <li><a href="#apis">Control API</a></li>
-    <li><a href="#changes">What changed from the earlier design</a></li>
+    <li><a href="#changes">What changed from v1</a></li>
   </ol>
 </nav>
 
@@ -292,8 +292,9 @@ in the required order; the training framework calls the coordination.
 Coordination order: <b>prepare</b> environment servers → policy model → agents → resources.
 <b>Commit</b> in any order, except that the model commit is scoped to the episodes the other
 participants exported. <b>Resume</b> resources → policy model → agents → environment servers.
-<b>Restore</b> is all or nothing: if any participant fails, every participant resumes empty and the
-training framework restarts those rollouts from their input.
+<b>Restore</b> is all or nothing: if any participant fails, coordination retires the replacement attempts
+everywhere, which drops their restored state, and resumes every participant. The training framework restarts
+those rollouts from their input as later attempts.
 </p>
 <p>
 <b>Before its own barrier</b>, the training framework waits for the replies to its outstanding
@@ -303,17 +304,136 @@ protocol: Gym never holds a finished result waiting for an acknowledgement, and 
 block a checkpoint.
 </p>
 
-<h2 id="changes">8. What changed from the earlier design</h2>
+<h2 id="changes">8. What changed from v1</h2>
+<p>
+The <a href="partial-rollout-checkpointing.html">v1 design</a> planned an <i>episode processor</i> that owns the
+rollout lifecycle, and it described a Gym implementation in the eight-PR chain #2939–#2946. The episode processor
+landed on main as the <b>environment server</b>. v2 re-cuts the checkpoint stack around it and removes much of the
+machinery v1 needed, because a single owner of the episode protocol, plus a fixed participant order, makes a
+consistent cut without after-the-fact reconciliation.
+</p>
+
+<h3 id="changes-glance">At a glance</h3>
+<div class="scroll">
+<table>
+  <thead><tr><th>Topic</th><th>v1</th><th>v2</th></tr></thead>
+  <tbody>
+    <tr><td>Who records where an episode continues</td><td>The agent's <code>/run</code> in the implementation; an episode processor in the plan</td><td>The environment server records a boundary after each step. Agents and resources servers export only their own session state</td></tr>
+    <tr><td>A step in flight at a checkpoint</td><td>Drain it, or retire the rollout</td><td>Each step is <b>wait</b> (the default) or <b>replay</b>, declared by whoever implements it</td></tr>
+    <tr><td>Participant order</td><td>The training framework's actor sequences model, agent, and resources participants</td><td>Gym owns the order. The framework calls Gym's checkpoint coordination</td></tr>
+    <tr><td>Finished rollouts during a checkpoint</td><td>Results are cached until a receipt-bound acknowledgement</td><td>No episode completes while Gym is prepared. No acknowledgements</td></tr>
+    <tr><td>In-flight generations</td><td>Accepted generations finish staging before prepare completes</td><td>Prepare never waits for a generation. Undelivered responses are held and left out; a generation cut can keep the prefix</td></tr>
+    <tr><td>Model-call lineage across a restore</td><td>A one-shot restored-parent header relay</td><td>Ledger rows are restored under the replacement attempt, so the parent resolves normally</td></tr>
+    <tr><td>Resources consistency</td><td>Per-session mutation locks, revisions, request-ID receipts, and controller-side reconciliation</td><td>The order does it: agents park before resources close, and resources drain in-flight requests</td></tr>
+    <tr><td>Control API</td><td>Per-kind routes, capability discovery, instance roles</td><td>One route set per server and a <code>status</code> probe; a model participates only with an explicit policy opt-in</td></tr>
+    <tr><td>Storage</td><td>One file per rollout, with archive shards planned</td><td>One records file and one manifest per participant</td></tr>
+    <tr><td>Servers without checkpoint support</td><td>Declared through capabilities; undeclared servers could be missed</td><td>Every server participates. Unsupported ones are restart-only and block until their rollouts are retired</td></tr>
+    <tr><td>Multi-worker servers</td><td>A worker-coordinator protocol, not yet wired into startup</td><td>Deferred: checkpointing servers refuse more than one worker</td></tr>
+    <tr><td>Controller loss</td><td>The actor's mutex and deadlines</td><td>Also a lease: each participant resumes on its own if the controller stops calling</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="changes-removed">v1 mechanisms that v2 removes</h3>
+<div class="scroll">
+<table>
+  <thead><tr><th>v1 mechanism</th><th>Why v1 needed it</th><th>What replaces it in v2</th></tr></thead>
+  <tbody>
+    <tr><td>Receipt-bound completed-result acknowledgement</td><td>A finished result could be lost between Gym and the framework during a checkpoint</td><td>Nothing completes while Gym is prepared. Before its barrier, the framework waits for its outstanding <code>/run</code> replies whose episodes no participant exported. A lost reply is an ordinary failure, retried as the next attempt</td></tr>
+    <tr><td>Agent prepare polling and the model status long poll</td><td>Readiness was a client-side loop over per-kind calls</td><td>One prepare call per participant waits server-side until ready or the deadline, then returns its blockers</td></tr>
+    <tr><td>One-shot restored-parent relay headers</td><td>The first resumed call had to find its parent from the old attempt</td><td>The restored ledger belongs to the replacement attempt, so parent resolution is unchanged</td></tr>
+    <tr><td>Resources mutation locks, revisions, and request-ID receipts</td><td>An exported resources snapshot had to agree with the agent's boundary</td><td>The order guarantees it. A tool call runs between agent boundaries, so it blocks agent prepare, and resources prepare last</td></tr>
+    <tr><td>Controller-side boundary reconciliation (last model-call ID, resources revision)</td><td>Files written at different moments could describe different cuts</td><td>Participants are frozen in dependency order and commit re-checks readiness. Restore is scoped to the episodes the framework continues and is all or nothing</td></tr>
+    <tr><td>Capability discovery, instance roles, the plane header, spinup validation</td><td>The actor had to classify servers and pick participants</td><td><code>GET …/checkpoint/status</code>: a server without the routes is not a participant; a model joins only with an explicit policy opt-in</td></tr>
+    <tr><td>Worker-membership proofs and the response-egress fence for generation cuts</td><td>Cuts had to be aggregated across uvicorn workers</td><td>One process holds the undelivered responses and records its cuts. A failed cut regenerates the call</td></tr>
+    <tr><td>A <code>restore_failed_paused</code> phase</td><td>A failed restore had to stay observable and paused</td><td>Coordination retires the replacement attempts everywhere and resumes; those rollouts restart from input as later attempts</td></tr>
+    <tr><td>The actor's participant order tables</td><td>The framework sequenced the participants itself</td><td>Gym's checkpoint coordination owns prepare, commit, restore, resume, and retire</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="changes-kept">What stays the same</h3>
 <ul>
-  <li><b>The environment server owns the protocol boundary.</b> The earlier draft kept it inside the agent's <code>/run</code>. Legacy <code>/run</code> agents still continue, with the agent owning the whole episode.</li>
-  <li><b>Every episode step has a checkpoint mode.</b> The owner records a boundary after each step, and a step in flight is either waited on (the default) or replayed after a crash when its implementer declares that safe. This covers slow verification, whether it runs in a resources server or in the environment server itself.</li>
-  <li><b>Checkpoints no longer wait for generations to finish.</b> Undelivered responses are held; the agent is still at the boundary before the call, so the call is re-issued after a restore, and a generation cut can keep its prefix.</li>
-  <li><b>No completed-result acknowledgement.</b> No episode completes during a checkpoint: it parks at its final boundary, which carries its result. Episodes that finished earlier have already sent their replies, and the framework waits for those before its barrier. There is no acknowledgement traffic, and a lost reply is an ordinary <code>/run</code> failure instead of a stall.</li>
-  <li><b>Lineage continues through the ledger itself.</b> Restored rows become the next attempt's ledger, so the first resumed call finds its parent normally; no one-shot parent header.</li>
-  <li><b>One control plane for every participant</b> and one records file per participant, instead of a copy per component and one file per rollout.</li>
-  <li><b>Gym owns the participant order</b>; the training framework calls Gym's checkpoint coordination instead of sequencing participants itself.</li>
-  <li><b>Unsupported means restart-only, never silent.</b> A server that cannot continue a rollout still participates and blocks until that rollout is retired.</li>
+  <li>Identity: <code>_ng_rollout_id</code> and <code>_ng_attempt_index</code>, and the capture key <code>r</code> or <code>r-aN</code>. A request from a replaced attempt gets 409 <code>stale_attempt</code>.</li>
+  <li>Every control call carries a checkpoint ID and an absolute deadline; repeating a completed call returns the recorded result; a stale checkpoint ID cannot reopen traffic.</li>
+  <li>Manifests are written last, and a committed participant directory never changes.</li>
+  <li>Restore installs attempt N's state as attempt N+1, in fresh processes, and stays closed until an explicit resume.</li>
+  <li>Durable token storage and global publication stay with the training framework. Gym stores token-free coordinates.</li>
+  <li>Failure handling is fail-closed.</li>
 </ul>
+
+<h3 id="changes-milestones">v1 milestones in v2</h3>
+<div class="scroll">
+<table>
+  <thead><tr><th>v1 milestone</th><th>Status in v2</th></tr></thead>
+  <tbody>
+    <tr><td>1. Preserve captured tokens for stateless rollouts</td><td>Implemented by the policy model participant. Servers still need to declare themselves stateless; so far only the example servers do (see the gaps below)</td></tr>
+    <tr><td>2. Resume an episode processor at a protocol boundary</td><td>Implemented on environment servers: boundaries after each step, wait or replay steps, and <code>single_agent_turn</code> stages. Legacy <code>/run</code> agents continue through the same step tracker</td></tr>
+    <tr><td>3. Resume a whitebox agent with stateful resources</td><td>Implemented for Simple Agent and exported-mode resources servers (the session-counter example). Other stateful environments need their own adapters</td></tr>
+    <tr><td>4. Resume an opaque blackbox runtime</td><td>Not started; unchanged from v1</td></tr>
+    <tr><td>Generation-safe cuts (#3218, #3227)</td><td>Gym side implemented, with the same wire models as the vLLM worker proposal. The worker-side staging helpers still need to land. Megatron inline prefixes (#3228) are not addressed</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="changes-limitations">v1's known limitations</h3>
+<div class="scroll">
+<table>
+  <thead><tr><th>v1 limitation</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>The stack puts protocol boundaries in agent servers and must be re-cut around the episode processor</td><td>Done: the environment server owns boundaries</td></tr>
+    <tr><td>Cleanup obligations are process-local</td><td>Boundaries record the open session handles, so a replacement attempt reuses or closes them</td></tr>
+    <tr><td>The framework actor must discover episode processors and agent sessions</td><td>Replaced by Gym's coordination, which discovers every participant</td></tr>
+    <tr><td>Tests simulate token staging; no real active-generation cut is exercised</td><td>A process-level suite covers crash and restore across real server processes with a fake worker, and a real-vLLM smoke test covers turn continuation. A real active-generation cut is still untested</td></tr>
+    <tr><td>Multi-worker admission is not wired into startup</td><td>Deferred; enforced as one worker</td></tr>
+    <tr><td>Commit, restore, and resume do not bound every filesystem call</td><td>Participant file I/O runs off the event loop under the request deadline</td></tr>
+    <tr><td>The artifact format writes one file per rollout</td><td>One records file per participant</td></tr>
+    <tr><td>Opaque harnesses need a full runtime snapshot</td><td>Unchanged</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="changes-review">Review feedback on the v1 implementation</h3>
+<p>
+The 23 open review threads on #2939–#2946 fall into these groups:
+</p>
+<ul>
+  <li><b>Races between control operations</b> (resume during prepare, delayed messages, wakeups crossing checkpoints): one lock serializes every transition, prepare re-checks its checkpoint after waiting, and retired checkpoint IDs are fenced.</li>
+  <li><b>Parent and identity propagation</b> (agent middleware, the parent relay, headers versus URL prefixes): only the URL prefix remains, and the parent relay is gone.</li>
+  <li><b>Unfinished model calls saved too early</b>: undelivered calls and their ledger rows are always left out.</li>
+  <li><b>Restore with live state, and stale attempts</b>: every participant refuses restore with live state, and fencing is a per-rollout minimum attempt.</li>
+  <li><b>Restored state that no replacement has claimed yet, lost by a second checkpoint</b>: this concern still applied to v2 and is being fixed (gap 1 below).</li>
+  <li><b>Terminal sessions not reported to the checkpoint layer</b>: resources servers get explicit session-start and session-end hooks for protocols that create sessions outside <code>/seed_session</code>.</li>
+</ul>
+
+<h3 id="changes-downstream">Work built on v1</h3>
+<div class="scroll">
+<table>
+  <thead><tr><th>Work</th><th>In v2</th></tr></thead>
+  <tbody>
+    <tr><td>Gym #3349, turn-level recovery</td><td>Receipts, acknowledgements, parent relay, revisions, and archive formats are superseded. Its stateless and replay declarations for math, code, judge, and GenRM servers, and its re-checkpoint-before-restart test, carry forward</td></tr>
+    <tr><td>Gym #3412, prefix recovery</td><td>The widened cut contract carried over. Worker staging helpers and restarting constrained-decoding requests carry forward</td></tr>
+    <tr><td>Gym #3563, multi-worker policy server</td><td>Deferred with the rest of multi-worker support</td></tr>
+    <tr><td>Gym #3755, scale optimizations</td><td>Acknowledgement batching is moot; concurrent commits and blocker caps are built in. A reserved connection pool for control traffic carries forward</td></tr>
+    <tr><td>Gym #3756, union of sharded cuts</td><td>Not needed while each episode stays on its shard: each shard commits and restores its own episodes</td></tr>
+    <tr><td>Gym #3548 and #3634, environment adapters</td><td>Port directly onto the new resources and agent hooks</td></tr>
+    <tr><td>NeMo RL #4264–#4266 and #4319–#4323</td><td>The framework calls Gym coordination instead of per-kind routes, drops acknowledgements and continuation joins, and adds the wait for outstanding <code>/run</code> replies. The cut wire models are unchanged; the enable flag and import path moved</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="changes-gaps">Open gaps</h3>
+<ol>
+  <li>Restored state that no replacement has claimed must survive a second checkpoint. <i>Being fixed.</i></li>
+  <li>The worker-side staging helpers that generation cuts need are not in Gym yet. <i>Being ported.</i></li>
+  <li>Most resources servers have not declared a checkpoint mode, so they are restart-only. <i>Declarations being ported.</i></li>
+  <li>A replay-mode seed or verification that reaches a closed resources server fails instead of continuing. <i>Being fixed.</i></li>
+  <li>Control traffic shares a connection pool with long-running <code>/run</code> calls.</li>
+  <li>Environment servers and restart-only agents do not yet refuse more than one worker when checkpointing is on. <i>Being fixed.</i></li>
+  <li>Constrained-decoding requests should restart instead of continuing a cut prefix.</li>
+  <li>The framework needs a public list of the token-store keys a checkpoint retains.</li>
+  <li>Multi-worker and sharded policy servers, Megatron inline prefixes, and opaque runtimes remain future work.</li>
+</ol>
 
 </main>
 
@@ -676,8 +796,8 @@ block a checkpoint.
           [m("RL", "ORC", "restore(k, episode_ids: [r])", "control"), m("ORC", "POL", "restore", "control"), m("ORC", "RES", "restore", "control"), m("ORC", "AGT", "restore", "control"), m("ORC", "ENV", "restore", "control")],
           { POL: "restored · ledger r-a1 = c1 · cut of c2", RES: "restored · session state", AGT: "restored · session at B2 (r·a1)", ENV: "restored · record for r·a1" }, { phase: "restored" }),
         S("If any restore fails, nothing continues",
-          "Restore is all or nothing. If one participant rejects its files, the coordination resumes every participant empty and reports the failure; the framework restarts those rollouts from input instead of continuing a partial combination.",
-          [m("ORC", "RL", "restored (or: failed → all resumed empty)", "reply")],
+          "Restore is all or nothing. If one participant rejects its files, coordination retires the replacement attempts everywhere, which drops any state already restored, then resumes every participant and reports the failure. The framework restarts those rollouts from input as later attempts instead of continuing a partial combination.",
+          [m("ORC", "RL", "restored (or: failed → retire replacements, resume all)", "reply")],
           {}, {}),
         S("Resume, then re-dispatch attempt 1",
           "After resume, the framework re-dispatches episode r as attempt 1. The environment server finds the restored record, skips seeding, and reuses the recorded sessions. A delayed request from attempt 0 would get 409 <code>stale_attempt</code>.",
@@ -929,7 +1049,9 @@ block a checkpoint.
     ["A participant became unready after prepare (out-of-order controller)", "Commit re-checks readiness and refuses; no manifest is written.", "Abort; Gym's checkpoint coordination owns the order so this is a backstop."],
     ["Commit is retried after a lost reply", "The existing manifest is returned unchanged; a different commit into the same directory is refused.", "—"],
     ["The framework dies mid-checkpoint", "Each participant's lease expires and it resumes on its own, releasing held responses.", "A restarted framework starts a new checkpoint."],
-    ["Restore finds a missing or corrupt file", "Digest and schema checks fail before anything is installed.", "Coordination resumes every participant empty; the framework restarts those rollouts from input."],
+    ["Restore finds a missing or corrupt file", "Digest and schema checks fail before anything is installed.", "Coordination retires the replacement attempts everywhere and resumes; the framework restarts those rollouts from input as later attempts."],
+    ["Agent work arrives without a rollout ID while checkpointing is on", "400 <code>rollout_id_required</code>: a checkpoint could neither record nor retire it.", "Send <code>_ng_rollout_id</code> or the rollout path prefix on every call."],
+    ["A delayed prepare arrives for a checkpoint that was already aborted", "A resume that reached a participant the prepare never touched fenced that checkpoint ID, so the late prepare gets <code>stale_checkpoint</code>.", "—"],
     ["A request from a replaced attempt arrives", "409 <code>stale_attempt</code> from every participant; only the lowest live attempt per rollout is kept.", "Route all work through the new attempt."],
     ["The worker cannot cut a generation", "The call is treated as undelivered without a prefix; after restore it is regenerated.", "Nothing; correctness never depends on a cut."],
     ["A slow step (for example, verification or seeding) is in flight", "Replay mode: the checkpoint does not wait; the result is held and the step is re-run only after a crash. Wait mode: prepare waits, and the step's result is recorded at the boundary after it.", "Past the deadline in wait mode, the framework retires the rollout or aborts."],

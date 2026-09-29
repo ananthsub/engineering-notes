@@ -100,6 +100,7 @@ tr:last-child td { border-bottom: none; }
 <h1>Partial-rollout checkpointing for NeMo-RL and NeMo Gym</h1>
 <div class="meta">owner ansubramania · aligned with episode orchestration PRs #3482–#3492 · checkpoint ownership update · self-contained HTML, inline CSS/JS/SVG</div>
 
+<p class="lede" style="border:1px solid var(--border);border-radius:8px;padding:0.6rem 0.9rem;"><b>Superseded.</b> This is the v1 design. The <a href="partial-rollout-checkpointing-v2.html">v2 walkthrough</a> re-cuts checkpointing around environment servers; its <a href="partial-rollout-checkpointing-v2.html#changes">What changed from v1</a> section maps each part of this page to v2.</p>
 <p class="lede">The episode-orchestration design moves the complete rollout lifecycle out of an agent server's <code>/run</code> method and into an episode processor. The processor owns resources and agent session setup, one or more <code>/v1/responses</code> activations, verification, cleanup, and the decision about what happens next. Checkpointing must therefore persist the episode boundary in the processor. Agent servers persist only the private session state needed to continue later <code>/v1/responses</code> activations. NeMo-RL still owns the global checkpoint transaction and validates the processor, agent-session, resources, model-lineage, and <code>TransferQueue</code> records as one compatible cut.</p>
 
 <nav class="tabs" id="tabs" aria-label="Sections">
