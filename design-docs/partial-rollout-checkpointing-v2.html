@@ -215,7 +215,7 @@ is what to do with a step that is still running when prepare arrives. Each step 
   <thead><tr><th>Step implemented by</th><th>Declared by</th><th>Replay allowed when</th></tr></thead>
   <tbody>
     <tr><td>The environment server itself (for example, verification computed in process)</td><td>the environment-server implementation</td><td>it declares the step safe to re-run</td></tr>
-    <tr><td>A resources server (<code>/verify</code>, <code>/seed_session</code>)</td><td>the resources server; the environment server reads the declaration at startup</td><td>the resources server declares it replay-safe (seeds are idempotent by contract); the environment server may still choose to wait</td></tr>
+    <tr><td>A resources server (<code>/verify</code>, <code>/seed_session</code>)</td><td>the resources server, in code. It reports the mode on its <code>/seed_session</code> reply, so the caller learns it without another request and keeps it in the episode's boundary</td><td>the resources server declares its verification replay-safe; seeds are idempotent by contract</td></tr>
     <tr><td>An agent (one activation)</td><td>the agent's own turn-loop boundaries</td><td>always covered: the agent parks itself, and an in-flight policy call is held</td></tr>
     <tr><td>A tool call that mutates environment state</td><td>—</td><td>never: accepted mutations finish before state is exported</td></tr>
   </tbody>
@@ -283,7 +283,7 @@ in the required order; the training framework calls the coordination.
     <tr><td><code>POST …/commit</code></td><td>prepared</td><td>re-check readiness, write records then manifest; idempotent</td></tr>
     <tr><td><code>POST …/restore</code></td><td>idle, fresh process</td><td>validate everything, install under the next attempt, stay closed</td></tr>
     <tr><td><code>POST …/resume</code></td><td>any non-idle</td><td>reopen admission and release parked work; also the abort path</td></tr>
-    <tr><td><code>GET …/status</code></td><td>any</td><td>phase, checkpoint ID, readiness report, and checkpoint mode</td></tr>
+    <tr><td><code>GET …/status</code></td><td>any</td><td>phase, checkpoint ID, readiness report, and checkpoint mode; a resources server also reports whether its verification may be replayed</td></tr>
     <tr><td><code>POST /ng-control/v1/generation-cut</code> (inference worker)</td><td>—</td><td>stage the prefix of each in-flight call and return a receipt</td></tr>
   </tbody>
 </table>
@@ -424,12 +424,12 @@ The 23 open review threads on #2939–#2946 fall into these groups:
 
 <h3 id="changes-gaps">Open gaps</h3>
 <ol>
-  <li>Restored state that no replacement has claimed must survive a second checkpoint. <i>Being fixed.</i></li>
-  <li>The worker-side staging helpers that generation cuts need are not in Gym yet. <i>Being ported.</i></li>
-  <li>Most resources servers have not declared a checkpoint mode, so they are restart-only. <i>Declarations being ported.</i></li>
-  <li>A replay-mode seed or verification that reaches a closed resources server fails instead of continuing. <i>Being fixed.</i></li>
+  <li><s>Restored state that no replacement has claimed must survive a second checkpoint.</s> <i>Fixed: every participant exports it again, and a double-crash scenario covers it.</i></li>
+  <li><s>The worker-side staging helpers that generation cuts need are not in Gym.</s> <i>Ported, and the fake worker in the process-level suite now continues cuts through them.</i></li>
+  <li>Most resources servers have not declared a checkpoint mode, so they are restart-only. <i>The five most used training verifiers (code generation, competitive coding, LLM-judge equivalence, math with judge, and GenRM comparison) now declare themselves stateless with replayable verification; others follow as they are audited.</i></li>
+  <li><s>A replay-mode seed or verification that reaches a closed resources server fails instead of continuing.</s> <i>Fixed: replay-safe requests are admitted while closed and are not part of that checkpoint.</i></li>
   <li>Control traffic shares a connection pool with long-running <code>/run</code> calls.</li>
-  <li>Environment servers and restart-only agents do not yet refuse more than one worker when checkpointing is on. <i>Being fixed.</i></li>
+  <li><s>Environment servers and restart-only agents do not refuse more than one worker.</s> <i>Fixed.</i></li>
   <li>Constrained-decoding requests should restart instead of continuing a cut prefix.</li>
   <li>The framework needs a public list of the token-store keys a checkpoint retains.</li>
   <li>Multi-worker and sharded policy servers, Megatron inline prefixes, and opaque runtimes remain future work.</li>
