@@ -328,7 +328,7 @@ consistent cut without after-the-fact reconciliation.
     <tr><td>Control API</td><td>Per-kind routes, capability discovery, instance roles</td><td>One route set per server and a <code>status</code> probe; a model participates only with an explicit policy opt-in</td></tr>
     <tr><td>Storage</td><td>One file per rollout, with archive shards planned</td><td>One records file and one manifest per participant</td></tr>
     <tr><td>Servers without checkpoint support</td><td>Declared through capabilities; undeclared servers could be missed</td><td>Every server participates. Unsupported ones are restart-only and block until their rollouts are retired</td></tr>
-    <tr><td>Multi-worker servers</td><td>A worker-coordinator protocol, not yet wired into startup</td><td>Deferred: checkpointing servers refuse more than one worker</td></tr>
+    <tr><td>Multi-worker servers</td><td>A worker-coordinator protocol, not yet wired into startup</td><td>Policy model servers run several uvicorn workers as one participant: a coordinator in the main process and a gate in each worker, over a Unix socket. Agents, resources servers, and environment servers keep one worker, because their sessions live in one process</td></tr>
     <tr><td>Controller loss</td><td>The actor's mutex and deadlines</td><td>Also a lease: each participant resumes on its own if the controller stops calling</td></tr>
   </tbody>
 </table>
@@ -385,7 +385,7 @@ consistent cut without after-the-fact reconciliation.
     <tr><td>Cleanup obligations are process-local</td><td>Boundaries record the open session handles, so a replacement attempt reuses or closes them</td></tr>
     <tr><td>The framework actor must discover episode processors and agent sessions</td><td>Replaced by Gym's coordination, which discovers every participant</td></tr>
     <tr><td>Tests simulate token staging; no real active-generation cut is exercised</td><td>A process-level suite covers crash and restore across real server processes with a fake worker, and a real-vLLM smoke test covers turn continuation. A real active-generation cut is still untested</td></tr>
-    <tr><td>Multi-worker admission is not wired into startup</td><td>Deferred; enforced as one worker</td></tr>
+    <tr><td>Multi-worker admission is not wired into startup</td><td>Done for policy model servers. A worker that has not reported, or was lost during a checkpoint, blocks it; a worker that joins mid-checkpoint closes at once</td></tr>
     <tr><td>Commit, restore, and resume do not bound every filesystem call</td><td>Participant file I/O runs off the event loop under the request deadline</td></tr>
     <tr><td>The artifact format writes one file per rollout</td><td>One records file per participant</td></tr>
     <tr><td>Opaque harnesses need a full runtime snapshot</td><td>Unchanged</td></tr>
@@ -413,7 +413,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
   <tbody>
     <tr><td>Gym #3349, turn-level recovery</td><td>Receipts, acknowledgements, parent relay, revisions, and archive formats are superseded. Its stateless and replay declarations for math, code, judge, and GenRM servers, and its re-checkpoint-before-restart test, carry forward</td></tr>
     <tr><td>Gym #3412, prefix recovery</td><td>The widened cut contract carried over. Worker staging helpers and restarting constrained-decoding requests carry forward</td></tr>
-    <tr><td>Gym #3563, multi-worker policy server</td><td>Deferred with the rest of multi-worker support</td></tr>
+    <tr><td>Gym #3563, multi-worker policy server</td><td>Supported with the same shape (a main-process coordinator, a Unix socket, restored cuts with a single owner), without proof or evidence files: workers report in memory and the coordinator is the one controller</td></tr>
     <tr><td>Gym #3755, scale optimizations</td><td>Acknowledgement batching is moot; concurrent commits and blocker caps are built in. A reserved connection pool for control traffic carries forward</td></tr>
     <tr><td>Gym #3756, union of sharded cuts</td><td>Not needed while each episode stays on its shard: each shard commits and restores its own episodes</td></tr>
     <tr><td>Gym #3548 and #3634, environment adapters</td><td>Port directly onto the new resources and agent hooks</td></tr>
@@ -432,7 +432,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
   <li><s>Environment servers and restart-only agents do not refuse more than one worker.</s> <i>Fixed.</i></li>
   <li>Constrained-decoding requests should restart instead of continuing a cut prefix.</li>
   <li>The framework needs a public list of the token-store keys a checkpoint retains.</li>
-  <li>Multi-worker and sharded policy servers, Megatron inline prefixes, and opaque runtimes remain future work.</li>
+  <li><s>Multi-worker policy servers.</s> <i>Supported.</i> Sharded policy servers across Gym deployments, Megatron inline prefixes, and opaque runtimes remain future work.</li>
 </ol>
 
 </main>
@@ -477,7 +477,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
       stores: "Per session: the agent's own session data and the latest boundary. For a legacy /run, the episode is keyed by its logical rollout.",
       never: "Where the episode is in its protocol (native path) or environment state." },
     POL: { name: "Policy model server", sub: "admission · token-free ledger", group: "gym",
-      owns: "Admission of policy generations, holding responses the agent has not received, the token-free capture ledger, and asking workers to cut in-flight generations.",
+      owns: "Admission of policy generations, holding responses the agent has not received, the token-free capture ledger, and asking workers to cut in-flight generations. With several uvicorn workers it is still one participant: a coordinator in the main process owns the controller, fences, restored cuts, and ledger export, and each worker runs the admission gate for its own calls and forwards control calls to the coordinator.",
       stores: "Ledger rows of each continued episode up to the cut, and the generation cut of an undelivered call.",
       never: "Token arrays. Judge and simulator model servers do not participate and keep serving." },
     WRK: { name: "Inference worker", sub: "vLLM worker", group: "rl",
