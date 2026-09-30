@@ -204,7 +204,7 @@ machine is doing.
 <nav class="toc" aria-label="Contents">
   <ol>
     <li><a href="#problem">The problem</a>: <a href="#problem-why">why</a>, <a href="#problem-state">which state</a>, <a href="#problem-requirements">requirements</a>, <a href="#problem-rl">NeMo RL</a></li>
-    <li><a href="#components">The v2 design</a>: <a href="#components">components</a>, <a href="#player">lifecycle</a>, <a href="#modes">wait or replay</a>, <a href="#machines">state machines</a>, <a href="#records">stored state</a>, <a href="#failures">failures</a>, <a href="#apis">control API</a></li>
+    <li><a href="#components">The v2 design</a>: <a href="#components">components</a>, <a href="#player">lifecycle</a>, <a href="#modes">wait or replay</a>, <a href="#machines">state machines</a>, <a href="#records">stored state</a>, <a href="#failures">failures</a>, <a href="#apis">control API</a>, <a href="#sandboxes">sandboxes</a></li>
     <li><a href="#v1">v1, as proposed</a></li>
     <li><a href="#changes">From v1 to v2</a>: <a href="#changes-glance">at a glance</a>, <a href="#changes-scale">scalability and ergonomics</a>, <a href="#changes-removed">what v2 removes</a>, <a href="#changes-milestones">milestones</a>, <a href="#changes-gaps">open gaps</a></li>
   </ol>
@@ -438,6 +438,49 @@ was ready, so their replies are already in flight. This replaces a completed-res
 protocol: Gym never holds a finished result waiting for an acknowledgement, and a lost reply can never
 block a checkpoint.
 </p>
+
+
+<h2 id="sandboxes">8. Sandboxes: where they plug in</h2>
+<p>
+A sandbox is session state that lives outside Gym's processes. Whichever server created it checkpoints it,
+through the same session hooks as any other state: a resources server that creates one sandbox per session in
+<code>/seed_session</code>, or an agent that runs tools, or a whole harness, in its own sandbox. Gym provides
+the hooks and the order; how a sandbox is saved and rebuilt (a snapshot, a paused sandbox, or something
+provider-specific) is up to the sandbox provider's implementation.
+</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Phase</th><th>Resources server hook</th><th>Agent hook</th><th>What the sandbox implementation does</th></tr></thead>
+  <tbody>
+    <tr><td>prepare</td><td>none</td><td>none</td><td>Nothing. Agents park at a boundary, before a model call or after a tool round, and prepare stops agents before resources servers. Once prepare is done, no episode step is using a sandbox.</td></tr>
+    <tr><td>commit</td><td><code>export_session_states(session_ids)</code></td><td><code>export_agent_sessions(session_keys)</code></td><td>Return what a restore needs to rebuild each session's sandbox as of this checkpoint.</td></tr>
+    <tr><td>resume, no crash</td><td>none</td><td>none</td><td>The live sandboxes carry on.</td></tr>
+    <tr><td>restore after a crash</td><td><code>restore_session_states(states)</code></td><td><code>restore_agent_sessions(sessions)</code></td><td>In a fresh process, rebuild every session's sandbox or raise; the rollouts then restart from their inputs. Stop the sandboxes the crashed process left running.</td></tr>
+    <tr><td>retire</td><td><code>retire_session_state(session_id)</code></td><td><code>retire_agent_session(session_key)</code></td><td>Stop the discarded attempt's sandbox.</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+A server opts in with <code>checkpoint_mode = "exported"</code> (resources server) or
+<code>checkpoint_sessions_supported = True</code> (agent); servers that do not opt in stay restart-only. Both
+hook sets are asynchronous, and export takes every session at once, so a server can checkpoint all its
+sandboxes concurrently within the commit deadline. Any implementation has to meet these conditions:
+</p>
+<ul>
+  <li><b>A live sandbox is not a restore point.</b> The episode keeps changing the sandbox after the checkpoint.
+  Reconnecting to it after a crash would pair the checkpointed conversation with later sandbox state, so a
+  checkpoint must keep the sandbox as it was, for example as a snapshot a new sandbox can start from.</li>
+  <li><b>Restore is all or nothing</b>, and it must fit the restore deadline.</li>
+  <li><b>Commit cost grows with live sessions.</b> Checkpoint sandboxes concurrently, with a bound, and avoid
+  polling each sandbox separately.</li>
+  <li><b>Clean up what checkpoints keep.</b> Snapshots or paused sandboxes must be deleted once no checkpoint the
+  controller may restore refers to them, including after a crash, when the process that tracked them is gone.</li>
+  <li><b>Agents attached to a resources server's sandbox</b> through its seed reply need the rebuilt sandbox's
+  descriptor after a restore. Seeds are idempotent and admitted during a checkpoint, so the restored session's
+  seed reply can carry it without a new call.</li>
+  <li><b>A harness running inside the sandbox</b> must continue from the sandbox's filesystem after a restore:
+  snapshots do not keep running processes.</li>
+</ul>
 
 
 <section class="part" id="part-v1">
