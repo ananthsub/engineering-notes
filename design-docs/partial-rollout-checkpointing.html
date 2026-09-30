@@ -1,109 +1,465 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Partial-rollout checkpointing for NeMo-RL and NeMo Gym</title>
+<title>Partial-rollout checkpointing for NeMo Gym and NeMo RL</title>
 <script>
-(() => {
-  try {
-    if (localStorage.getItem("engineering-notes-theme") === "light") {
-      document.documentElement.dataset.theme = "light";
-    }
-  } catch {}
-})();
+  (() => {
+    try {
+      if (localStorage.getItem("engineering-notes-theme") === "light") {
+        document.documentElement.dataset.theme = "light";
+      }
+    } catch {}
+  })();
 </script>
 <style>
-:root {
-  --bg: #0d1117; --surface: #161b22; --border: #30363d;
-  --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
-  --diagram-ok: #5bc0eb; --diagram-problem: #ffb000;
-  --diagram-alt: #d98bc3; --diagram-neutral: #c7ced8;
-  --code-bg: #10151c;
-}
-:root[data-theme="light"] {
-  --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de;
-  --text: #1f2328; --dim: #59636e; --accent: #0969da;
-  --diagram-ok: #005a8d; --diagram-problem: #9a4d00;
-  --diagram-alt: #7a3e6d; --diagram-neutral: #4b5563;
-  --code-bg: #f0f3f6;
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0; background: var(--bg); color: var(--text);
-  font: 16px/1.62 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  padding: 0 16px 80px;
-}
-.wrap { max-width: 980px; margin: 0 auto; }
-h1 { font-size: 1.9rem; line-height: 1.2; margin: 0.4rem 0 0.6rem; }
-h2 { font-size: 1.35rem; margin: 2.6rem 0 0.7rem; padding-top: 1rem; border-top: 1px solid var(--border); }
-h3 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
-p { margin: 0.65rem 0; }
-a { color: var(--accent); }
-code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.06em 0.32em; font-size: 0.85em; }
-pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.7rem 0.9rem; font-size: 0.8rem; line-height: 1.5; overflow-x: auto; }
-pre code { background: none; border: none; padding: 0; }
-ul, ol { padding-left: 1.35rem; margin: 0.55rem 0; }
-li { margin: 0.32rem 0; }
-.eyebrow { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); margin-top: 1.6rem; }
-.meta { color: var(--dim); font-size: 0.85rem; margin-bottom: 1rem; }
-.lede { font-size: 1.05rem; }
-.themetoggle { position: fixed; top: 12px; right: 14px; z-index: 50; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.35rem 0.8rem; font-size: 0.85rem; cursor: pointer; }
-.tabs { position: sticky; top: 0; z-index: 40; display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 0; background: var(--bg); border-bottom: 1px solid var(--border); }
-.tabs button { background: var(--surface); color: var(--dim); border: 1px solid var(--border); border-radius: 8px; padding: 0.38rem 0.75rem; font-size: 0.84rem; font-weight: 600; cursor: pointer; }
-.tabs button.on { color: var(--text); border-color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
-.tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-section.tab { display: none; }
-section.tab.on { display: block; }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.9rem 1.1rem; margin: 0.9rem 0; }
-.card h3 { margin-top: 0.2rem; }
-.tbl { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; margin: 0.9rem 0; }
-table { border-collapse: collapse; width: 100%; font-size: 0.84rem; }
-th { text-align: left; font-size: 0.7rem; letter-spacing: 0.07em; text-transform: uppercase; color: var(--dim); background: var(--surface); padding: 0.5rem 0.65rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
-td { padding: 0.45rem 0.65rem; border-bottom: 1px solid var(--border); vertical-align: top; }
-tr:last-child td { border-bottom: none; }
-.pill { display: inline-block; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.05em; border-radius: 999px; padding: 0.1rem 0.5rem; border: 1px solid var(--border); white-space: nowrap; }
-.pill.exists { color: var(--diagram-ok); border-color: var(--diagram-ok); }
-.pill.proto  { color: var(--diagram-alt); border-color: var(--diagram-alt); border-style: dashed; }
-.pill.pr     { color: var(--diagram-neutral); border-color: var(--diagram-neutral); border-style: dashed; }
-.pill.new    { color: var(--diagram-problem); border-color: var(--diagram-problem); border-style: dotted; }
-.inv { border-left: 3px solid var(--accent); padding: 0.15rem 0 0.15rem 0.9rem; margin: 0.8rem 0; }
-.inv b { display: block; }
-.inv p { margin: 0.25rem 0 0; font-size: 0.95rem; }
-.stepper { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 0.9rem 1rem 1.1rem; margin: 1rem 0 1.4rem; }
-.stepper .ctl { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
-.stepper .ctl button { background: var(--bg); color: var(--accent); border: 1px solid var(--accent); border-radius: 7px; padding: 0.3rem 0.85rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; }
-.stepper .ctl .ph { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); }
-.stepper .ctl .ct { margin-left: auto; font-size: 0.78rem; color: var(--dim); }
-.stepper svg { display: block; width: 100%; height: auto; }
-.stepper .chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 0.55rem 0 0.75rem; }
-.stepper .chips button { font-family: ui-monospace, Menlo, monospace; font-size: 0.72rem; padding: 0.14rem 0.44rem; border-radius: 5px; background: var(--bg); border: 1px solid var(--border); color: var(--dim); cursor: pointer; }
-.stepper .chips button.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
-.stepper dl { display: grid; grid-template-columns: 9.5rem 1fr; gap: 0.35rem 1rem; margin: 0.6rem 0 0; }
-.stepper dt { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--dim); padding-top: 0.2rem; }
-.stepper dd { margin: 0; font-size: 0.92rem; }
-.stepper dd pre { margin: 0.15rem 0 0; }
-@media (max-width: 640px) { .stepper dl { grid-template-columns: 1fr; } }
-.legend { display: flex; flex-wrap: wrap; gap: 1.1rem; font-size: 0.8rem; color: var(--dim); margin: 0.5rem 0; }
-.legend .sw { display: inline-block; width: 22px; height: 0; border-top: 3px solid var(--diagram-ok); vertical-align: middle; margin-right: 0.35rem; }
-.legend .sw.warn { border-top: 3px dashed var(--diagram-problem); }
-.legend .sw.mut { border-top: 2px dotted var(--diagram-neutral); }
-.foot { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--dim); font-size: 0.82rem; }
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+    --diagram-ok: #5bc0eb;
+    --diagram-problem: #ffb000;
+    --diagram-alt: #d98bc3;
+    --diagram-neutral: #c7ced8;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --surface: #f6f8fa;
+    --border: #d0d7de;
+    --text: #1f2328;
+    --dim: #59636e;
+    --accent: #0969da;
+    --diagram-ok: #005a8d;
+    --diagram-problem: #9a4d00;
+    --diagram-alt: #7a3e6d;
+    --diagram-neutral: #4b5563;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 80px; }
+  h1 { font-size: 1.9rem; line-height: 1.25; margin: 40px 0 8px; }
+  h2 { font-size: 1.35rem; margin: 48px 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; margin: 24px 0 8px; }
+  p, li { max-width: 72ch; }
+  a { color: var(--accent); }
+  code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  .dim { color: var(--dim); }
+  .lede { font-size: 1.08rem; }
+  #theme-toggle {
+    position: fixed; top: 12px; right: 12px; z-index: 10;
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 12px; font: inherit; cursor: pointer;
+  }
+  nav.toc { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; margin: 20px 0; }
+  nav.toc ol { margin: 0; padding-left: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin: 14px 0; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 600; }
+  .pill { display: inline-block; border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; font-size: 0.85rem; color: var(--dim); }
+
+  /* Scenario player */
+  .player-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+  .player-controls select, .player-controls button {
+    font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 12px; min-height: 40px; cursor: pointer;
+  }
+  .player-controls button:disabled { opacity: 0.45; cursor: default; }
+  .step-counter { color: var(--dim); }
+  .step-text { min-height: 7.5em; }
+  .step-text h3 { margin-top: 4px; }
+  .seq-wrap { overflow: auto; max-height: 72vh; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+  .seq-wrap svg { display: block; }
+  .seq-head { position: sticky; top: 0; z-index: 1; background: var(--bg); border-bottom: 1px solid var(--border); }
+  .states { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; margin-top: 12px; }
+  .state-box { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: var(--surface); font-size: 0.92rem; }
+  .state-box b { display: block; font-size: 0.8rem; color: var(--dim); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+  .state-box.changed { border: 2px solid var(--diagram-ok); }
+  .state-box.problem { border: 2px dashed var(--diagram-problem); }
+  .step-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+  .step-list button { font: inherit; font-size: 0.85rem; min-width: 36px; min-height: 36px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+  .step-list button.current { border: 2px solid var(--accent); font-weight: 700; }
+
+  /* SVG */
+  svg text { fill: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  svg .dimtext { fill: var(--dim); }
+  svg .lane-line { stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 2 4; }
+  svg .lane-head { fill: var(--surface); stroke: var(--diagram-neutral); stroke-width: 1.5; }
+  svg .msg-data { stroke: var(--diagram-ok); stroke-width: 2; fill: none; }
+  svg .msg-control { stroke: var(--diagram-alt); stroke-width: 2; stroke-dasharray: 7 4; fill: none; }
+  svg .msg-reply { stroke: var(--diagram-neutral); stroke-width: 1.5; stroke-dasharray: 2 3; fill: none; }
+  svg .msg-problem { stroke: var(--diagram-problem); stroke-width: 2.5; stroke-dasharray: 10 3 2 3; fill: none; }
+  svg .msg-local { stroke: var(--diagram-neutral); stroke-width: 1.5; fill: none; }
+  svg .old { opacity: 0.28; }
+  svg .current-row { fill: var(--surface); }
+  svg .ah-data { fill: var(--diagram-ok); }
+  svg .ah-control { fill: var(--diagram-alt); }
+  svg .ah-reply { fill: var(--diagram-neutral); }
+  svg .ah-problem { fill: var(--diagram-problem); }
+  svg .ah-local { fill: var(--diagram-neutral); }
+  svg .node { fill: var(--surface); stroke: var(--diagram-neutral); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  svg .node.active { stroke: var(--diagram-ok); stroke-width: 3; stroke-dasharray: none; }
+  svg .node.bad { stroke: var(--diagram-problem); stroke-width: 2.5; stroke-dasharray: 8 3; }
+  svg .edge { stroke: var(--diagram-neutral); stroke-width: 1.5; fill: none; }
+  svg .edge.bad { stroke: var(--diagram-problem); stroke-dasharray: 8 3; }
+  svg .edge-arrow { fill: var(--diagram-neutral); }
+  svg .edge-arrow.bad { fill: var(--diagram-problem); }
+  svg .box { fill: var(--surface); stroke: var(--diagram-neutral); stroke-width: 1.5; }
+  svg .box.gym { stroke: var(--diagram-ok); stroke-width: 2; }
+  svg .box.rl { stroke: var(--diagram-alt); stroke-width: 2; stroke-dasharray: 7 4; }
+  svg .box.selected { stroke-width: 4; }
+  svg .clickable { cursor: pointer; }
+  .sm-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .sm-tabs button { font: inherit; min-height: 40px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+  .sm-tabs button.current { border: 2px solid var(--accent); font-weight: 700; }
+  @media (max-width: 640px) { h1 { font-size: 1.5rem; } }
 </style>
+<style>
+/* Preserved v1 page, scoped under .v1 */
+.v1 .wrap { max-width: 980px; margin: 0 auto; }
+.v1 h1 { font-size: 1.9rem; line-height: 1.2; margin: 0.4rem 0 0.6rem; }
+.v1 h2 { font-size: 1.35rem; margin: 2.6rem 0 0.7rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.v1 h3 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
+.v1 p { margin: 0.65rem 0; }
+.v1 a { color: var(--accent); }
+.v1 code, .v1 pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.v1 code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.06em 0.32em; font-size: 0.85em; }
+.v1 pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.7rem 0.9rem; font-size: 0.8rem; line-height: 1.5; overflow-x: auto; }
+.v1 pre code { background: none; border: none; padding: 0; }
+.v1 ul, .v1 ol { padding-left: 1.35rem; margin: 0.55rem 0; }
+.v1 li { margin: 0.32rem 0; }
+.v1 .eyebrow { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); margin-top: 1.6rem; }
+.v1 .meta { color: var(--dim); font-size: 0.85rem; margin-bottom: 1rem; }
+.v1 .lede { font-size: 1.05rem; }
+.v1 .themetoggle { position: fixed; top: 12px; right: 14px; z-index: 50; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.35rem 0.8rem; font-size: 0.85rem; cursor: pointer; }
+.v1 .tabs { position: sticky; top: 0; z-index: 40; display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 0; background: var(--bg); border-bottom: 1px solid var(--border); }
+.v1 .tabs button { background: var(--surface); color: var(--dim); border: 1px solid var(--border); border-radius: 8px; padding: 0.38rem 0.75rem; font-size: 0.84rem; font-weight: 600; cursor: pointer; }
+.v1 .tabs button.on { color: var(--text); border-color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+.v1 .tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.v1 section.tab { display: none; }
+.v1 section.tab.on { display: block; }
+.v1 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.9rem 1.1rem; margin: 0.9rem 0; }
+.v1 .card h3 { margin-top: 0.2rem; }
+.v1 .tbl { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; margin: 0.9rem 0; }
+.v1 table { border-collapse: collapse; width: 100%; font-size: 0.84rem; }
+.v1 th { text-align: left; font-size: 0.7rem; letter-spacing: 0.07em; text-transform: uppercase; color: var(--dim); background: var(--surface); padding: 0.5rem 0.65rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.v1 td { padding: 0.45rem 0.65rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.v1 tr:last-child td { border-bottom: none; }
+.v1 .pill { display: inline-block; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.05em; border-radius: 999px; padding: 0.1rem 0.5rem; border: 1px solid var(--border); white-space: nowrap; }
+.v1 .pill.exists { color: var(--diagram-ok); border-color: var(--diagram-ok); }
+.v1 .pill.proto { color: var(--diagram-alt); border-color: var(--diagram-alt); border-style: dashed; }
+.v1 .pill.pr { color: var(--diagram-neutral); border-color: var(--diagram-neutral); border-style: dashed; }
+.v1 .pill.new { color: var(--diagram-problem); border-color: var(--diagram-problem); border-style: dotted; }
+.v1 .inv { border-left: 3px solid var(--accent); padding: 0.15rem 0 0.15rem 0.9rem; margin: 0.8rem 0; }
+.v1 .inv b { display: block; }
+.v1 .inv p { margin: 0.25rem 0 0; font-size: 0.95rem; }
+.v1 .stepper { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 0.9rem 1rem 1.1rem; margin: 1rem 0 1.4rem; }
+.v1 .stepper .ctl { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.v1 .stepper .ctl button { background: var(--bg); color: var(--accent); border: 1px solid var(--accent); border-radius: 7px; padding: 0.3rem 0.85rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; }
+.v1 .stepper .ctl .ph { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); }
+.v1 .stepper .ctl .ct { margin-left: auto; font-size: 0.78rem; color: var(--dim); }
+.v1 .stepper svg { display: block; width: 100%; height: auto; }
+.v1 .stepper .chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 0.55rem 0 0.75rem; }
+.v1 .stepper .chips button { font-family: ui-monospace, Menlo, monospace; font-size: 0.72rem; padding: 0.14rem 0.44rem; border-radius: 5px; background: var(--bg); border: 1px solid var(--border); color: var(--dim); cursor: pointer; }
+.v1 .stepper .chips button.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.v1 .stepper dl { display: grid; grid-template-columns: 9.5rem 1fr; gap: 0.35rem 1rem; margin: 0.6rem 0 0; }
+.v1 .stepper dt { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--dim); padding-top: 0.2rem; }
+.v1 .stepper dd { margin: 0; font-size: 0.92rem; }
+.v1 .stepper dd pre { margin: 0.15rem 0 0; }
+.v1 .stepper dl { grid-template-columns: 1fr; }
+.v1 .legend { display: flex; flex-wrap: wrap; gap: 1.1rem; font-size: 0.8rem; color: var(--dim); margin: 0.5rem 0; }
+.v1 .legend .sw { display: inline-block; width: 22px; height: 0; border-top: 3px solid var(--diagram-ok); vertical-align: middle; margin-right: 0.35rem; }
+.v1 .legend .sw.warn { border-top: 3px dashed var(--diagram-problem); }
+.v1 .legend .sw.mut { border-top: 2px dotted var(--diagram-neutral); }
+.v1 .foot { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--dim); font-size: 0.82rem; }
+.v1 { border: 1px solid var(--border); border-radius: 8px; padding: 0 16px 16px; margin-top: 12px; }
+</style>
+<style>.part .eyebrow{font-size:.75rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:2.4rem 0 0}.part h2{margin-top:.2rem}</style>
 </head>
 <body>
-<button class="themetoggle" id="themetoggle" type="button">◐ light</button>
+<button id="theme-toggle" type="button" aria-label="Switch color theme">Light theme</button>
+<main>
+
+<h1>Partial-rollout checkpointing for NeMo Gym and NeMo RL</h1>
+<p class="dim">Design v2 on the environment-server architecture, with the v1 proposal preserved · draft for review</p>
+
+<p class="lede">
+A long agentic rollout should survive a trainer checkpoint and a crash without being thrown away.
+This page walks through the lifecycle message by message: a normal episode, a checkpoint taken
+in place, a crash followed by a restore, a straggler that misses the deadline, and a generation
+that is cut mid-decode. Each step shows who sends what to whom and what every component's state
+machine is doing.
+</p>
+
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><a href="#problem">The problem</a>: <a href="#problem-why">why</a>, <a href="#problem-state">which state</a>, <a href="#problem-requirements">requirements</a>, <a href="#problem-rl">NeMo RL</a></li>
+    <li><a href="#components">The v2 design</a>: <a href="#components">components</a>, <a href="#player">lifecycle</a>, <a href="#modes">wait or replay</a>, <a href="#machines">state machines</a>, <a href="#records">stored state</a>, <a href="#failures">failures</a>, <a href="#apis">control API</a></li>
+    <li><a href="#v1">v1, as proposed</a></li>
+    <li><a href="#changes">From v1 to v2</a>: <a href="#changes-glance">at a glance</a>, <a href="#changes-scale">scalability and ergonomics</a>, <a href="#changes-removed">what v2 removes</a>, <a href="#changes-milestones">milestones</a>, <a href="#changes-gaps">open gaps</a></li>
+  </ol>
+</nav>
+
+
+<section class="part" id="part-problem">
+<p class="eyebrow">Part 1</p>
+<h2 id="problem">The problem</h2>
+
+<h3 id="problem-why">Why checkpoint rollouts that are still running</h3>
+<p>
+Reinforcement-learning training periodically checkpoints the trainer so it can survive a crash or a
+preemption. Agentic rollouts make that hard: a multi-turn rollout with tool calls, a software-engineering
+task, or a long judged conversation can run for minutes or hours, and thousands run at once. There are
+two simple answers, and both fail at scale:
+</p>
+<ul>
+  <li><b>Restart every unfinished rollout after a crash.</b> Every token already generated and every tool call
+  already run is thrown away, and long rollouts may never finish between failures.</li>
+  <li><b>Wait for every rollout to finish before checkpointing.</b> Checkpoint latency becomes the latency of
+  the slowest rollout, and one hung tool call or harness blocks the checkpoint indefinitely.</li>
+</ul>
+<p>
+<b>Partial-rollout checkpointing</b> takes a consistent snapshot while rollouts are in flight, then continues
+each one from its last safe point after a crash, without repeating work that has side effects and without
+waiting for stragglers.
+</p>
+
+<h3 id="problem-state">The state a running rollout spreads across</h3>
+<p>One rollout is not one process. At any moment its state lives in several places:</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Where</th><th>What must survive a crash</th></tr></thead>
+  <tbody>
+    <tr><td>Environment server (Gym)</td><td>Where the episode is in its protocol: which step runs next, which sessions it opened, and the results of steps already done</td></tr>
+    <tr><td>Agent server (Gym)</td><td>The turn loop: the conversation so far, tool calls not yet answered, and session cookies</td></tr>
+    <tr><td>Resources server (Gym)</td><td>Environment state per session, such as a counter, a database, or a document store that tools change</td></tr>
+    <tr><td>Policy model server (Gym)</td><td>The token-free lineage of model calls, and which responses have not been delivered yet</td></tr>
+    <tr><td>Inference workers (training framework)</td><td>Generated tokens, including the prefix of a generation still decoding</td></tr>
+    <tr><td>Training framework</td><td>The durable token store, the registry of dispatched rollouts, and the global checkpoint itself</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+Every rollout also has an identity that survives retries and restores: a stable rollout ID plus an attempt
+number. After a restore the rollout continues as the next attempt, and anything still arriving from an older
+attempt must be rejected.
+</p>
+
+<h3 id="problem-requirements">What a correct checkpoint requires</h3>
+<ul>
+  <li><b>One consistent cut.</b> Every component's saved state describes the same moment of the same rollout.</li>
+  <li><b>No repeated side effects.</b> A step that changes state is never run twice because of a restore.</li>
+  <li><b>Bounded latency.</b> A checkpoint never waits for a generation or a slow rollout to finish; the
+  controller can retire a straggler, which then restarts from its input.</li>
+  <li><b>Durable before published.</b> Every component's files are complete and verified before the global
+  checkpoint names them.</li>
+  <li><b>Stale work is fenced.</b> Requests from a replaced attempt are refused everywhere.</li>
+  <li><b>Fail closed.</b> A server that cannot continue a rollout still takes part, so it can never silently
+  produce a checkpoint that is wrong.</li>
+</ul>
+
+<h3 id="problem-rl">How it fits with NeMo RL</h3>
+<p>The training framework owns the global checkpoint transaction; Gym owns everything inside Gym.</p>
+<ol>
+  <li><b>Prepare.</b> The framework stops dispatching new rollouts and asks Gym to prepare. Gym brings every
+  in-flight rollout to a safe point, in the order Gym defines, and reports any straggler it had to wait for.</li>
+  <li><b>Commit.</b> Gym writes each server's state into the framework's checkpoint directory. The framework
+  saves its own state (token store, rollout registry, dataloader) alongside, and waits for results of rollouts
+  that finished just before the cut.</li>
+  <li><b>Publish, then resume.</b> The framework publishes the checkpoint atomically and tells Gym to resume.</li>
+  <li><b>Restore after a crash.</b> The framework starts fresh Gym servers, restores Gym's state for the
+  rollouts it will continue, and re-dispatches each of them as its next attempt, which continues from its last
+  safe point.</li>
+</ol>
+<p>Part 2 is how v2 does this. Part 3 is the first proposal, kept as it was. Part 4 compares them.</p>
+</section>
+
+<section class="part" id="part-v2">
+<p class="eyebrow">Part 2</p>
+<h2 id="v2">The v2 design</h2>
+</section>
+<div class="card">
+  <b>The rule that shapes everything:</b> the component that decides the next operation owns
+  the state needed to make that decision. The environment server owns where an episode is in its
+  protocol. The agent owns its turn loop. The resources server owns environment state. The policy
+  model server owns token-free lineage. The training framework owns tokens and the global
+  checkpoint. No component persists another component's facts.
+</div>
+
+<h2 id="components">1. Components and what each owns</h2>
+<p>Select a component to see what it owns, what it checkpoints, and what it never does.</p>
+<div class="scroll">
+<svg id="component-map" viewBox="0 0 940 400" role="img" aria-labelledby="cm-title">
+  <title id="cm-title">Component map: the training framework calls Gym's checkpoint coordination, which calls one participant per Gym server</title>
+</svg>
+</div>
+<div class="card" id="component-detail" aria-live="polite"></div>
+
+<h2 id="player">2. Step through the lifecycle</h2>
+<p>
+Pick a scenario and step through it. In the diagram, the current step's messages are drawn at full
+strength; earlier steps are faded. The boxes under the diagram show each component's state after the
+step; a thick solid border marks a change and a dashed border marks a problem state.
+</p>
+
+<div class="player-controls">
+  <label for="scenario-select" class="dim">Scenario</label>
+  <select id="scenario-select"></select>
+  <button id="prev-step" type="button">◀ Back</button>
+  <button id="next-step" type="button">Next ▶</button>
+  <span class="step-counter" id="step-counter"></span>
+</div>
+<ul class="step-list" id="step-list" aria-label="Jump to step"></ul>
+
+<div class="card step-text" id="step-text" aria-live="polite"></div>
+
+<div class="seq-wrap">
+  <svg id="sequence-head" class="seq-head" viewBox="0 0 960 70" width="960" height="70" aria-hidden="true"></svg>
+  <svg id="sequence" role="img" aria-labelledby="seq-title"><title id="seq-title">Sequence diagram for the selected scenario</title></svg>
+</div>
+<div class="states" id="states"></div>
+
+<h2 id="modes">3. Wait or replay: steps in flight at a checkpoint</h2>
+<p>
+An episode is a sequence of steps. After each completed step the owner records a <b>boundary</b>:
+the next step and the results it needs. A checkpoint can always be taken at a boundary. The question
+is what to do with a step that is still running when prepare arrives. Each step has one of two modes.
+</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Mode</th><th>While the checkpoint runs</th><th>After a crash</th><th>When to use</th></tr></thead>
+  <tbody>
+    <tr><td><b>wait</b> (default)</td><td>Prepare waits for the step to finish, then the episode parks at the boundary after it, with the step's result recorded. Past the deadline, the rollout is a blocker and the framework retires it.</td><td>Continue after the step; it is not repeated.</td><td>Always correct. The default for any step nobody has declared replayable.</td></tr>
+    <tr><td><b>replay</b> (optimization)</td><td>Prepare does not wait: the episode counts as parked at the boundary before the step. The step keeps running; its result is held and acted on only after resume.</td><td>The step is re-issued from the boundary before it.</td><td>Steps that are safe to run again and do not change checkpointed state: idempotent seeds, pure or judge-based verification, policy calls.</td></tr>
+  </tbody>
+</table>
+</div>
+<p>The environment server owns the episode's steps, so it decides. Whoever implements a step declares whether it may be replayed:</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Step implemented by</th><th>Declared by</th><th>Replay allowed when</th></tr></thead>
+  <tbody>
+    <tr><td>The environment server itself (for example, verification computed in process)</td><td>the environment-server implementation</td><td>it declares the step safe to re-run</td></tr>
+    <tr><td>A resources server (<code>/verify</code>, <code>/seed_session</code>)</td><td>the resources server, in code. It reports the mode on its <code>/seed_session</code> reply, so the caller learns it without another request and keeps it in the episode's boundary</td><td>the resources server declares its verification replay-safe; seeds are idempotent by contract</td></tr>
+    <tr><td>An agent (one activation)</td><td>the agent's own turn-loop boundaries</td><td>always covered: the agent parks itself, and an in-flight policy call is held</td></tr>
+    <tr><td>A tool call that mutates environment state</td><td>—</td><td>never: accepted mutations finish before state is exported</td></tr>
+  </tbody>
+</table>
+</div>
+<div class="card">
+  <b>Why the two modes are not interchangeable.</b> In wait mode the boundary after the step must carry the
+  step's <i>result</i>, never "still pending". The resources server exports its state after the step finished,
+  and the environment server may receive the reply slightly later. A record that said "pending" would make a
+  restore re-run a possibly state-changing verification against state that already includes its effects. In
+  replay mode either record is correct, because running the step again is declared safe.
+</div>
+<p>The resources server follows the same declaration for its own readiness: an in-flight verification it declared replayable does not block its prepare; one in wait mode does. Environment servers that verify in process need no resources server at all.</p>
+
+<h2 id="machines">4. State machines</h2>
+<p>
+Every participant runs the same control-phase machine. Agent sessions, policy calls, and episodes
+have their own small machines. While a scenario plays, the machine that the current step affects
+highlights its current state with a thick solid border.
+</p>
+<div class="sm-tabs" id="sm-tabs" role="tablist"></div>
+<div class="scroll"><svg id="state-machine" role="img" aria-labelledby="sm-title"><title id="sm-title">Selected state machine</title></svg></div>
+<div class="card" id="sm-text"></div>
+
+<h2 id="records">5. What a checkpoint stores</h2>
+<p>
+Each participant writes one records file and then a manifest carrying the file's digest, under
+<code>&lt;checkpoint_dir&gt;/gym/&lt;kind&gt;/&lt;server&gt;/</code>. A directory with a manifest never
+changes. The training framework saves its token store next to it and publishes the whole
+checkpoint last.
+</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Participant</th><th>One record per</th><th>Record contents</th><th>Never stored</th></tr></thead>
+  <tbody>
+    <tr><td>Environment server</td><td>episode at a step boundary</td><td>episode ID, task digest, the next step and the results it needs (for example, the final agent response and observations before verification, or the verification result after it), and open session handles (resources and agent session IDs and cookies)</td><td>anything the agent or resources server owns</td></tr>
+    <tr><td>Agent server</td><td>agent session</td><td>episode ID, agent-owned session data (tool access, cookies), and the latest turn-loop boundary</td><td>the episode's protocol position, environment state, token arrays</td></tr>
+    <tr><td>Policy model server</td><td>continued episode</td><td>token-free capture-ledger rows up to the checkpoint, minus undelivered calls, plus the generation cut of an undelivered call</td><td>token IDs, logprobs, masks (the token store owns these)</td></tr>
+    <tr><td>Resources server</td><td>live session (exported mode only)</td><td>episode ID and the environment's typed session state</td><td>sessions of stateless or restart-only servers</td></tr>
+    <tr><td>Training framework</td><td>—</td><td>token store snapshot, replay and dataloader state, and the published marker naming every Gym manifest</td><td>—</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="failures">6. Failures and edge cases</h2>
+<p>Every path fails closed: nothing is published unless every participant committed a consistent cut.</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Situation</th><th>What happens</th><th>Who decides next</th></tr></thead>
+  <tbody id="failure-rows"></tbody>
+</table>
+</div>
+
+<h2 id="apis">7. Control API</h2>
+<p>
+Every participating server exposes the same bearer-protected routes. Gym's checkpoint coordination calls them
+in the required order; the training framework calls the coordination.
+</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Route</th><th>Valid in phase</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>POST /ng-control/v1/checkpoint/prepare</code></td><td>idle, preparing</td><td>close admission, then wait until ready or the deadline; report blockers</td></tr>
+    <tr><td><code>POST …/retire</code></td><td>preparing, prepared, restored, idle</td><td>discard named attempts and fence them</td></tr>
+    <tr><td><code>POST …/commit</code></td><td>prepared</td><td>re-check readiness, write records then manifest; idempotent</td></tr>
+    <tr><td><code>POST …/restore</code></td><td>idle, fresh process</td><td>validate everything, install under the next attempt, stay closed</td></tr>
+    <tr><td><code>POST …/resume</code></td><td>any non-idle</td><td>reopen admission and release parked work; also the abort path</td></tr>
+    <tr><td><code>GET …/status</code></td><td>any</td><td>phase, checkpoint ID, readiness report, and checkpoint mode; a resources server also reports whether its verification may be replayed</td></tr>
+    <tr><td><code>POST /ng-control/v1/generation-cut</code> (inference worker)</td><td>—</td><td>stage the prefix of each in-flight call and return a receipt</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+Coordination order: <b>prepare</b> environment servers → policy model → agents → resources.
+<b>Commit</b> in any order, except that the model commit is scoped to the episodes the other
+participants exported. <b>Resume</b> resources → policy model → agents → environment servers.
+<b>Restore</b> is all or nothing: if any participant fails, coordination retires the replacement attempts
+everywhere, which drops their restored state, and resumes every participant. The training framework restarts
+those rollouts from their input as later attempts.
+</p>
+<p>
+<b>Before its own barrier</b>, the training framework waits for the replies to its outstanding
+<code>/run</code> calls whose episodes no participant exported. Those episodes finished before prepare
+was ready, so their replies are already in flight. This replaces a completed-result acknowledgement
+protocol: Gym never holds a finished result waiting for an acknowledgement, and a lost reply can never
+block a checkpoint.
+</p>
+
+
+<section class="part" id="part-v1">
+<p class="eyebrow">Part 3</p>
+<h2 id="v1">v1, as proposed</h2>
+<div class="card">
+  This is the first proposal (17 September 2026), preserved unchanged for the record. It planned an
+  <i>episode processor</i> that later landed on main as the environment server, and its implementation was the
+  Gym pull-request chain #2939–#2946. Part 4 explains how v2 maps to it.
+</div>
+<div class="v1" id="v1-root">
+
+
 <div class="wrap">
 
 <div class="eyebrow">Architecture decision · 17 September 2026</div>
-<h1>Partial-rollout checkpointing for NeMo-RL and NeMo Gym</h1>
+<h2>Partial-rollout checkpointing for NeMo-RL and NeMo Gym</h2>
 <div class="meta">owner ansubramania · aligned with episode orchestration PRs #3482–#3492 · checkpoint ownership update · self-contained HTML, inline CSS/JS/SVG</div>
 
-<p class="lede" style="border:1px solid var(--border);border-radius:8px;padding:0.6rem 0.9rem;"><b>Superseded.</b> This is the v1 design. The <a href="partial-rollout-checkpointing-v2.html">v2 walkthrough</a> re-cuts checkpointing around environment servers; its <a href="partial-rollout-checkpointing-v2.html#changes">What changed from v1</a> section maps each part of this page to v2.</p>
 <p class="lede">The episode-orchestration design moves the complete rollout lifecycle out of an agent server's <code>/run</code> method and into an episode processor. The processor owns resources and agent session setup, one or more <code>/v1/responses</code> activations, verification, cleanup, and the decision about what happens next. Checkpointing must therefore persist the episode boundary in the processor. Agent servers persist only the private session state needed to continue later <code>/v1/responses</code> activations. NeMo-RL still owns the global checkpoint transaction and validates the processor, agent-session, resources, model-lineage, and <code>TransferQueue</code> records as one compatible cut.</p>
 
-<nav class="tabs" id="tabs" aria-label="Sections">
+<nav class="tabs" id="v1-tabs" aria-label="Sections">
   <button data-tab="inv" class="on">Requirements</button>
   <button data-tab="state">State ownership</button>
   <button data-tab="ov">Overview</button>
@@ -419,317 +775,8 @@ tr:last-child td { border-bottom: none; }
 <div class="card"><h3>Boundary of this end-to-end test</h3><p>The Gym test simulates controller ordering with direct route calls. Separate tests in <a href="https://github.com/NVIDIA-NeMo/RL/pull/4093">NeMo-RL #4093</a> exercise the <code>NemoGym</code> actor against the pinned Gym stack. NeMo-RL separately tests its existing <code>SingleController</code> and native <code>TransferQueue</code> recovery. The missing joined test inserts the actor and Gym manifests into that real controller transaction and validates their model coordinates against the restored token inventory.</p></div>
 </section>
 
-<script>
-function buildStepper(mountId, phaseName, actors, steps) {
-  var mount = document.getElementById(mountId);
-  var n = actors.length;
-  var W = 940, gap = W / n;
-  var cx = function (i) { return gap / 2 + i * gap; };
-  var half = Math.min(64, gap / 2 - 6);
-  var html = '';
-  html += '<div class="ctl">';
-  html += '<button type="button" data-a="prev">&larr; Prev</button>';
-  html += '<button type="button" data-a="next">Next &rarr;</button>';
-  html += '<span class="ph">' + phaseName + '</span>';
-  html += '<span class="ct" data-a="count"></span></div>';
-  html += '<svg viewBox="0 0 940 132" role="img" aria-label="Current step drawn between the participating components.">';
-  html += '<defs><marker id="' + mountId + '-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>';
-  html += '<g font-size="11.5">';
-  for (var i = 0; i < n; i++) {
-    html += '<rect data-actor="' + i + '" x="' + (cx(i) - half) + '" y="8" width="' + (half * 2) + '" height="34" rx="6" fill="none" stroke="var(--border)"/>';
-    var parts = actors[i].split('\n');
-    html += '<text x="' + cx(i) + '" y="' + (parts.length > 1 ? 23 : 29) + '" text-anchor="middle" fill="var(--text)">' + parts[0] + '</text>';
-    if (parts.length > 1) html += '<text x="' + cx(i) + '" y="37" text-anchor="middle" font-size="9.5" fill="var(--dim)">' + parts[1] + '</text>';
-  }
-  html += '</g><g data-a="arrow"></g></svg>';
-  html += '<div class="chips" data-a="chips" role="tablist"></div>';
-  html += '<dl><dt>Call</dt><dd data-a="call"></dd>';
-  html += '<dt>Request</dt><dd><pre data-a="req"></pre></dd>';
-  html += '<dt>Response</dt><dd><pre data-a="resp"></pre></dd>';
-  html += '<dt>Effect</dt><dd data-a="eff"></dd>';
-  html += '<dt>On failure</dt><dd data-a="fail"></dd></dl>';
-  mount.innerHTML = html;
-  var q = function (sel) { return mount.querySelector('[data-a="' + sel + '"]'); };
-  var chips = q('chips');
-  steps.forEach(function (s, i) {
-    var b = document.createElement('button');
-    b.type = 'button'; b.textContent = s.id; b.setAttribute('role', 'tab');
-    b.addEventListener('click', function () { go(i); });
-    chips.appendChild(b);
-  });
-  var cur = 0;
-  function go(i) {
-    cur = (i + steps.length) % steps.length;
-    var s = steps[cur];
-    q('count').textContent = 'step ' + (cur + 1) + ' of ' + steps.length;
-    q('call').textContent = s.id + ' — ' + s.call;
-    q('req').textContent = s.req || '(none)';
-    q('resp').textContent = s.resp || '(none)';
-    q('eff').textContent = s.eff || '—';
-    q('fail').textContent = s.fail || '—';
-    var rects = mount.querySelectorAll('rect[data-actor]');
-    for (var k = 0; k < rects.length; k++) {
-      var on = (k === s.f || k === s.t);
-      rects[k].setAttribute('stroke', on ? 'var(--accent)' : 'var(--border)');
-      rects[k].setAttribute('stroke-width', on ? '2.2' : '1');
-    }
-    var g = q('arrow'), x1 = cx(s.f), x2 = cx(s.t), a = '';
-    if (s.f === s.t) {
-      a = '<path d="M ' + (x1 - 18) + ' 46 C ' + (x1 - 18) + ' 88, ' + (x1 + 18) + ' 88, ' + (x1 + 18) + ' 50" fill="none" stroke="var(--accent)" stroke-width="2.2" marker-end="url(#' + mountId + '-ah)"/>' +
-          '<text x="' + x1 + '" y="108" text-anchor="middle" font-size="12" fill="var(--accent)">' + s.id + ' (local)</text>';
-    } else {
-      var d = x2 > x1 ? 1 : -1;
-      a = '<line x1="' + x1 + '" y1="42" x2="' + x1 + '" y2="76" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="3 3"/>' +
-          '<line x1="' + x2 + '" y1="42" x2="' + x2 + '" y2="76" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="3 3"/>' +
-          '<line x1="' + (x1 + 8 * d) + '" y1="76" x2="' + (x2 - 12 * d) + '" y2="76" stroke="var(--accent)" stroke-width="2.4" marker-end="url(#' + mountId + '-ah)"/>' +
-          '<text x="' + ((x1 + x2) / 2) + '" y="98" text-anchor="middle" font-size="12" fill="var(--accent)">' + s.id + '</text>';
-    }
-    g.innerHTML = a;
-    var bs = chips.children;
-    for (var c = 0; c < bs.length; c++) bs[c].className = c === cur ? 'on' : '';
-  }
-  q('prev').parentElement.querySelector('[data-a="prev"]').addEventListener('click', function () { go(cur - 1); });
-  mount.querySelector('[data-a="next"]').addEventListener('click', function () { go(cur + 1); });
-  mount.addEventListener('keydown', function (e) {
-    if (e.key === 'ArrowRight') { go(cur + 1); e.preventDefault(); }
-    if (e.key === 'ArrowLeft') { go(cur - 1); e.preventDefault(); }
-  });
-  go(0);
-}
-</script>
-<script>
-buildStepper("st-rt", "Runtime", ["SC / pumps","NemoGym actor","Episode processor","Agent server","Resources server","Judge/Sim models","Policy model","Gen worker","TransferQueue"], [
- {id:"R1", f:0, t:1, call:"Dispatch batch (Ray stream)",
-  req:"task rows with stamped ids\nrollout_id = {group}_g{i}   _ng_attempt_index = 1",
-  resp:"results streamed back as rollouts complete",
-  eff:"RL registry: pending -> inflight", fail:"redispatch; nothing exists Gym-side"},
- {id:"R2", f:1, t:1, call:"Register execution BEFORE the concurrency semaphore",
-  req:"registry[(rollout_id, attempt)] = {phase: queued, task, processor_instance: null}",
-  resp:"(local)",
-  eff:"liveness-set entry exists before any HTTP", fail:"entry proves the request never started -> fresh dispatch at restore"},
- {id:"R3", f:1, t:2, call:"POST episode processor /run",
-  req:"{episode_id: {rollout_id, attempt}, task: {task_id, task_input}}",
-  resp:"connection held open for the complete episode protocol",
-  eff:"registry phase: queued -> issued -> running; processor instance recorded", fail:"redispatch same rollout_id, next attempt"},
- {id:"R4", f:2, t:4, call:"Seed resources session",
-  req:"POST /seed_session {episode_id, task_id, task_data}",
-  resp:"{resources_session_id, resources_tools, sandbox_access} + cookies",
-  eff:"processor records the resources handle and cleanup obligation", fail:"processor returns a typed seed failure; remote owner reaps an orphan"},
- {id:"R5", f:2, t:3, call:"Seed agent session",
-  req:"POST /v1/agent_sessions {episode_id, task_id, resources_access, sandbox_access}",
-  resp:"{agent_session_id} + cookies",
-  eff:"processor records the agent handle; agent retains only private session state", fail:"processor closes the resources session or records cleanup pending"},
- {id:"R6", f:2, t:3, call:"Invoke agent",
-  req:"POST /ng-rollout/{capture_key}/v1/responses with agent session cookies and one logical activation id",
-  resp:"complete Responses API result",
-  eff:"processor records the completed activation and next protocol operation", fail:"retry only when the agent can deduplicate the activation; otherwise restart"},
- {id:"R7", f:3, t:6, call:"Policy generation request",
-  req:"POST /ng-rollout/{rid}-a1/training-token-capture/v1/responses\nfull conversation; header x-ng-plane: policy",
-  resp:"admission ticket created; inflight+1 (atomic AdmissionLimiter)",
-  eff:"request remains in flight until custody data is durable", fail:"client retries carrying the same logical request id"},
- {id:"R8", f:6, t:7, call:"Dispatch to generation worker",
-  req:"POST /v1/chat/completions + ng_capture{rollout, call_id, parent, staging_chain}",
-  resp:"(returns at R10)",
-  eff:"none", fail:"retry is idempotent: staging is keyed by call id"},
- {id:"R9", f:7, t:8, call:"Stage token delta, synchronous, pre-ack",
-  req:"put_samples key {rollout}/{call}: token/mask/logprob deltas + identity tags",
-  resp:"ack required before the generation response is released",
-  eff:"staged row in TransferQueue", fail:"orphan row + dangling admission -> masked"},
- {id:"R10", f:7, t:6, call:"Return text + token-free coordinates",
-  req:"(response to R8)",
-  resp:"{staging_key, prev/delta/cum lengths, digests, weight_version, prefix_verified}",
-  eff:"none", fail:"as R8"},
- {id:"R11", f:6, t:6, call:"Custody row, then release",
-  req:"append token-free custody row (durable); echo x-ng-model-call-id header; inflight-1",
-  resp:"token-stripped response to the agent",
-  eff:"call k is committed; agent may act on it", fail:"agent never saw the response; the row stands; masked or continued at restore"},
- {id:"R12", f:3, t:4, call:"Tool calls",
-  req:"POST /{tool} per call with rollout and attempt headers; successful state creation binds identity; MCP replays signed identity",
-  resp:"tool results",
-  eff:"HTTP and MCP mutations share one per-session lock and revision path", fail:"unknown POST data routes default to mutation; untracked stateful traffic makes prepare fail safe"},
- {id:"R13", f:4, t:5, call:"Nested environment-plane model call",
-  req:"simulator or judge request targets an auxiliary model-server instance that remains open during prepare",
-  resp:"model output",
-  eff:"none for training: environment-plane tokens are never selected", fail:"tool surfaces a typed error, not a fabricated observation"},
- {id:"R14", f:2, t:2, call:"Protocol boundary",
-  req:"record completed activation, agent_session_id, resources_session_id, cookies, model-call id, resources revision, and next_operation",
-  resp:"(local)",
-  eff:"this is where prepare can park the episode processor", fail:"a boundary is invalid if a referenced component outcome is not durable"},
- {id:"R15", f:2, t:3, call:"Close agent session",
-  req:"POST /v1/agent_sessions/close {agent_session_id}",
-  resp:"{agent_observations, resources_cookies}",
-  eff:"processor records close completion before advancing", fail:"idempotent retry or cleanup remains pending"},
- {id:"R16", f:2, t:4, call:"Verify",
-  req:"POST /verify; any judge call targets a separate auxiliary model instance",
-  resp:"{reward, verifier metadata}",
-  eff:"reward computed", fail:"judge failure -> typed judge_failed outcome, owned by RL policy"},
- {id:"R17", f:2, t:4, call:"Close resources session",
-  req:"POST /close_session {resources_session_id}",
-  resp:"{resources_session_id}",
-  eff:"processor marks the final cleanup obligation complete", fail:"idempotent retry from durable cleanup state"},
- {id:"R18", f:1, t:0, call:"Result handoff with acknowledgement",
-  req:"episode processor /run returns -> actor streams result to the rollout manager",
-  resp:"handoff ACK from the rollout manager",
-  eff:"registry phase transferred_to_rl, then entry removed; prepare can never acknowledge mid-handoff", fail:"unacked handoff keeps the entry; restore reconciles against the RL registry"},
- {id:"R19", f:0, t:8, call:"Finalization (RL-side)",
-  req:"finalizer fetches staged rows by manifest keys; verifies digests, lengths, masks, weight versions",
-  resp:"publishes exactly N train rows per group, then clears staging keys",
-  eff:"canonical training rows", fail:"publish-before-clear makes any torn state re-runnable"}
-]);
 
-buildStepper("st-pp", "Prepare", ["SingleController","NemoGym actor","Episode processor","Agent server","Relay / runtime","Resources server","Policy model","Judge/Sim models","Gen worker"], [
- {id:"P1", f:0, t:0, call:"Fence RL-side work",
-  req:"pause rollout and training pumps; stop issuing finalizations; wait for in-flight finalizations",
-  resp:"(local)",
-  eff:"nothing will write TransferQueue during the later save", fail:"skipping this can strand a group across the snapshot"},
- {id:"P2", f:0, t:1, call:"prepare_checkpoint",
-  req:"Ray: {checkpoint_id, deadline (absolute), deadline_policy: restart_safe_rollouts}",
-  resp:"(returns at P13)",
-  eff:"actor enters a short critical section: validate the transition, set the active checkpoint id, and change phase running -> preparing; P3 completes before the mutex is released", fail:"same checkpoint id returns its recorded transition; a different id is rejected while one is active"},
- {id:"P3", f:1, t:1, call:"Fence dispatch and freeze membership",
-  req:"while the same mutex is held: close the actor dispatch gate and snapshot membership of the live-execution registry; then release the mutex before any drain wait",
-  resp:"(local)",
-  eff:"no new execution can join the checkpoint set; queued-never-issued entries are classified now; progress and abort calls remain available during draining", fail:"—"},
- {id:"P4", f:1, t:2, call:"Prepare episode processors",
-  req:"POST /ng-control/v1/episode-checkpoint/prepare {checkpoint_id, deadline_ts} per processor instance",
-  resp:"{state: preparing, running: 0, parked, active} after every tracked episode reaches a boundary",
-  eff:"each processor finishes its current protocol operation, commits an EpisodeBoundaryRecord, and blocks", fail:"a nonzero running count at the deadline fails prepare; retire restart-safe attempts and retry, or abort"},
- {id:"P5", f:1, t:3, call:"Prepare private agent sessions",
-  req:"prepare every agent_session_id referenced by a selected processor boundary",
-  resp:"{state: prepared, sessions, restart_only_sessions}",
-  eff:"active /v1/responses calls drain to an activation boundary; private session snapshots freeze", fail:"a referenced session that cannot reach its advertised boundary blocks continuation"},
- {id:"P6", f:1, t:4, call:"Pause blackbox egress",
-  req:"pause_egress {checkpoint_id} per blackbox runtime",
-  resp:"{state: paused, local_pending_requests}",
-  eff:"relay holds NEW harness requests locally; the harness may keep computing", fail:"re-send; idempotent"},
- {id:"P7", f:1, t:6, call:"Close policy-model admission",
-  req:"POST /ng-control/v1/model-admission/pause {checkpoint_id, deadline_ts} after processors and agent activations are parked\nexcluded: judge and simulator instances; generation workers stay available",
-  resp:"{state: draining, workers: {acknowledged, expected}, inflight_total, waiters_total}",
-  eff:"the service coordinator publishes the closed state to every FastAPI worker; no new top-level operations enter after all workers acknowledge; accepted ones finish", fail:"a missing worker is an error; re-send is idempotent"},
- {id:"P8", f:8, t:6, call:"Accepted generations drain",
-  req:"each finishes the generation path: stage -> coordinates -> custody row -> release",
-  resp:"(normal operation)",
-  eff:"each FastAPI worker decrements its local count after custody is durable; the service coordinator's aggregate falls toward zero", fail:"a straggler is handled by the deadline policy, never by waiting forever"},
- {id:"P9", f:1, t:5, call:"Prepare resources state",
-  req:"POST /ng-control/v1/resources-checkpoint/prepare {checkpoint_id, deadline_ts}",
-  resp:"{state: prepared, sessions}",
-  eff:"new mutations are rejected; prepare acquires each per-session lock and exports state after the accepted mutation finishes", fail:"timeout or codec failure aborts this participant prepare; no partial resources manifest is published"},
- {id:"P10", f:2, t:2, call:"Processors park; completions transfer",
-  req:"each processor records its latest completed protocol operation and parks; completed episodes transfer with handoff ACK",
-  resp:"(local)",
-  eff:"per-rollout state: parked | transferred_to_rl", fail:"a processor stuck mid-operation reports the blocking operation and target participant"},
- {id:"P11", f:1, t:6, call:"Observe model drain",
-  req:"GET /ng-control/v1/model-admission/status {checkpoint_id, wait_state: paused, timeout_s}",
-  resp:"{state, inflight_total, waiters_total}; a coordinator deployment also reports worker acknowledgements",
-  eff:"the absolute deadline remains enforceable while accepted HTTP generations finish", fail:"a missing worker or deadline expiry fails prepare; it is never treated as zero in flight"},
- {id:"P12", f:1, t:2, call:"Apply the deadline policy",
-  req:"for a restart-safe attempt: retire processor, agent-session, resources, runtime, and model state under one checkpoint fence; mark fresh_dispatch",
-  resp:"{aborted}",
-  eff:"processor tasks are cancelled; component sessions retire; resources waits for mutation locks; model roots are excluded", fail:"a non-discardable external effect or missing durable result acknowledgement aborts the global checkpoint"},
- {id:"P13", f:1, t:4, call:"Freeze blackbox runtimes",
-  req:"checkpoint_runtime {rollout, attempt, mode: full_runtime_snapshot} once that rollout has no in-flight calls, or at the deadline with the forwarded call marked pending_reissue",
-  resp:"RuntimeSnapshotDescriptor {artifact_ref, digest, provider_fingerprint}",
-  eff:"harness memory + relay pending/cached state captured", fail:"provider without full-runtime support -> rollout marked restart"},
- {id:"P14", f:1, t:0, call:"Prepared",
-  req:"(response to P2)",
-  resp:"{state: prepared, rollouts: {rid: parked | transferred | snapshot_ready | fresh_dispatch}, restarted_rollouts: [{rid, attempt, stuck_op, age}]}",
-  eff:"Gym is paused at restorable points; SC may seal its data plane", fail:"SC aborts -> resume everything, delete temp"}
-]);
 
-buildStepper("st-sv", "Save", ["SingleController","TransferQueue","NemoGym actor","Gym server instances","Checkpoint FS","Trainer","Gen workers"], [
- {id:"S1", f:0, t:0, call:"Seal the rollout registry",
-  req:"write pending/inflight registry (dispatch already fenced, handoffs acknowledged)",
-  resp:"(local durable)",
-  eff:"registry cut consistent with the frozen live-execution set", fail:"re-run; nothing references it yet"},
- {id:"S2", f:0, t:1, call:"Save TransferQueue",
-  req:"save_checkpoint to a fresh content-addressed path",
-  resp:"{digest}",
-  eff:"data-plane cut; safe because policy plane and finalizers are quiet", fail:"previous checkpoint untouched; retry or abort"},
- {id:"S3", f:0, t:2, call:"commit_checkpoint",
-  req:"Ray: {checkpoint_id, checkpoint_dir: ckpt.tmp/gym (fresh, actor-owned)}",
-  resp:"(returns at S5)",
-  eff:"actor phase prepared -> committing", fail:"idempotent; a repeat verifies and returns the same descriptor"},
- {id:"S4", f:2, t:3, call:"Component commit fan-out",
-  req:"POST /ng-control/v1/{episode|agent-session|resources|model}-checkpoint/commit {checkpoint_id, checkpoint_dir, deadline_ts}\neach participant publishes a namespaced manifest",
-  resp:"{manifest_path, digest, counts}",
-  eff:"each component manifest makes its payload set immutable and verifiable", fail:"write failure -> remain paused, report; SC aborts the global checkpoint"},
- {id:"S5", f:2, t:4, call:"Write the actor manifest last",
-  req:"verify every component digest -> write live-executions.jsonl -> write gym/manifest.json -> fsync",
-  resp:"Ray return: {state: committed_paused}",
-  eff:"participant package complete and immutable; everything STAYS paused", fail:"missing/failed digest -> no manifest -> SC aborts"},
- {id:"S6", f:5, t:5, call:"Trainer save completes",
-  req:"model + optimizer + scheduler save, running asynchronously since before prepare",
-  resp:"trainer anchor durable",
-  eff:"independent of Gym; overlapped with everything above", fail:"abort the global checkpoint; participant resumes"},
- {id:"S7", f:0, t:6, call:"Pause or update generation workers",
-  req:"ONLY here - between commit and resume - may RL pause, refit, or restart generation workers",
-  resp:"(worker lifecycle)",
-  eff:"no accepted Gym generation can exist right now, so nothing drains against a paused worker", fail:"worker recovery retried; NemoGym.resume is NOT called yet"},
- {id:"S8", f:0, t:4, call:"Publish",
-  req:"verify every participant -> write training_info.json last -> atomic rename -> fsync parent",
-  resp:"published global checkpoint",
-  eff:"the checkpoint exists; before this instant the previous one stands - no third state", fail:"discard the temp; abort; resume participants"},
- {id:"S9", f:0, t:6, call:"Validate workers",
-  req:"health + policy-version checks against the published anchor",
-  resp:"ready",
-  eff:"parked processors will never release agent sessions against an incompatible policy", fail:"retry worker recovery; stay paused"},
- {id:"S10", f:0, t:2, call:"Resume in dependency order",
-  req:"Ray: resume {checkpoint_id}",
-  resp:"{state: running}",
-  eff:"ordered reopen: resources -> policy model -> agent sessions and runtimes -> episode processors -> dispatch; SC reopens pumps + finalizers", fail:"any earlier failure took the abort path: release every control, delete temp"}
-]);
-
-buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen workers","NemoGym actor","Model server","Resources server","Agent server","Runtime / relay","Episode processor"], [
- {id:"T1", f:0, t:0, call:"Select the checkpoint",
-  req:"newest published checkpoint by checkpoint id, never mtime; read training_info.json",
-  resp:"(local)",
-  eff:"deterministic selection", fail:"re-pick is deterministic"},
- {id:"T2", f:0, t:1, call:"Restore the data plane",
-  req:"load_checkpoint by the BOUND digest; restore pending/inflight registry; reconcile staging keys by count",
-  resp:"TransferQueue repopulated",
-  eff:"staged chains available for prefix supply", fail:"re-run"},
- {id:"T3", f:0, t:2, call:"Start generation workers",
-  req:"restored weights; capture sink reinstalled at setup; health + policy-version validation",
-  resp:"serving",
-  eff:"workers ready before any Gym activation", fail:"normal engine startup; retry"},
- {id:"T4", f:0, t:3, call:"restore_checkpoint",
-  req:"Ray: {checkpoint_dir}; actor starts Gym servers in paused-bootstrap; verifies /ng-control/v1/capabilities per instance role",
-  resp:"(returns after T9)",
-  eff:"every server paused; capability mismatch fails restore", fail:"fail the method; SC decides"},
- {id:"T5", f:3, t:4, call:"Restore model lineage FIRST",
-  req:"POST .../model-checkpoint/restore {checkpoint_id, subdir}",
-  resp:"{state: restored_paused, rollout_count}",
-  eff:"custody ledger + source attempts installed; the first resumed call must parent-resolve", fail:"digest/schema mismatch leaves model admission closed in observable restore_failed_paused"},
- {id:"T6", f:3, t:5, call:"Restore resources sessions",
-  req:"POST .../resources-checkpoint/restore {checkpoint_id, subdir, attempt_mapping_ref}",
-  resp:"{state: restored_paused, session_count}",
-  eff:"a fresh process installs sessions under N+1 and remains paused; stale attempt N receives HTTP 409", fail:"a process that already served stateful traffic rejects restore"},
- {id:"T7", f:3, t:7, call:"Restore blackbox runtimes",
-  req:"restore_runtime {rollout, source_attempt, new_attempt, artifact_ref, digest}\nrelay REWRITES attempt identity and RE-POINTS server endpoints; egress stays paused",
-  resp:"{state: restored_detached, egress: paused}",
-  eff:"harness thawed but silent", fail:"dead/incompatible artifact -> disposition falls to fresh dispatch"},
- {id:"T8", f:3, t:3, call:"Choose and verify one recovery action per rollout",
-  req:"per execution: RL-completed beats valid continuation beats fresh dispatch;\nverify every selected chain against restored TransferQueue BEFORE dispatch; write tombstones",
-  resp:"(local)",
-  eff:"exactly one action per rollout; a chain miss demotes to fresh dispatch here, not as a serving error later", fail:"fail closed to fresh dispatch"},
- {id:"T9", f:3, t:6, call:"Restore private agent sessions",
-  req:"POST .../agent-session restore {checkpoint_id, subdir, attempt_mapping_ref}",
-  resp:"{state: restored_paused, session_count}",
-  eff:"private continuation state, descriptors, observations, and activation receipts install under N+1", fail:"a missing session demotes the referencing processor boundary to fresh dispatch"},
- {id:"T10", f:3, t:8, call:"Restore episode processor boundaries",
-  req:"POST .../episode restore {checkpoint_id, subdir, attempt_mapping_ref}",
-  resp:"{state: restored_paused, episode_count}",
-  eff:"next operation and cleanup obligations install only after every referenced component session exists", fail:"a mismatched handle, revision, or result digest rejects the continuation"},
- {id:"T11", f:0, t:3, call:"Resume in dependency order",
-  req:"Ray: resume {checkpoint_id} - only after every participant and every worker is ready",
-  resp:"{state: running}",
-  eff:"resources -> model admission -> agent sessions and runtimes -> episode processors; fresh dispatches requeued by RL", fail:"stay paused; retry readiness"},
- {id:"T12", f:6, t:4, call:"First resumed policy call",
-  req:"the continued conversation plus source capture key and verified attempt-N model-call ID; both relay headers are consumed once",
-  resp:"normal generation",
-  eff:"the parent row's complete staging coordinates are copied into N+1; later calls parent-link within N+1", fail:"a missing parent or staging row must fail reconciliation before production dispatch"}
-]);
-</script>
 <section class="tab" id="tab-trade">
 <h2>Why component-owned boundaries are the default</h2>
 <p>The central constraint is not writing bytes to disk. It is choosing a point where the agent conversation, resources state, model-call lineage, and token rows describe the same completed work. The Gym draft APIs let each server finish the operation it owns and freeze its local state. The remaining NeMo-RL integration must coordinate those participants and verify the cross-component join without importing each environment's private representation.</p>
@@ -1152,43 +1199,1142 @@ StagedPrefix:
 <div class="foot">Partial-rollout checkpointing · proposed NeMo-RL and NeMo Gym architecture · aligned with public Gym PR stack #3482–#3492 · self-contained HTML, inline CSS/JS/SVG</div>
 </div>
 
+
+
+</div>
+</section>
+<section class="part" id="part-changes">
+<p class="eyebrow">Part 4</p>
+<h2 id="changes">From v1 to v2</h2>
+</section>
+<p>
+The <a href="partial-rollout-checkpointing.html">v1 design</a> planned an <i>episode processor</i> that owns the
+rollout lifecycle, and it described a Gym implementation in the eight-PR chain #2939–#2946. The episode processor
+landed on main as the <b>environment server</b>. v2 re-cuts the checkpoint stack around it and removes much of the
+machinery v1 needed, because a single owner of the episode protocol, plus a fixed participant order, makes a
+consistent cut without after-the-fact reconciliation.
+</p>
+
+<h3 id="changes-glance">At a glance</h3>
+<div class="scroll">
+<table>
+  <thead><tr><th>Topic</th><th>v1</th><th>v2</th></tr></thead>
+  <tbody>
+    <tr><td>Who records where an episode continues</td><td>The agent's <code>/run</code> in the implementation; an episode processor in the plan</td><td>The environment server records a boundary after each step. Agents and resources servers export only their own session state</td></tr>
+    <tr><td>A step in flight at a checkpoint</td><td>Drain it, or retire the rollout</td><td>Each step is <b>wait</b> (the default) or <b>replay</b>, declared by whoever implements it</td></tr>
+    <tr><td>Participant order</td><td>The training framework's actor sequences model, agent, and resources participants</td><td>Gym owns the order. The framework calls Gym's checkpoint coordination</td></tr>
+    <tr><td>Finished rollouts during a checkpoint</td><td>Results are cached until a receipt-bound acknowledgement</td><td>No episode completes while Gym is prepared. No acknowledgements</td></tr>
+    <tr><td>In-flight generations</td><td>Accepted generations finish staging before prepare completes</td><td>Prepare never waits for a generation. Undelivered responses are held and left out; a generation cut can keep the prefix</td></tr>
+    <tr><td>Model-call lineage across a restore</td><td>A one-shot restored-parent header relay</td><td>Ledger rows are restored under the replacement attempt, so the parent resolves normally</td></tr>
+    <tr><td>Resources consistency</td><td>Per-session mutation locks, revisions, request-ID receipts, and controller-side reconciliation</td><td>The order does it: agents park before resources close, and resources drain in-flight requests</td></tr>
+    <tr><td>Control API</td><td>Per-kind routes, capability discovery, instance roles</td><td>One route set per server and a <code>status</code> probe; a model participates only with an explicit policy opt-in</td></tr>
+    <tr><td>Storage</td><td>One file per rollout, with archive shards planned</td><td>One records file and one manifest per participant</td></tr>
+    <tr><td>Servers without checkpoint support</td><td>Declared through capabilities; undeclared servers could be missed</td><td>Every server participates. Unsupported ones are restart-only and block until their rollouts are retired</td></tr>
+    <tr><td>Multi-worker servers</td><td>A worker-coordinator protocol, not yet wired into startup</td><td>Policy model servers run several uvicorn workers as one participant: a coordinator in the main process and a gate in each worker, over a Unix socket. Agents, resources servers, and environment servers keep one worker, because their sessions live in one process</td></tr>
+    <tr><td>Controller loss</td><td>The actor's mutex and deadlines</td><td>Also a lease: each participant resumes on its own if the controller stops calling</td></tr>
+  </tbody>
+</table>
+</div>
+
+
+<h3 id="changes-scale">Scalability and ergonomics</h3>
+<p>
+v1 was correct in intent but expensive to run and to build on. Most of its cost came from components
+reconciling each other after the fact. v2 removes that need, so the cost of a checkpoint stays small as
+rollouts grow in number and length:
+</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Cost in v1</th><th>How v2 avoids it</th></tr></thead>
+  <tbody>
+    <tr><td>One acknowledgement per completed rollout, sent during checkpoints; bursts of these competed with the checkpoint itself at high concurrency</td><td>No acknowledgements: nothing completes while Gym is prepared, and results already sent are simply waited for</td></tr>
+    <tr><td>Client-side polling of each participant kind until ready</td><td>One server-side wait per participant, with a bounded list of blockers</td></tr>
+    <tr><td>Per-mutation revisions and request receipts on every tool call, paid on the normal path</td><td>Nothing on the normal path: the participant order gives a consistent cut</td></tr>
+    <tr><td>The controller joined continuation indexes with storage references to know which token-store rows to keep</td><td>The model's commit reply lists the token-store keys the checkpoint keeps</td></tr>
+    <tr><td>The controller sequenced every participant and parsed a different reply shape for each kind</td><td>Gym's coordination functions own the order; every participant has the same routes and replies</td></tr>
+    <tr><td>One file per rollout</td><td>One records file per participant; restore writes are batched and kept off the request path</td></tr>
+    <tr><td>Servers that declared nothing could be missed</td><td>Every server takes part; undeclared servers are restart-only</td></tr>
+    <tr><td>Multi-worker model servers needed a coordinator that was never wired into startup</td><td>A multi-worker policy server is one participant: a coordinator in its main process and a gate in each worker</td></tr>
+    <tr><td>Control calls shared connections with long-running rollout calls</td><td>Control calls use their own connection pool</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+A process-level test suite checkpoints real Gym servers mid-episode, kills them, restores, and checks the
+exact model calls that follow. It covers native and legacy episodes, stateful environments, token lineage,
+generation cuts, a second crash before a replacement starts, multi-worker policy servers, and a scale
+scenario with thousands of concurrent rollouts.
+</p>
+
+<h3 id="changes-removed">v1 mechanisms that v2 removes</h3>
+<div class="scroll">
+<table>
+  <thead><tr><th>v1 mechanism</th><th>Why v1 needed it</th><th>What replaces it in v2</th></tr></thead>
+  <tbody>
+    <tr><td>Receipt-bound completed-result acknowledgement</td><td>A finished result could be lost between Gym and the framework during a checkpoint</td><td>Nothing completes while Gym is prepared. Before its barrier, the framework waits for its outstanding <code>/run</code> replies whose episodes no participant exported. A lost reply is an ordinary failure, retried as the next attempt</td></tr>
+    <tr><td>Agent prepare polling and the model status long poll</td><td>Readiness was a client-side loop over per-kind calls</td><td>One prepare call per participant waits server-side until ready or the deadline, then returns its blockers</td></tr>
+    <tr><td>One-shot restored-parent relay headers</td><td>The first resumed call had to find its parent from the old attempt</td><td>The restored ledger belongs to the replacement attempt, so parent resolution is unchanged</td></tr>
+    <tr><td>Resources mutation locks, revisions, and request-ID receipts</td><td>An exported resources snapshot had to agree with the agent's boundary</td><td>The order guarantees it. A tool call runs between agent boundaries, so it blocks agent prepare, and resources prepare last</td></tr>
+    <tr><td>Controller-side boundary reconciliation (last model-call ID, resources revision)</td><td>Files written at different moments could describe different cuts</td><td>Participants are frozen in dependency order and commit re-checks readiness. Restore is scoped to the episodes the framework continues and is all or nothing</td></tr>
+    <tr><td>Capability discovery, instance roles, the plane header, spinup validation</td><td>The actor had to classify servers and pick participants</td><td><code>GET …/checkpoint/status</code>: a server without the routes is not a participant; a model joins only with an explicit policy opt-in</td></tr>
+    <tr><td>Worker-membership proofs and the response-egress fence for generation cuts</td><td>Cuts had to be aggregated across uvicorn workers</td><td>One process holds the undelivered responses and records its cuts. A failed cut regenerates the call</td></tr>
+    <tr><td>A <code>restore_failed_paused</code> phase</td><td>A failed restore had to stay observable and paused</td><td>Coordination retires the replacement attempts everywhere and resumes; those rollouts restart from input as later attempts</td></tr>
+    <tr><td>The actor's participant order tables</td><td>The framework sequenced the participants itself</td><td>Gym's checkpoint coordination owns prepare, commit, restore, resume, and retire</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="changes-kept">What stays the same</h3>
+<ul>
+  <li>Identity: <code>_ng_rollout_id</code> and <code>_ng_attempt_index</code>, and the capture key <code>r</code> or <code>r-aN</code>. A request from a replaced attempt gets 409 <code>stale_attempt</code>.</li>
+  <li>Every control call carries a checkpoint ID and an absolute deadline; repeating a completed call returns the recorded result; a stale checkpoint ID cannot reopen traffic.</li>
+  <li>Manifests are written last, and a committed participant directory never changes.</li>
+  <li>Restore installs attempt N's state as attempt N+1, in fresh processes, and stays closed until an explicit resume.</li>
+  <li>Durable token storage and global publication stay with the training framework. Gym stores token-free coordinates.</li>
+  <li>Failure handling is fail-closed.</li>
+</ul>
+
+<h3 id="changes-milestones">v1 milestones in v2</h3>
+<div class="scroll">
+<table>
+  <thead><tr><th>v1 milestone</th><th>Status in v2</th></tr></thead>
+  <tbody>
+    <tr><td>1. Preserve captured tokens for stateless rollouts</td><td>Implemented by the policy model participant. Servers still need to declare themselves stateless; so far only the example servers do (see the gaps below)</td></tr>
+    <tr><td>2. Resume an episode processor at a protocol boundary</td><td>Implemented on environment servers: boundaries after each step, wait or replay steps, and <code>single_agent_turn</code> stages. Legacy <code>/run</code> agents continue through the same step tracker</td></tr>
+    <tr><td>3. Resume a whitebox agent with stateful resources</td><td>Implemented for Simple Agent and exported-mode resources servers (the session-counter example). Other stateful environments need their own adapters</td></tr>
+    <tr><td>4. Resume an opaque blackbox runtime</td><td>Not started; unchanged from v1</td></tr>
+    <tr><td>Generation-safe cuts (#3218, #3227)</td><td>Gym side implemented, with the same wire models as the vLLM worker proposal. The worker-side staging helpers still need to land. Megatron inline prefixes (#3228) are not addressed</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="changes-limitations">v1's known limitations</h3>
+<div class="scroll">
+<table>
+  <thead><tr><th>v1 limitation</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>The stack puts protocol boundaries in agent servers and must be re-cut around the episode processor</td><td>Done: the environment server owns boundaries</td></tr>
+    <tr><td>Cleanup obligations are process-local</td><td>Boundaries record the open session handles, so a replacement attempt reuses or closes them</td></tr>
+    <tr><td>The framework actor must discover episode processors and agent sessions</td><td>Replaced by Gym's coordination, which discovers every participant</td></tr>
+    <tr><td>Tests simulate token staging; no real active-generation cut is exercised</td><td>A process-level suite covers crash and restore across real server processes with a fake worker, and a real-vLLM smoke test covers turn continuation. A real active-generation cut is still untested</td></tr>
+    <tr><td>Multi-worker admission is not wired into startup</td><td>Done for policy model servers. A worker that has not reported, or was lost during a checkpoint, blocks it; a worker that joins mid-checkpoint closes at once</td></tr>
+    <tr><td>Commit, restore, and resume do not bound every filesystem call</td><td>Participant file I/O runs off the event loop under the request deadline</td></tr>
+    <tr><td>The artifact format writes one file per rollout</td><td>One records file per participant</td></tr>
+    <tr><td>Opaque harnesses need a full runtime snapshot</td><td>Unchanged</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="changes-review">Review feedback on the v1 implementation</h3>
+<p>
+The 23 open review threads on #2939–#2946 fall into these groups:
+</p>
+<ul>
+  <li><b>Races between control operations</b> (resume during prepare, delayed messages, wakeups crossing checkpoints): one lock serializes every transition, prepare re-checks its checkpoint after waiting, and retired checkpoint IDs are fenced.</li>
+  <li><b>Parent and identity propagation</b> (agent middleware, the parent relay, headers versus URL prefixes): only the URL prefix remains, and the parent relay is gone.</li>
+  <li><b>Unfinished model calls saved too early</b>: undelivered calls and their ledger rows are always left out.</li>
+  <li><b>Restore with live state, and stale attempts</b>: every participant refuses restore with live state, and fencing is a per-rollout minimum attempt.</li>
+  <li><b>Restored state that no replacement has claimed yet, lost by a second checkpoint</b>: this concern still applied to v2 and is being fixed (gap 1 below).</li>
+  <li><b>Terminal sessions not reported to the checkpoint layer</b>: resources servers get explicit session-start and session-end hooks for protocols that create sessions outside <code>/seed_session</code>.</li>
+</ul>
+
+<h3 id="changes-downstream">Work built on v1</h3>
+<div class="scroll">
+<table>
+  <thead><tr><th>Work</th><th>In v2</th></tr></thead>
+  <tbody>
+    <tr><td>Gym #3349, turn-level recovery</td><td>Receipts, acknowledgements, parent relay, revisions, and archive formats are superseded. Its stateless and replay declarations for math, code, judge, and GenRM servers, and its re-checkpoint-before-restart test, carry forward</td></tr>
+    <tr><td>Gym #3412, prefix recovery</td><td>The widened cut contract carried over. Worker staging helpers and restarting constrained-decoding requests carry forward</td></tr>
+    <tr><td>Gym #3563, multi-worker policy server</td><td>Supported with the same shape (a main-process coordinator, a Unix socket, restored cuts with a single owner), without proof or evidence files: workers report in memory and the coordinator is the one controller</td></tr>
+    <tr><td>Gym #3755, scale optimizations</td><td>Acknowledgement batching is moot; concurrent commits and blocker caps are built in. A reserved connection pool for control traffic carries forward</td></tr>
+    <tr><td>Gym #3756, union of sharded cuts</td><td>Not needed while each episode stays on its shard: each shard commits and restores its own episodes</td></tr>
+    <tr><td>Gym #3548 and #3634, environment adapters</td><td>Port directly onto the new resources and agent hooks</td></tr>
+    <tr><td>NeMo RL #4264–#4266 and #4319–#4323</td><td>The framework calls Gym coordination instead of per-kind routes, drops acknowledgements and continuation joins, and adds the wait for outstanding <code>/run</code> replies. The cut wire models are unchanged; the enable flag and import path moved</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="changes-gaps">Open gaps</h3>
+<ol>
+  <li><s>Restored state that no replacement has claimed must survive a second checkpoint.</s> <i>Fixed: every participant exports it again, and a double-crash scenario covers it.</i></li>
+  <li><s>The worker-side staging helpers that generation cuts need are not in Gym.</s> <i>Ported, and the fake worker in the process-level suite now continues cuts through them.</i></li>
+  <li>Most resources servers have not declared a checkpoint mode, so they are restart-only. <i>The five most used training verifiers (code generation, competitive coding, LLM-judge equivalence, math with judge, and GenRM comparison) now declare themselves stateless with replayable verification; others follow as they are audited.</i></li>
+  <li><s>A replay-mode seed or verification that reaches a closed resources server fails instead of continuing.</s> <i>Fixed: replay-safe requests are admitted while closed and are not part of that checkpoint.</i></li>
+  <li>Control traffic shares a connection pool with long-running <code>/run</code> calls.</li>
+  <li><s>Environment servers and restart-only agents do not refuse more than one worker.</s> <i>Fixed.</i></li>
+  <li>Constrained-decoding requests should restart instead of continuing a cut prefix.</li>
+  <li>The framework needs a public list of the token-store keys a checkpoint retains.</li>
+  <li><s>Multi-worker policy servers.</s> <i>Supported.</i> Sharded policy servers across Gym deployments, Megatron inline prefixes, and opaque runtimes remain future work.</li>
+</ol>
+
+</main>
+
+<script>
+(() => {
+  // ---------- theme ----------
+  const toggle = document.getElementById("theme-toggle");
+  const label = () => { toggle.textContent = document.documentElement.dataset.theme === "light" ? "Dark theme" : "Light theme"; };
+  label();
+  toggle.addEventListener("click", () => {
+    const light = document.documentElement.dataset.theme !== "light";
+    if (light) document.documentElement.dataset.theme = "light"; else delete document.documentElement.dataset.theme;
+    try { localStorage.setItem("engineering-notes-theme", light ? "light" : "dark"); } catch {}
+    label();
+  });
+
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs = {}, text) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+
+  // ---------- components ----------
+  const COMPONENTS = {
+    RL: { name: "Training framework", sub: "controller + Gym actor", group: "rl",
+      owns: "When to checkpoint, the token store (TransferQueue), replay and dataloader state, global publication, and every rollout's fate: continue, restart from input, or drop.",
+      stores: "Its own checkpoint, plus the published marker that names every Gym manifest and the token-store snapshot they reference.",
+      never: "Sequence Gym participants or read any environment's or agent's private state." },
+    ORC: { name: "Gym checkpoint coordination", sub: "prepare · commit · restore · resume", group: "gym",
+      owns: "The order in which Gym participants are prepared, committed, restored, and resumed, the model commit scope, fanning out retires, and all-or-nothing restore. The training framework calls it.",
+      stores: "Nothing. It is a set of stateless functions over the participants' control routes.",
+      never: "Decide a rollout's fate or touch the token store." },
+    ENV: { name: "Environment server", sub: "episode protocol", group: "gym",
+      owns: "One episode's protocol: seed resources, seed agent, invoke the agent, close, verify, clean up. It records a boundary after every completed step and decides, per step, whether a checkpoint waits for an in-flight step or replays it later.",
+      stores: "For each episode: its latest boundary (the next step and the results that step needs), the open resources and agent session IDs and cookies it would reuse, and the cleanup it still owes.",
+      never: "The agent's turn loop or environment state. Verification may run inside the environment server or in a resources server. Legacy relays are transparent and store nothing." },
+    AGT: { name: "Agent server", sub: "sessions · turn loop", group: "gym",
+      owns: "Its sessions and the turn loop inside one activation. It records a boundary before each model call and after each tool round, and parks there when a checkpoint asks.",
+      stores: "Per session: the agent's own session data and the latest boundary. For a legacy /run, the episode is keyed by its logical rollout.",
+      never: "Where the episode is in its protocol (native path) or environment state." },
+    POL: { name: "Policy model server", sub: "admission · token-free ledger", group: "gym",
+      owns: "Admission of policy generations, holding responses the agent has not received, the token-free capture ledger, and asking workers to cut in-flight generations. With several uvicorn workers it is still one participant: a coordinator in the main process owns the controller, fences, restored cuts, and ledger export, and each worker runs the admission gate for its own calls and forwards control calls to the coordinator.",
+      stores: "Ledger rows of each continued episode up to the cut, and the generation cut of an undelivered call.",
+      never: "Token arrays. Judge and simulator model servers do not participate and keep serving." },
+    WRK: { name: "Inference worker", sub: "vLLM worker", group: "rl",
+      owns: "Decoding, and staging each call's exact token delta in the token store before acknowledging it. On a cut, it stages the prefix generated so far.",
+      stores: "Everything it stages lives in the token store, which the training framework checkpoints.",
+      never: "Lineage decisions: it follows the admission the model server attaches." },
+    TQ: { name: "Token store", sub: "TransferQueue", group: "rl",
+      owns: "Token IDs, logprobs, and masks for every staged call and cut prefix.",
+      stores: "Snapshotted by the training framework at its own barrier, after Gym commits.",
+      never: "Decide which rows are live: Gym's restored ledger names the rows a continuation uses; others are orphaned and masked." },
+    RES: { name: "Resources server", sub: "tools · environment state", group: "gym",
+      owns: "Environment state per session, keyed by the session cookie. It declares a checkpoint mode (stateless, exported, or restart-only) and whether its verification may be replayed.",
+      stores: "Exported mode: typed state per live session. Stateless: nothing. Restart-only: nothing, and a live session blocks prepare until retired.",
+      never: "Where the agent or episode is. Accepted tool calls finish before its state is exported." },
+  };
+  const LANES = ["RL", "ORC", "ENV", "AGT", "POL", "WRK", "TQ", "RES"];
+
+  const componentDetail = document.getElementById("component-detail");
+  const drawComponentMap = (selected) => {
+    const svg = document.getElementById("component-map");
+    [...svg.querySelectorAll("g, text, line, path, rect, defs")].forEach((node) => node.remove());
+    const defs = el("defs");
+    const marker = el("marker", { id: "cm-arrow", viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+    marker.appendChild(el("path", { d: "M0,0 L10,5 L0,10 z", class: "edge-arrow" }));
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+    const pos = {
+      RL: [20, 50, 190, 64], ORC: [250, 50, 250, 64], WRK: [540, 50, 150, 64], TQ: [750, 50, 170, 64],
+      ENV: [20, 210, 205, 64], AGT: [252, 210, 205, 64], POL: [484, 210, 205, 64], RES: [716, 210, 205, 64],
+    };
+    const edges = [
+      ["M210,82 L246,82", "calls", 228, 74],
+      ["M375,114 L122,206", "", 0, 0], ["M375,114 L354,206", "", 0, 0], ["M375,114 L586,206", "", 0, 0], ["M375,114 L818,206", "", 0, 0],
+      ["M620,210 L620,118", "generate · cut", 630, 196],
+      ["M690,82 L746,82", "stage", 718, 104],
+      ["M115,50 L115,22 L835,22 L835,46", "snapshot + publish (training framework)", 300, 16],
+    ];
+    for (const [d, text, lx, ly] of edges) {
+      svg.appendChild(el("path", { d, class: "edge", "marker-end": "url(#cm-arrow)" }));
+      if (text) svg.appendChild(el("text", { x: lx, y: ly, "font-size": "13", class: "dimtext", "text-anchor": lx < 300 || text === "stage" ? "middle" : "start" }, text));
+    }
+    for (const [key, [x, y, w, h]] of Object.entries(pos)) {
+      const comp = COMPONENTS[key];
+      const g = el("g", { class: "clickable", tabindex: "0", role: "button", "aria-label": `${comp.name}: show details` });
+      g.appendChild(el("rect", { x, y, width: w, height: h, rx: "8", class: `box ${comp.group}${key === selected ? " selected" : ""}` }));
+      g.appendChild(el("text", { x: x + 12, y: y + 27, "font-size": "15", "font-weight": "700", "text-decoration": "underline" }, comp.name));
+      g.appendChild(el("text", { x: x + 12, y: y + 49, "font-size": "13", class: "dimtext" }, comp.sub));
+      const pick = () => { drawComponentMap(key); showComponent(key); };
+      g.addEventListener("click", pick);
+      g.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(); } });
+      svg.appendChild(g);
+    }
+    const legend = el("g");
+    legend.appendChild(el("rect", { x: "20", y: "305", width: "24", height: "16", rx: "3", class: "box gym" }));
+    legend.appendChild(el("text", { x: "52", y: "318", "font-size": "13" }, "Gym (solid border)"));
+    legend.appendChild(el("rect", { x: "240", y: "305", width: "24", height: "16", rx: "3", class: "box rl" }));
+    legend.appendChild(el("text", { x: "272", y: "318", "font-size": "13" }, "Training framework side (dashed border)"));
+    legend.appendChild(el("text", { x: "20", y: "350", "font-size": "13", class: "dimtext" }, "Arrows show who calls whom for checkpoint control. Episode traffic (environment → agent → model, tools)"));
+    legend.appendChild(el("text", { x: "20", y: "370", "font-size": "13", class: "dimtext" }, "is shown step by step in section 2."));
+    svg.appendChild(legend);
+  };
+  const showComponent = (key) => {
+    const comp = COMPONENTS[key];
+    componentDetail.innerHTML = `<h3>${comp.name}</h3>
+      <p><b>Owns.</b> ${comp.owns}</p><p><b>Checkpoints.</b> ${comp.stores}</p><p><b>Never.</b> ${comp.never}</p>`;
+  };
+  drawComponentMap("ENV");
+  showComponent("ENV");
+
+  // ---------- state machines ----------
+  const MACHINES = {
+    phase: {
+      title: "Participant control phase",
+      text: "Every participant (environment, agent, policy model, resources) runs this machine. Transitions are serialized by one lock; prepare waits for readiness outside the lock so retire and resume can interrupt it. A prepare that misses its deadline stays closed and reports blockers; a prepare that raises reopens admission. Resume is also the abort path, and it retires the checkpoint ID so a stale controller cannot reopen anything. If the controller stops renewing its lease, the participant resumes on its own.",
+      nodes: { idle: [20, 150], preparing: [250, 70], prepared: [490, 70], committed: [770, 70], restored: [390, 235] },
+      edges: [
+        ["idle", "preparing", "prepare"], ["preparing", "prepared", "ready"], ["prepared", "committed", "commit"],
+        ["preparing", "preparing", "deadline: blockers"], ["committed", "idle", "resume"], ["prepared", "idle", "resume · abort", "below"],
+        ["idle", "restored", "restore (fresh)"], ["restored", "idle", "resume"],
+      ],
+      bad: ["preparing->preparing"],
+    },
+    session: {
+      title: "Agent session",
+      text: "One agent session (or one legacy /run episode). An activation records a boundary before each model call and after each tool round. When a checkpoint asks it to park, it stops at the next boundary. A session whose model call is in flight is also at a boundary, because the policy model holds that response until resume.",
+      nodes: { idle: [20, 150], running: [260, 150], park_requested: [510, 50], at_boundary: [780, 150], retired: [260, 255] },
+      edges: [
+        ["idle", "running", "activation"], ["running", "park_requested", "prepare"], ["park_requested", "at_boundary", "next boundary"],
+        ["running", "at_boundary", "awaiting held call"], ["at_boundary", "running", "resume"], ["running", "idle", "done"],
+        ["running", "retired", "retire"],
+      ],
+      bad: ["running->retired"],
+    },
+    call: {
+      title: "Policy call",
+      text: "One generation request at the policy model server. It is refused while admission is closed. An admitted call that has not started responding when a checkpoint closes admission becomes undelivered: its response is held, its ledger row is left out of the cut, and with generation cuts its prefix is staged. A response that already started streaming must finish before prepare is ready.",
+      nodes: { admitted: [20, 150], generating: [270, 150], held: [510, 50], cut: [780, 50], delivered: [780, 245], refused: [270, 255] },
+      edges: [
+        ["admitted", "generating", "dispatch"], ["generating", "held", "checkpoint closes"], ["held", "cut", "stage prefix"],
+        ["held", "delivered", "resume"], ["cut", "delivered", "resume"], ["generating", "delivered", "no checkpoint"], ["admitted", "refused", "closed: 409"],
+      ],
+      bad: ["admitted->refused"],
+    },
+    episode: {
+      title: "Environment episode",
+      text: "One episode at the environment server. After each completed step it is at a boundary, which is always checkpointable. A step in flight is either waited on (the checkpoint waits, then the episode parks at the boundary after it, with the result recorded) or replayable (the episode counts as parked at the boundary before it, and the step's result is held until resume). During the agent activation, the agent's own boundaries cover the episode. A restored record resumes at its boundary.",
+      nodes: { boundary: [370, 140], wait_step: [40, 40], replay_step: [40, 245], agent_activation: [700, 40], done: [700, 245], restored: [370, 245] },
+      edges: [
+        ["boundary", "wait_step", "start (wait)"], ["wait_step", "boundary", "done: record result"],
+        ["boundary", "replay_step", "start (replay)"], ["replay_step", "boundary", "done: hold if closed"],
+        ["boundary", "agent_activation", "invoke agent"], ["agent_activation", "boundary", "agent returns"],
+        ["boundary", "done", "return result"], ["restored", "boundary", "restore"],
+      ],
+      bad: [],
+    },
+    resources: {
+      title: "Resources session",
+      text: "A resources session starts when /seed_session succeeds (Gymnasium: /reset) and ends at /close_session, /verify, or a terminal step. The server's checkpoint mode decides what a live session means for a checkpoint.",
+      nodes: { unbound: [20, 130], live: [300, 130], ended: [650, 130], fenced: [300, 245] },
+      edges: [["unbound", "live", "seed"], ["live", "ended", "close · verify · end"], ["live", "fenced", "retire"]],
+      bad: ["live->fenced"],
+    },
+  };
+
+  let currentMachine = "phase";
+  let machineHighlight = {};
+  const smTabs = document.getElementById("sm-tabs");
+  for (const [key, machine] of Object.entries(MACHINES)) {
+    const button = document.createElement("button");
+    button.type = "button"; button.textContent = machine.title; button.dataset.key = key; button.setAttribute("role", "tab");
+    button.addEventListener("click", () => { currentMachine = key; drawMachine(); });
+    smTabs.appendChild(button);
+  }
+  const drawMachine = () => {
+    const machine = MACHINES[currentMachine];
+    [...smTabs.children].forEach((b) => { b.classList.toggle("current", b.dataset.key === currentMachine); b.setAttribute("aria-selected", b.dataset.key === currentMachine); });
+    const svg = document.getElementById("state-machine");
+    svg.setAttribute("viewBox", "0 0 940 325");
+    [...svg.querySelectorAll("g, text, path, rect, defs")].forEach((node) => node.remove());
+    const defs = el("defs");
+    for (const bad of [false, true]) {
+      const marker = el("marker", { id: `sm-arrow${bad ? "-bad" : ""}`, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+      marker.appendChild(el("path", { d: "M0,0 L10,5 L0,10 z", class: `edge-arrow${bad ? " bad" : ""}` }));
+      defs.appendChild(marker);
+    }
+    svg.appendChild(defs);
+    const W = 130, H = 44;
+    for (const [from, to, text, side] of machine.edges) {
+      const bad = machine.bad.includes(`${from}->${to}`);
+      const [fx, fy] = machine.nodes[from]; const [tx, ty] = machine.nodes[to];
+      let d; let lx; let ly;
+      if (from === to) {
+        d = `M${fx + 40},${fy} C${fx + 40},${fy - 45} ${fx + 110},${fy - 45} ${fx + 110},${fy}`;
+        lx = fx + 20; ly = fy - 42;
+      } else {
+        const reverse = machine.edges.some(([a, b]) => a === to && b === from);
+        const x1 = fx + W / 2, y1 = fy + H / 2, x2 = tx + W / 2, y2 = ty + H / 2;
+        const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy);
+        const ux = dx / len, uy = dy / len;
+        const clip = (cx, cy, sx) => {
+          const tX = Math.abs(W / 2 / (ux || 1e-9)), tY = Math.abs(H / 2 / (uy || 1e-9));
+          const t = Math.min(tX, tY);
+          return [cx + sx * ux * t, cy + sx * uy * t];
+        };
+        const [sx, sy] = clip(x1, y1, 1); const [ex, ey] = clip(x2, y2, -1);
+        const off = reverse ? 10 : 0;
+        const ox = -uy * off, oy = ux * off;
+        d = `M${sx + ox},${sy + oy} L${ex + ox},${ey + oy}`;
+        // Centre the label on the edge, pushed off it along the edge's upward normal.
+        let nx = -uy, ny = ux;
+        if (ny > 0 || (ny === 0 && nx > 0)) { nx = -nx; ny = -ny; }
+        if (reverse && (ox * nx + oy * ny) < 0) { nx = -nx; ny = -ny; }
+        if (side === "below") { nx = -nx; ny = -ny; }
+        lx = (sx + ex) / 2 + ox + nx * 12; ly = (sy + ey) / 2 + oy + ny * 12 + 4;
+      }
+      svg.appendChild(el("path", { d, class: `edge${bad ? " bad" : ""}`, "marker-end": `url(#sm-arrow${bad ? "-bad" : ""})` }));
+      svg.appendChild(el("text", { x: lx, y: ly, "font-size": "12.5", class: "dimtext", "text-anchor": from === to ? "start" : "middle" }, (bad ? "⚠ " : "") + text));
+    }
+    const active = machineHighlight[currentMachine];
+    for (const [name, [x, y]] of Object.entries(machine.nodes)) {
+      const isActive = active === name;
+      const isBad = ["retired", "refused", "fenced"].includes(name);
+      svg.appendChild(el("rect", { x, y, width: W, height: H, rx: "22", class: `node${isActive ? " active" : ""}${isBad && !isActive ? " bad" : ""}` }));
+      svg.appendChild(el("text", { x: x + W / 2, y: y + 28, "font-size": "15", "text-anchor": "middle", "font-weight": isActive ? "700" : "400" }, (isActive ? "● " : "") + name.replaceAll("_", " ")));
+    }
+    svg.appendChild(el("text", { x: "10", y: "318", "font-size": "12.5", class: "dimtext" }, "● thick solid border: current state in the scenario · dashed border and ⚠: failure or discard path · dotted border: other states"));
+    document.getElementById("sm-text").innerHTML = `<p>${machine.text}</p>`;
+  };
+
+  // ---------- scenarios ----------
+  // kind: data (solid), control (dashed), reply (dotted), problem (dash-dot), local (self note)
+  const S = (title, text, msgs, states = {}, machines = {}) => ({ title, text, msgs, states, machines });
+  const m = (from, to, label, kind = "data") => ({ from, to, label, kind });
+
+  const INITIAL_STATES = {
+    RL: "dispatching rollouts", ORC: "—", ENV: "idle", AGT: "idle", POL: "accepting", WRK: "serving", TQ: "—", RES: "accepting",
+  };
+
+  const SCENARIOS = {
+    native: {
+      name: "Native episode through an environment server",
+      steps: [
+        S("The training framework dispatches an episode",
+          "The framework assigns the logical rollout ID and attempt number before dispatch. Every downstream call carries the attempt-qualified capture key (<code>r</code> for attempt 0, <code>r-a1</code> for attempt 1) as a rollout path prefix.",
+          [m("RL", "ENV", "POST /run {episode_id: r·a0, task}")],
+          { RL: "episode r·a0 in flight", ENV: "episode r·a0: seeding (replayable)" }, { episode: "replay_step" }),
+        S("Seed the resources session",
+          "The environment server chooses the resources session ID and registers its cleanup before seeding, so a lost reply cannot hide the session. The resources server binds the session to the episode.",
+          [m("ENV", "RES", "POST /seed_session {resources_session_id, episode_id}"), m("RES", "ENV", "200 + session cookie", "reply")],
+          { RES: "session live (bound to r·a0)" }, { resources: "live" }),
+        S("Seed the agent session",
+          "The agent receives tool access (the resources URL and cookie) and records a session. The agent owns only what the environment server cannot reconstruct.",
+          [m("ENV", "AGT", "POST /v1/agent_sessions {agent_session_id, tool_access}"), m("AGT", "ENV", "200 + agent cookie", "reply")],
+          { AGT: "session idle" }, { session: "idle" }),
+        S("Invoke one activation",
+          "The environment server records a boundary before invoking the agent, naming the session handles it would reuse. While the activation runs, the agent parks at its own boundaries, so the episode needs nothing more. The agent records boundary B0 before its first model call.",
+          [m("ENV", "AGT", "POST /ng-rollout/r/v1/responses"), m("AGT", "AGT", "boundary B0 (before first call)", "local")],
+          { ENV: "episode r·a0: in agent activation", AGT: "session running · B0" }, { episode: "agent_activation", session: "running" }),
+        S("Policy call with token capture",
+          "The policy model server admits the call, resolves its lineage parent (none: this is a root), and attaches a capture admission. The worker generates and stages the exact token delta in the token store before replying.",
+          [m("AGT", "POL", "POST /ng-rollout/r/…/chat/completions"), m("POL", "WRK", "generate + capture admission (root)"), m("WRK", "TQ", "stage token delta r/c1")],
+          { POL: "call c1 generating", WRK: "decoding c1", TQ: "row r/c1" }, { call: "generating" }),
+        S("The response reaches the agent; the ledger records c1",
+          "The worker acknowledges with staging coordinates. The model server writes a token-free ledger row for c1 and delivers the response. The agent records boundary B1: a model response whose tool calls are pending.",
+          [m("WRK", "POL", "response + commit coordinates", "reply"), m("POL", "POL", "ledger row c1 (token-free)", "local"), m("POL", "AGT", "response", "reply"), m("AGT", "AGT", "boundary B1 (tools pending)", "local")],
+          { POL: "ledger: c1", AGT: "session running · B1" }, { call: "delivered" }),
+        S("Tool call against the resources server",
+          "Tool calls go straight to the resources server with the session cookie. The resources server counts in-flight requests so a checkpoint can wait for them.",
+          [m("AGT", "RES", "POST /get_weather (session cookie)"), m("RES", "AGT", "tool output", "reply"), m("AGT", "AGT", "boundary B2 (turn complete)", "local")],
+          { RES: "state updated", AGT: "session running · B2" }),
+        S("Next turn continues the lineage",
+          "The next call's request ends with the previous response and tool output, so the ledger resolves c1 as its parent. The worker receives the parent's staging chain as a token-in prefix and stages only the new delta.",
+          [m("AGT", "POL", "POST …/chat/completions"), m("POL", "WRK", "generate + admission (token_in, parent c1)"), m("WRK", "TQ", "stage delta r/c2"), m("WRK", "POL", "response + coordinates", "reply"), m("POL", "AGT", "final answer", "reply")],
+          { POL: "ledger: c1 → c2", TQ: "rows r/c1, r/c2" }),
+        S("Close, verify, clean up, return",
+          "The activation returns. The environment server closes the agent session (collecting its observations) and records a boundary whose next step is verification, carrying the final response and observations. It verifies (here with the resources server; some environment servers verify in process), closes the resources session, and returns the result.",
+          [m("AGT", "ENV", "response", "reply"), m("ENV", "AGT", "POST /v1/agent_sessions/close"), m("ENV", "RES", "POST /verify"), m("ENV", "RES", "POST /close_session"), m("ENV", "RL", "episode result", "reply")],
+          { ENV: "episode r·a0: done", AGT: "session closed", RES: "session ended", RL: "result received" }, { episode: "done", resources: "ended", session: "idle" }),
+      ],
+    },
+    legacy: {
+      name: "Legacy /run agent",
+      steps: [
+        S("The framework dispatches a legacy row",
+          "Most existing benchmarks still run through a legacy relay: an environment server that forwards <code>/run</code> to the agent unchanged. The relay stores nothing.",
+          [m("RL", "ENV", "POST /run {row, _ng_rollout_id: r}"), m("ENV", "AGT", "relay POST /run")],
+          { ENV: "relay (stateless)", AGT: "legacy episode run:r" }, { session: "idle" }),
+        S("The agent owns the whole episode",
+          "A legacy <code>/run</code> seeds the resources session itself and records boundaries around seeding and verification, just like an environment server. Whether a checkpoint waits for an in-flight seed or verification follows the same wait-or-replay declaration (section 3).",
+          [m("AGT", "RES", "POST /ng-rollout/r/seed_session"), m("RES", "AGT", "cookie", "reply")],
+          { RES: "session live" }, { resources: "live" }),
+        S("The turn loop runs as an activation of run:r",
+          "The agent calls its own <code>/v1/responses</code>. The activation is keyed by the logical rollout (<code>run:r</code>), so a replacement attempt finds the restored boundary.",
+          [m("AGT", "AGT", "self-dispatch /ng-rollout/r/v1/responses", "local"), m("AGT", "POL", "policy calls, tools, boundaries…")],
+          { AGT: "run:r running · boundaries" }, { session: "running" }),
+        S("Verify and return",
+          "After the loop, the agent records a boundary with its final response, verifies, and returns the row. After a restore, the replacement attempt skips every step its boundary says is done: seeding, the turn loop, or verification.",
+          [m("AGT", "RES", "POST /verify"), m("AGT", "ENV", "result row", "reply"), m("ENV", "RL", "result row", "reply")],
+          { AGT: "done", RES: "session ended", RL: "result received" }, { session: "idle", resources: "ended" }),
+      ],
+    },
+    checkpoint: {
+      name: "Checkpoint in place (no crash)",
+      steps: [
+        S("Mid-episode: the agent is waiting on policy call c2",
+          "Episode r is inside its agent activation. The agent recorded boundary B2 and issued c2, which is still decoding.",
+          [m("AGT", "POL", "c2 in flight")],
+          { ENV: "episode r: in agent activation", AGT: "session awaiting c2 · B2", POL: "c2 generating", WRK: "decoding c2" }, { episode: "agent_activation", session: "running", call: "generating", phase: "idle" }),
+        S("The framework stops dispatch and asks Gym to prepare",
+          "The training framework closes its own dispatch and calls Gym's checkpoint coordination with a checkpoint ID and an absolute deadline.",
+          [m("RL", "ORC", "prepare(ckpt k, deadline)", "control")],
+          { RL: "dispatch closed", ORC: "preparing k" }, { phase: "idle" }),
+        S("1. Environment servers close episode admission",
+          "No new episode starts. Episode r is inside its agent activation, which the agent's boundaries cover. An episode in a replayable step counts as parked at the boundary before it; an episode in a wait step blocks prepare until the step finishes and its result is recorded (section 3). Parked episodes' deadlines stop counting while admission is closed.",
+          [m("ORC", "ENV", "POST …/checkpoint/prepare", "control"), m("ENV", "ORC", "ready", "reply")],
+          { ENV: "prepared · r in agent activation" }, { phase: "prepared", episode: "agent_activation" }),
+        S("2. The policy model closes admission and holds c2",
+          "New policy calls are refused with 409 <code>checkpoint_parked</code>. Call c2 has not started responding, so it is undelivered: it keeps decoding, but its response will be held until resume and its ledger row will be left out of the cut. Prepare does not wait for it to finish.",
+          [m("ORC", "POL", "POST …/checkpoint/prepare", "control"), m("POL", "POL", "c2 undelivered → held", "local")],
+          { POL: "closed · c2 held" }, { phase: "preparing", call: "held" }),
+        S("2b. Generation cut: stage c2's prefix",
+          "With generation cuts on, the model server asks the worker to stage what c2 has generated so far. The worker writes the prefix to the token store and returns a receipt. If the worker cannot cut, c2 is simply regenerated after a restore.",
+          [m("POL", "WRK", "POST /ng-control/v1/generation-cut {inventory}", "control"), m("WRK", "TQ", "stage prefix of c2"), m("WRK", "POL", "receipt: durable_prefix", "reply"), m("POL", "ORC", "ready (held 1, cut 1)", "reply")],
+          { POL: "prepared · c2 cut", TQ: "rows + c2 prefix" }, { phase: "prepared", call: "cut" }),
+        S("3. Agents park at their boundaries",
+          "Running activations park at their next boundary. The session waiting on c2 is already at boundary B2, because the model holds its response. An agent whose next call is refused parks at the boundary it just recorded and retries after resume.",
+          [m("ORC", "AGT", "POST …/checkpoint/prepare", "control"), m("AGT", "ORC", "ready (1 at boundary)", "reply")],
+          { AGT: "prepared · session at B2" }, { phase: "prepared", session: "at_boundary" }),
+        S("4. Resources servers quiesce",
+          "No agent is between boundaries, so no new tool call arrives. The resources server closes data routes and waits until nothing is in flight. A restart-only server with a live session would report a blocker here.",
+          [m("ORC", "RES", "POST …/checkpoint/prepare", "control"), m("RES", "ORC", "ready (0 in flight)", "reply")],
+          { RES: "prepared" }, { phase: "prepared" }),
+        S("Commit: every participant writes its records",
+          "Each participant re-checks readiness, writes one records file, then its manifest. The model commit is scoped to the episodes the others exported, and it excludes undelivered c2 but keeps its cut.",
+          [m("ORC", "ENV", "commit", "control"), m("ORC", "AGT", "commit", "control"), m("ORC", "RES", "commit", "control"), m("ORC", "POL", "commit {episode_ids: [r]}", "control"), m("ORC", "RL", "manifests", "reply")],
+          { ENV: "committed", AGT: "committed", RES: "committed", POL: "committed · rows c1 + cut of c2" }, { phase: "committed" }),
+        S("The framework saves tokens and publishes",
+          "The framework snapshots the token store, validates that every Gym manifest refers to rows the snapshot contains, and publishes the checkpoint atomically. Gym is not involved.",
+          [m("RL", "TQ", "snapshot"), m("RL", "RL", "validate + publish", "local")],
+          { RL: "checkpoint k published", TQ: "snapshot k" }),
+        S("Resume in reverse dependency order",
+          "Resources reopen, then the policy model (c2's held response is delivered), then agents, then environment servers. The episode continues exactly as if nothing happened. The framework reopens dispatch.",
+          [m("RL", "ORC", "resume(k)", "control"), m("ORC", "RES", "resume", "control"), m("ORC", "POL", "resume", "control"), m("POL", "AGT", "c2 response released", "reply"), m("ORC", "AGT", "resume", "control"), m("ORC", "ENV", "resume", "control")],
+          { RL: "dispatching", POL: "accepting", AGT: "session running", ENV: "episode r: in agent activation", RES: "accepting" }, { phase: "idle", call: "delivered", session: "running" }),
+      ],
+    },
+    restore: {
+      name: "Crash and restore",
+      steps: [
+        S("Every Gym process dies after checkpoint k was published",
+          "Any work after checkpoint k is lost. The training framework restores its own state and the token store from checkpoint k.",
+          [m("RL", "RL", "restore own state + token store", "local")],
+          { ORC: "—", ENV: "gone", AGT: "gone", POL: "gone", RES: "gone", RL: "restoring k" }, { phase: "idle" }),
+        S("Fresh Gym processes are restored, all paused",
+          "The framework starts fresh Gym servers and calls restore with the episodes it will continue. Each participant validates every file and digest before installing anything, installs state under the next attempt (r·a1), and fences attempt 0. All stay closed.",
+          [m("RL", "ORC", "restore(k, episode_ids: [r])", "control"), m("ORC", "POL", "restore", "control"), m("ORC", "RES", "restore", "control"), m("ORC", "AGT", "restore", "control"), m("ORC", "ENV", "restore", "control")],
+          { POL: "restored · ledger r-a1 = c1 · cut of c2", RES: "restored · session state", AGT: "restored · session at B2 (r·a1)", ENV: "restored · record for r·a1" }, { phase: "restored" }),
+        S("If any restore fails, nothing continues",
+          "Restore is all or nothing. If one participant rejects its files, coordination retires the replacement attempts everywhere, which drops any state already restored, then resumes every participant and reports the failure. The framework restarts those rollouts from input as later attempts instead of continuing a partial combination.",
+          [m("ORC", "RL", "restored (or: failed → retire replacements, resume all)", "reply")],
+          {}, {}),
+        S("Resume, then re-dispatch attempt 1",
+          "After resume, the framework re-dispatches episode r as attempt 1. The environment server finds the restored record, skips seeding, and reuses the recorded sessions. A delayed request from attempt 0 would get 409 <code>stale_attempt</code>.",
+          [m("RL", "ORC", "resume(k)", "control"), m("RL", "ENV", "POST /run {episode_id: r·a1}"), m("ENV", "ENV", "restored record: reuse sessions", "local")],
+          { ENV: "episode r·a1: continuing from its boundary", RL: "episode r·a1 in flight" }, { phase: "idle", episode: "restored" }),
+        S("The agent resumes at boundary B2 and re-issues c2",
+          "The activation starts from the restored boundary: the same conversation it had before calling c2. It re-issues that call.",
+          [m("ENV", "AGT", "POST /ng-rollout/r-a1/v1/responses"), m("AGT", "POL", "re-issue call (same conversation)")],
+          { AGT: "session r·a1 running from B2" }, { session: "running", episode: "agent_activation" }),
+        S("Lineage continues and the cut prefix is reused",
+          "The restored ledger rows are attempt 1's ledger, so the call resolves c1 as its parent like any later turn. Because the request matches the cut call's request, the admission carries c2's cut: the worker reads the staged prefix and generates only the rest. The new ledger row c3 is a child of c1; c2 appears nowhere in the lineage.",
+          [m("POL", "WRK", "admission: parent c1 + generation_cut(c2)"), m("TQ", "WRK", "cut prefix", "reply"), m("WRK", "TQ", "stage delta r-a1/c3"), m("WRK", "POL", "response", "reply"), m("POL", "AGT", "response", "reply")],
+          { POL: "ledger r-a1: c1 → c3", TQ: "rows c1, c3 (+ orphaned c2)" }, { call: "delivered" }),
+        S("The episode finishes normally",
+          "Tools, verification, and cleanup proceed as usual. The environment server's cleanup closes the restored sessions, because their handles came from the record.",
+          [m("AGT", "ENV", "response", "reply"), m("ENV", "RES", "verify + close"), m("ENV", "RL", "result for r·a1", "reply")],
+          { ENV: "episode r·a1: done", RL: "result received" }, { episode: "done", resources: "ended" }),
+      ],
+    },
+    verify_replay: {
+      name: "Checkpoint during verification (replay)",
+      steps: [
+        S("Verification is running; the verifier declared it replayable",
+          "The agent finished. The environment server closed the agent session and recorded boundary V: next step is verification, carrying the final response and observations. It called <code>/verify</code> on a judge-based resources server that declared its verification replay-safe, because it does not change session state. Judging is slow.",
+          [m("ENV", "AGT", "POST /v1/agent_sessions/close"), m("ENV", "ENV", "boundary V: verify next (response, observations)", "local"), m("ENV", "RES", "POST /verify (slow judge)")],
+          { ENV: "episode r: verifying (replay)", AGT: "session closed", RES: "verify in flight" }, { episode: "replay_step", phase: "idle" }),
+        S("The environment server is ready at once",
+          "Prepare closes episode admission. Episode r counts as parked at boundary V, before the verification step, so prepare does not wait for the judge.",
+          [m("RL", "ORC", "prepare(ckpt k)", "control"), m("ORC", "ENV", "prepare", "control"), m("ENV", "ORC", "ready (r at boundary V)", "reply")],
+          { RL: "dispatch closed", ENV: "prepared · r at V (verify replayable)" }, { phase: "prepared", episode: "replay_step" }),
+        S("Resources prepare does not wait for the replayable verify",
+          "The model and agents have nothing of episode r left. The resources server closes data routes; the in-flight verification was declared replayable, so it does not count as a blocker. The session state is exported as is: verification does not change it.",
+          [m("ORC", "POL", "prepare", "control"), m("ORC", "AGT", "prepare", "control"), m("ORC", "RES", "prepare", "control"), m("RES", "ORC", "ready (verify replayable)", "reply")],
+          { POL: "prepared", AGT: "prepared", RES: "prepared · verify still running" }, { phase: "prepared" }),
+        S("Commit records boundary V",
+          "The environment server's record for r says: next step is verification, with this final response and these observations. The resources server exports r's session state.",
+          [m("ORC", "ENV", "commit", "control"), m("ORC", "RES", "commit", "control"), m("ORC", "AGT", "commit", "control"), m("ORC", "POL", "commit", "control")],
+          { ENV: "committed · r at V", RES: "committed" }, { phase: "committed" }),
+        S("The judge answers during the checkpoint; the result is held",
+          "The verification result reaches the environment server while the checkpoint is still open. It holds the result and does not call <code>/close_session</code>, because the resources server is closed.",
+          [m("RES", "ENV", "verify result", "reply"), m("ENV", "ENV", "hold result until resume", "local")],
+          { ENV: "committed · r result held", RES: "committed · verify finished" }, { episode: "boundary" }),
+        S("Resume: nothing is re-run",
+          "After the framework publishes and Gym resumes, the environment server acts on the held result: it closes the resources session and returns. Without a crash, the replay mode cost nothing.",
+          [m("RL", "ORC", "resume(k)", "control"), m("ENV", "RES", "POST /close_session"), m("ENV", "RL", "result for r", "reply")],
+          { RL: "result received", ENV: "episode r: done", RES: "session ended" }, { phase: "idle", episode: "done", resources: "ended" }),
+        S("If Gym had crashed instead: verification runs again",
+          "After a restore, attempt r·a1 resumes at boundary V and runs verification again with the recorded response. The first result was never delivered, so re-judging is as safe as regenerating an undelivered policy call.",
+          [m("RL", "ENV", "POST /run {episode_id: r·a1}"), m("ENV", "RES", "POST /verify (re-run from boundary V)"), m("RES", "ENV", "verify result", "reply"), m("ENV", "RL", "result for r·a1", "reply")],
+          { ENV: "episode r·a1: done", RL: "result received" }, { episode: "done", phase: "idle" }),
+      ],
+    },
+    verify_wait: {
+      name: "Checkpoint during verification (wait)",
+      steps: [
+        S("Verification changes state, so it runs in wait mode",
+          "This verifier runs a test suite that changes the session's sandbox, so it cannot be replayed safely and uses the default wait mode. The environment server recorded boundary V and called <code>/verify</code>.",
+          [m("ENV", "ENV", "boundary V: verify next", "local"), m("ENV", "RES", "POST /verify (runs tests)")],
+          { ENV: "episode r: verifying (wait)", RES: "verify in flight" }, { episode: "wait_step", phase: "idle" }),
+        S("Environment prepare waits",
+          "Episode r is inside a wait step, so it blocks prepare. The resources server is prepared last, so it is still open and the verification keeps running.",
+          [m("RL", "ORC", "prepare(ckpt k)", "control"), m("ORC", "ENV", "prepare", "control"), m("ENV", "ENV", "blocker r: waiting for verify", "local")],
+          { RL: "dispatch closed", ENV: "preparing · blocker r" }, { phase: "preparing", episode: "wait_step" }),
+        S("Verification finishes: the result is recorded at boundary W",
+          "The result reaches the environment server. It records boundary W: verification done, with the reward, next step is closing the session. Now r is parked and prepare is ready.",
+          [m("RES", "ENV", "verify result", "reply"), m("ENV", "ENV", "boundary W: verified (reward recorded)", "local"), m("ENV", "ORC", "ready", "reply")],
+          { ENV: "prepared · r at W", RES: "verify finished (state changed)" }, { phase: "prepared", episode: "boundary" }),
+        S("The rest of Gym prepares and commits",
+          "The resources server now has nothing in flight and exports state that includes the verification's effects. The environment server's record carries the result, not \"verify pending\", so a restore can never run the state-changing verification twice.",
+          [m("ORC", "POL", "prepare", "control"), m("ORC", "AGT", "prepare", "control"), m("ORC", "RES", "prepare", "control"), m("ORC", "ENV", "commit", "control"), m("ORC", "RES", "commit", "control")],
+          { RES: "committed · post-verify state", ENV: "committed · r at W" }, { phase: "committed" }),
+        S("After a crash: continue after verification",
+          "Attempt r·a1 resumes at boundary W. It closes the resources session and returns the recorded result. Verification is not repeated.",
+          [m("RL", "ENV", "POST /run {episode_id: r·a1}"), m("ENV", "RES", "POST /close_session"), m("ENV", "RL", "recorded result", "reply")],
+          { ENV: "episode r·a1: done", RL: "result received" }, { episode: "done", phase: "idle" }),
+        S("If verification outlasts the deadline",
+          "Prepare returns with blocker r. The framework either aborts the checkpoint or retires r, which then restarts from input. Declaring a verifier replayable is how an environment avoids this loss.",
+          [m("ENV", "ORC", "not ready: blockers [r]", "problem"), m("RL", "ORC", "retire [r·a0] or abort", "control")],
+          { ENV: "⚠ preparing · blocker r" }, { phase: "preparing", episode: "wait_step" }),
+      ],
+    },
+    straggler: {
+      name: "Deadline miss and retire",
+      steps: [
+        S("One episode is stuck in a long tool call",
+          "Episode s is between boundaries: its agent is waiting on a slow tool call. The other episodes park normally.",
+          [m("AGT", "RES", "slow tool call for s", "problem")],
+          { AGT: "s running (tool call)", RES: "1 in flight" }, { session: "running" }),
+        S("Agent prepare reaches its deadline with a blocker",
+          "Prepare returns with the phase still <i>preparing</i> and the blocker named. Admission stays closed, so nothing new starts while the framework decides.",
+          [m("ORC", "AGT", "prepare", "control"), m("AGT", "ORC", "not ready: blockers [s]", "problem")],
+          { AGT: "⚠ preparing · blocker s" }, { phase: "preparing", session: "park_requested" }),
+        S("The framework chooses to retire s",
+          "Only the framework decides a rollout's fate. It asks Gym to retire attempt s·a0 everywhere: the environment server cancels the episode, the agent cancels the activation, the model cancels its calls, and the resources server drops or fences the session. Attempt s·a0 is fenced in every participant.",
+          [m("RL", "ORC", "retire [s·a0]", "control"), m("ORC", "ENV", "retire", "problem"), m("ORC", "AGT", "retire", "problem"), m("ORC", "POL", "retire", "problem"), m("ORC", "RES", "retire", "problem")],
+          { ENV: "s cancelled", AGT: "s retired", RES: "s fenced" }, { session: "retired", resources: "fenced" }),
+        S("Prepare again succeeds; s restarts later",
+          "With the blocker gone, prepare becomes ready and the checkpoint proceeds without s. The framework later re-dispatches s from its input as a fresh attempt; no state from s·a0 is used.",
+          [m("ORC", "AGT", "prepare", "control"), m("AGT", "ORC", "ready", "reply")],
+          { AGT: "prepared" }, { phase: "prepared" }),
+        S("If the framework disappears instead",
+          "Every control call renews a lease. If the framework stops calling before commit or resume, each participant resumes on its own when the lease expires, which is the same as an abort. Held responses are released and parked work continues.",
+          [m("POL", "POL", "lease expired → resume", "local"), m("AGT", "AGT", "lease expired → resume", "local")],
+          { POL: "accepting (lease)", AGT: "accepting (lease)" }, { phase: "idle" }),
+      ],
+    },
+  };
+
+  // ---------- player ----------
+  const select = document.getElementById("scenario-select");
+  for (const [key, scenario] of Object.entries(SCENARIOS)) {
+    const option = document.createElement("option");
+    option.value = key; option.textContent = scenario.name;
+    select.appendChild(option);
+  }
+  let scenarioKey = "native";
+  let stepIndex = 0;
+
+  const LANE_X0 = 70, LANE_DX = 117, HEAD_Y = 12, HEAD_H = 46, ROW_H = 34, TOP = 28;
+  const laneX = (key) => LANE_X0 + LANES.indexOf(key) * LANE_DX;
+
+  const drawSequence = () => {
+    const scenario = SCENARIOS[scenarioKey];
+    const rows = [];
+    scenario.steps.forEach((step, index) => step.msgs.forEach((msg) => rows.push({ ...msg, index })));
+    const shown = rows.filter((row) => row.index <= stepIndex).length;
+    const height = TOP + shown * ROW_H + 40;
+    const svg = document.getElementById("sequence");
+    svg.setAttribute("viewBox", `0 0 960 ${height}`);
+    svg.setAttribute("width", "960");
+    svg.setAttribute("height", String(height));
+    [...svg.querySelectorAll("g, text, line, path, rect, defs")].forEach((node) => node.remove());
+
+    const defs = el("defs");
+    for (const kind of ["data", "control", "reply", "problem", "local"]) {
+      const marker = el("marker", { id: `ah-${kind}`, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+      marker.appendChild(el("path", { d: "M0,0 L10,5 L0,10 z", class: `ah-${kind}` }));
+      defs.appendChild(marker);
+    }
+    svg.appendChild(defs);
+
+    rows.forEach((row, i) => {
+      if (row.index === stepIndex) svg.appendChild(el("rect", { x: "0", y: TOP + i * ROW_H - 4, width: "960", height: ROW_H, class: "current-row" }));
+    });
+    const head = document.getElementById("sequence-head");
+    [...head.querySelectorAll("text, rect")].forEach((node) => node.remove());
+    for (const key of LANES) {
+      const x = laneX(key);
+      svg.appendChild(el("line", { x1: x, y1: 0, x2: x, y2: height - 10, class: "lane-line" }));
+      head.appendChild(el("rect", { x: x - 56, y: HEAD_Y, width: "112", height: HEAD_H, rx: "6", class: "lane-head" }));
+      const words = COMPONENTS[key].name.split(" ");
+      const first = words.length > 1 ? words.slice(0, Math.ceil(words.length / 2)).join(" ") : words[0];
+      const second = words.length > 1 ? words.slice(Math.ceil(words.length / 2)).join(" ") : "";
+      head.appendChild(el("text", { x, y: HEAD_Y + (second ? 19 : 28), "font-size": "12.5", "text-anchor": "middle", "font-weight": "700" }, first));
+      if (second) head.appendChild(el("text", { x, y: HEAD_Y + 36, "font-size": "12.5", "text-anchor": "middle", "font-weight": "700" }, second));
+    }
+    rows.forEach((row, i) => {
+      const y = TOP + i * ROW_H + 14;
+      const g = el("g", { class: row.index === stepIndex ? "" : "old" });
+      if (row.index > stepIndex) return;
+      const x1 = laneX(row.from), x2 = laneX(row.to);
+      if (row.from === row.to) {
+        g.appendChild(el("path", { d: `M${x1},${y - 8} h26 v14 h-22`, class: `msg-${row.kind}`, "marker-end": `url(#ah-${row.kind})` }));
+        g.appendChild(el("text", { x: x1 + 32, y: y + 4, "font-size": "12.5" }, row.label));
+      } else {
+        g.appendChild(el("line", { x1, y1: y, x2: x2 + (x2 > x1 ? -3 : 3), y2: y, class: `msg-${row.kind}`, "marker-end": `url(#ah-${row.kind})` }));
+        // Labels always start at the arrow's left end so they never run off the left edge.
+        g.appendChild(el("text", { x: Math.min(x1, x2) + 6, y: y - 6, "font-size": "12.5" }, (row.kind === "problem" ? "⚠ " : "") + row.label));
+      }
+      svg.appendChild(g);
+    });
+    const legend = [["data", "request"], ["control", "control plane"], ["reply", "reply"], ["problem", "⚠ problem path"]];
+    const lg = el("g");
+    let lx = 8;
+    for (const [kind, text] of legend) {
+      lg.appendChild(el("line", { x1: lx, y1: height - 16, x2: lx + 34, y2: height - 16, class: `msg-${kind}` }));
+      lg.appendChild(el("text", { x: lx + 40, y: height - 12, "font-size": "12" }, text));
+      lx += 60 + text.length * 6.5;
+    }
+    svg.appendChild(lg);
+    const current = rows.findIndex((row) => row.index === stepIndex);
+    if (current >= 0) {
+      const wrap = document.querySelector(".seq-wrap");
+      const target = TOP + current * ROW_H - 40;
+      wrap.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+    }
+  };
+
+  const drawStates = () => {
+    const scenario = SCENARIOS[scenarioKey];
+    const merged = { ...INITIAL_STATES };
+    let changed = new Set();
+    scenario.steps.slice(0, stepIndex + 1).forEach((step, index) => {
+      for (const [key, value] of Object.entries(step.states)) merged[key] = value;
+      if (index === stepIndex) changed = new Set(Object.keys(step.states));
+    });
+    const box = document.getElementById("states");
+    box.innerHTML = "";
+    for (const key of LANES) {
+      const div = document.createElement("div");
+      const text = merged[key];
+      const problem = text.startsWith("⚠") || text === "gone";
+      div.className = `state-box${changed.has(key) ? " changed" : ""}${problem ? " problem" : ""}`;
+      div.innerHTML = `<b>${COMPONENTS[key].name}</b>${changed.has(key) ? "▲ " : ""}${text}`;
+      box.appendChild(div);
+    }
+    machineHighlight = {};
+    scenario.steps.slice(0, stepIndex + 1).forEach((step) => Object.assign(machineHighlight, step.machines));
+    const affected = Object.keys(scenario.steps[stepIndex].machines);
+    if (affected.length) currentMachine = affected[affected.length - 1];
+    drawMachine();
+  };
+
+  const render = () => {
+    const scenario = SCENARIOS[scenarioKey];
+    const step = scenario.steps[stepIndex];
+    document.getElementById("step-text").innerHTML = `<h3>${step.title}</h3><p>${step.text}</p>`;
+    document.getElementById("step-counter").textContent = `Step ${stepIndex + 1} of ${scenario.steps.length}`;
+    document.getElementById("prev-step").disabled = stepIndex === 0;
+    document.getElementById("next-step").disabled = stepIndex === scenario.steps.length - 1;
+    const list = document.getElementById("step-list");
+    list.innerHTML = "";
+    scenario.steps.forEach((s, i) => {
+      const li = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button"; button.textContent = String(i + 1); button.title = s.title;
+      button.setAttribute("aria-label", `Step ${i + 1}: ${s.title}`);
+      if (i === stepIndex) { button.classList.add("current"); button.setAttribute("aria-current", "step"); }
+      button.addEventListener("click", () => { stepIndex = i; render(); });
+      li.appendChild(button); list.appendChild(li);
+    });
+    drawSequence();
+    drawStates();
+  };
+
+  select.addEventListener("change", () => { scenarioKey = select.value; stepIndex = 0; render(); });
+  document.getElementById("prev-step").addEventListener("click", () => { if (stepIndex > 0) { stepIndex -= 1; render(); } });
+  document.getElementById("next-step").addEventListener("click", () => { if (stepIndex < SCENARIOS[scenarioKey].steps.length - 1) { stepIndex += 1; render(); } });
+  document.addEventListener("keydown", (event) => {
+    if (event.target.closest("select, input, textarea")) return;
+    if (event.key === "ArrowRight") document.getElementById("next-step").click();
+    if (event.key === "ArrowLeft") document.getElementById("prev-step").click();
+  });
+
+  // ---------- failures ----------
+  const FAILURES = [
+    ["A participant misses the prepare deadline", "Prepare returns its blockers and stays closed; nothing new starts.", "The framework retires the blocking attempts (they restart from input) or aborts with resume."],
+    ["Prepare raises (for example, a hook fails)", "The participant reopens admission and returns to idle, so phase and admission never disagree.", "The framework retries or aborts."],
+    ["A participant became unready after prepare (out-of-order controller)", "Commit re-checks readiness and refuses; no manifest is written.", "Abort; Gym's checkpoint coordination owns the order so this is a backstop."],
+    ["Commit is retried after a lost reply", "The existing manifest is returned unchanged; a different commit into the same directory is refused.", "—"],
+    ["The framework dies mid-checkpoint", "Each participant's lease expires and it resumes on its own, releasing held responses.", "A restarted framework starts a new checkpoint."],
+    ["Restore finds a missing or corrupt file", "Digest and schema checks fail before anything is installed.", "Coordination retires the replacement attempts everywhere and resumes; the framework restarts those rollouts from input as later attempts."],
+    ["Agent work arrives without a rollout ID while checkpointing is on", "400 <code>rollout_id_required</code>: a checkpoint could neither record nor retire it.", "Send <code>_ng_rollout_id</code> or the rollout path prefix on every call."],
+    ["A delayed prepare arrives for a checkpoint that was already aborted", "A resume that reached a participant the prepare never touched fenced that checkpoint ID, so the late prepare gets <code>stale_checkpoint</code>.", "—"],
+    ["A request from a replaced attempt arrives", "409 <code>stale_attempt</code> from every participant; only the lowest live attempt per rollout is kept.", "Route all work through the new attempt."],
+    ["The worker cannot cut a generation", "The call is treated as undelivered without a prefix; after restore it is regenerated.", "Nothing; correctness never depends on a cut."],
+    ["A slow step (for example, verification or seeding) is in flight", "Replay mode: the checkpoint does not wait; the result is held and the step is re-run only after a crash. Wait mode: prepare waits, and the step's result is recorded at the boundary after it.", "Past the deadline in wait mode, the framework retires the rollout or aborts."],
+    ["A response was already streaming when admission closed", "It must finish sending; prepare waits for it.", "—"],
+    ["A server cannot continue rollouts (no hooks)", "It participates as restart-only: live rollouts block prepare.", "The framework retires them; they restart from input."],
+    ["A rollout finishes while a checkpoint is open", "It never completes during the checkpoint: it parks at its final boundary, which carries its result, and delivers the result after resume. After a crash, the replacement attempt returns the recorded result without redoing anything.", "—"],
+    ["A completed result is still in flight when the framework reaches its barrier", "No acknowledgement protocol. Every episode that finished before prepare was ready has already sent its reply. The framework waits for replies to its outstanding <code>/run</code> calls that no participant exported before its barrier.", "A reply actually lost in transit is an ordinary <code>/run</code> failure; the framework retries it from input as it would without checkpointing."],
+    ["A resumed agent re-sends a different conversation", "Its first call cannot find a parent and is poisoned, so the rollout is not trained on a broken chain.", "Agents must re-issue exactly the recorded request; a conformance test checks this."],
+  ];
+  const tbody = document.getElementById("failure-rows");
+  for (const [situation, happens, next] of FAILURES) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${situation}</td><td>${happens}</td><td>${next}</td>`;
+    tbody.appendChild(tr);
+  }
+
+  render();
+})();
+</script>
+<script>
+function buildStepper(mountId, phaseName, actors, steps) {
+  var mount = document.getElementById(mountId);
+  var n = actors.length;
+  var W = 940, gap = W / n;
+  var cx = function (i) { return gap / 2 + i * gap; };
+  var half = Math.min(64, gap / 2 - 6);
+  var html = '';
+  html += '<div class="ctl">';
+  html += '<button type="button" data-a="prev">&larr; Prev</button>';
+  html += '<button type="button" data-a="next">Next &rarr;</button>';
+  html += '<span class="ph">' + phaseName + '</span>';
+  html += '<span class="ct" data-a="count"></span></div>';
+  html += '<svg viewBox="0 0 940 132" role="img" aria-label="Current step drawn between the participating components.">';
+  html += '<defs><marker id="' + mountId + '-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker></defs>';
+  html += '<g font-size="11.5">';
+  for (var i = 0; i < n; i++) {
+    html += '<rect data-actor="' + i + '" x="' + (cx(i) - half) + '" y="8" width="' + (half * 2) + '" height="34" rx="6" fill="none" stroke="var(--border)"/>';
+    var parts = actors[i].split('\n');
+    html += '<text x="' + cx(i) + '" y="' + (parts.length > 1 ? 23 : 29) + '" text-anchor="middle" fill="var(--text)">' + parts[0] + '</text>';
+    if (parts.length > 1) html += '<text x="' + cx(i) + '" y="37" text-anchor="middle" font-size="9.5" fill="var(--dim)">' + parts[1] + '</text>';
+  }
+  html += '</g><g data-a="arrow"></g></svg>';
+  html += '<div class="chips" data-a="chips" role="tablist"></div>';
+  html += '<dl><dt>Call</dt><dd data-a="call"></dd>';
+  html += '<dt>Request</dt><dd><pre data-a="req"></pre></dd>';
+  html += '<dt>Response</dt><dd><pre data-a="resp"></pre></dd>';
+  html += '<dt>Effect</dt><dd data-a="eff"></dd>';
+  html += '<dt>On failure</dt><dd data-a="fail"></dd></dl>';
+  mount.innerHTML = html;
+  var q = function (sel) { return mount.querySelector('[data-a="' + sel + '"]'); };
+  var chips = q('chips');
+  steps.forEach(function (s, i) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.textContent = s.id; b.setAttribute('role', 'tab');
+    b.addEventListener('click', function () { go(i); });
+    chips.appendChild(b);
+  });
+  var cur = 0;
+  function go(i) {
+    cur = (i + steps.length) % steps.length;
+    var s = steps[cur];
+    q('count').textContent = 'step ' + (cur + 1) + ' of ' + steps.length;
+    q('call').textContent = s.id + ' — ' + s.call;
+    q('req').textContent = s.req || '(none)';
+    q('resp').textContent = s.resp || '(none)';
+    q('eff').textContent = s.eff || '—';
+    q('fail').textContent = s.fail || '—';
+    var rects = mount.querySelectorAll('rect[data-actor]');
+    for (var k = 0; k < rects.length; k++) {
+      var on = (k === s.f || k === s.t);
+      rects[k].setAttribute('stroke', on ? 'var(--accent)' : 'var(--border)');
+      rects[k].setAttribute('stroke-width', on ? '2.2' : '1');
+    }
+    var g = q('arrow'), x1 = cx(s.f), x2 = cx(s.t), a = '';
+    if (s.f === s.t) {
+      a = '<path d="M ' + (x1 - 18) + ' 46 C ' + (x1 - 18) + ' 88, ' + (x1 + 18) + ' 88, ' + (x1 + 18) + ' 50" fill="none" stroke="var(--accent)" stroke-width="2.2" marker-end="url(#' + mountId + '-ah)"/>' +
+          '<text x="' + x1 + '" y="108" text-anchor="middle" font-size="12" fill="var(--accent)">' + s.id + ' (local)</text>';
+    } else {
+      var d = x2 > x1 ? 1 : -1;
+      a = '<line x1="' + x1 + '" y1="42" x2="' + x1 + '" y2="76" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="3 3"/>' +
+          '<line x1="' + x2 + '" y1="42" x2="' + x2 + '" y2="76" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="3 3"/>' +
+          '<line x1="' + (x1 + 8 * d) + '" y1="76" x2="' + (x2 - 12 * d) + '" y2="76" stroke="var(--accent)" stroke-width="2.4" marker-end="url(#' + mountId + '-ah)"/>' +
+          '<text x="' + ((x1 + x2) / 2) + '" y="98" text-anchor="middle" font-size="12" fill="var(--accent)">' + s.id + '</text>';
+    }
+    g.innerHTML = a;
+    var bs = chips.children;
+    for (var c = 0; c < bs.length; c++) bs[c].className = c === cur ? 'on' : '';
+  }
+  q('prev').parentElement.querySelector('[data-a="prev"]').addEventListener('click', function () { go(cur - 1); });
+  mount.querySelector('[data-a="next"]').addEventListener('click', function () { go(cur + 1); });
+  mount.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight') { go(cur + 1); e.preventDefault(); }
+    if (e.key === 'ArrowLeft') { go(cur - 1); e.preventDefault(); }
+  });
+  go(0);
+}
+</script>
+<script>
+buildStepper("st-rt", "Runtime", ["SC / pumps","NemoGym actor","Episode processor","Agent server","Resources server","Judge/Sim models","Policy model","Gen worker","TransferQueue"], [
+ {id:"R1", f:0, t:1, call:"Dispatch batch (Ray stream)",
+  req:"task rows with stamped ids\nrollout_id = {group}_g{i}   _ng_attempt_index = 1",
+  resp:"results streamed back as rollouts complete",
+  eff:"RL registry: pending -> inflight", fail:"redispatch; nothing exists Gym-side"},
+ {id:"R2", f:1, t:1, call:"Register execution BEFORE the concurrency semaphore",
+  req:"registry[(rollout_id, attempt)] = {phase: queued, task, processor_instance: null}",
+  resp:"(local)",
+  eff:"liveness-set entry exists before any HTTP", fail:"entry proves the request never started -> fresh dispatch at restore"},
+ {id:"R3", f:1, t:2, call:"POST episode processor /run",
+  req:"{episode_id: {rollout_id, attempt}, task: {task_id, task_input}}",
+  resp:"connection held open for the complete episode protocol",
+  eff:"registry phase: queued -> issued -> running; processor instance recorded", fail:"redispatch same rollout_id, next attempt"},
+ {id:"R4", f:2, t:4, call:"Seed resources session",
+  req:"POST /seed_session {episode_id, task_id, task_data}",
+  resp:"{resources_session_id, resources_tools, sandbox_access} + cookies",
+  eff:"processor records the resources handle and cleanup obligation", fail:"processor returns a typed seed failure; remote owner reaps an orphan"},
+ {id:"R5", f:2, t:3, call:"Seed agent session",
+  req:"POST /v1/agent_sessions {episode_id, task_id, resources_access, sandbox_access}",
+  resp:"{agent_session_id} + cookies",
+  eff:"processor records the agent handle; agent retains only private session state", fail:"processor closes the resources session or records cleanup pending"},
+ {id:"R6", f:2, t:3, call:"Invoke agent",
+  req:"POST /ng-rollout/{capture_key}/v1/responses with agent session cookies and one logical activation id",
+  resp:"complete Responses API result",
+  eff:"processor records the completed activation and next protocol operation", fail:"retry only when the agent can deduplicate the activation; otherwise restart"},
+ {id:"R7", f:3, t:6, call:"Policy generation request",
+  req:"POST /ng-rollout/{rid}-a1/training-token-capture/v1/responses\nfull conversation; header x-ng-plane: policy",
+  resp:"admission ticket created; inflight+1 (atomic AdmissionLimiter)",
+  eff:"request remains in flight until custody data is durable", fail:"client retries carrying the same logical request id"},
+ {id:"R8", f:6, t:7, call:"Dispatch to generation worker",
+  req:"POST /v1/chat/completions + ng_capture{rollout, call_id, parent, staging_chain}",
+  resp:"(returns at R10)",
+  eff:"none", fail:"retry is idempotent: staging is keyed by call id"},
+ {id:"R9", f:7, t:8, call:"Stage token delta, synchronous, pre-ack",
+  req:"put_samples key {rollout}/{call}: token/mask/logprob deltas + identity tags",
+  resp:"ack required before the generation response is released",
+  eff:"staged row in TransferQueue", fail:"orphan row + dangling admission -> masked"},
+ {id:"R10", f:7, t:6, call:"Return text + token-free coordinates",
+  req:"(response to R8)",
+  resp:"{staging_key, prev/delta/cum lengths, digests, weight_version, prefix_verified}",
+  eff:"none", fail:"as R8"},
+ {id:"R11", f:6, t:6, call:"Custody row, then release",
+  req:"append token-free custody row (durable); echo x-ng-model-call-id header; inflight-1",
+  resp:"token-stripped response to the agent",
+  eff:"call k is committed; agent may act on it", fail:"agent never saw the response; the row stands; masked or continued at restore"},
+ {id:"R12", f:3, t:4, call:"Tool calls",
+  req:"POST /{tool} per call with rollout and attempt headers; successful state creation binds identity; MCP replays signed identity",
+  resp:"tool results",
+  eff:"HTTP and MCP mutations share one per-session lock and revision path", fail:"unknown POST data routes default to mutation; untracked stateful traffic makes prepare fail safe"},
+ {id:"R13", f:4, t:5, call:"Nested environment-plane model call",
+  req:"simulator or judge request targets an auxiliary model-server instance that remains open during prepare",
+  resp:"model output",
+  eff:"none for training: environment-plane tokens are never selected", fail:"tool surfaces a typed error, not a fabricated observation"},
+ {id:"R14", f:2, t:2, call:"Protocol boundary",
+  req:"record completed activation, agent_session_id, resources_session_id, cookies, model-call id, resources revision, and next_operation",
+  resp:"(local)",
+  eff:"this is where prepare can park the episode processor", fail:"a boundary is invalid if a referenced component outcome is not durable"},
+ {id:"R15", f:2, t:3, call:"Close agent session",
+  req:"POST /v1/agent_sessions/close {agent_session_id}",
+  resp:"{agent_observations, resources_cookies}",
+  eff:"processor records close completion before advancing", fail:"idempotent retry or cleanup remains pending"},
+ {id:"R16", f:2, t:4, call:"Verify",
+  req:"POST /verify; any judge call targets a separate auxiliary model instance",
+  resp:"{reward, verifier metadata}",
+  eff:"reward computed", fail:"judge failure -> typed judge_failed outcome, owned by RL policy"},
+ {id:"R17", f:2, t:4, call:"Close resources session",
+  req:"POST /close_session {resources_session_id}",
+  resp:"{resources_session_id}",
+  eff:"processor marks the final cleanup obligation complete", fail:"idempotent retry from durable cleanup state"},
+ {id:"R18", f:1, t:0, call:"Result handoff with acknowledgement",
+  req:"episode processor /run returns -> actor streams result to the rollout manager",
+  resp:"handoff ACK from the rollout manager",
+  eff:"registry phase transferred_to_rl, then entry removed; prepare can never acknowledge mid-handoff", fail:"unacked handoff keeps the entry; restore reconciles against the RL registry"},
+ {id:"R19", f:0, t:8, call:"Finalization (RL-side)",
+  req:"finalizer fetches staged rows by manifest keys; verifies digests, lengths, masks, weight versions",
+  resp:"publishes exactly N train rows per group, then clears staging keys",
+  eff:"canonical training rows", fail:"publish-before-clear makes any torn state re-runnable"}
+]);
+
+buildStepper("st-pp", "Prepare", ["SingleController","NemoGym actor","Episode processor","Agent server","Relay / runtime","Resources server","Policy model","Judge/Sim models","Gen worker"], [
+ {id:"P1", f:0, t:0, call:"Fence RL-side work",
+  req:"pause rollout and training pumps; stop issuing finalizations; wait for in-flight finalizations",
+  resp:"(local)",
+  eff:"nothing will write TransferQueue during the later save", fail:"skipping this can strand a group across the snapshot"},
+ {id:"P2", f:0, t:1, call:"prepare_checkpoint",
+  req:"Ray: {checkpoint_id, deadline (absolute), deadline_policy: restart_safe_rollouts}",
+  resp:"(returns at P13)",
+  eff:"actor enters a short critical section: validate the transition, set the active checkpoint id, and change phase running -> preparing; P3 completes before the mutex is released", fail:"same checkpoint id returns its recorded transition; a different id is rejected while one is active"},
+ {id:"P3", f:1, t:1, call:"Fence dispatch and freeze membership",
+  req:"while the same mutex is held: close the actor dispatch gate and snapshot membership of the live-execution registry; then release the mutex before any drain wait",
+  resp:"(local)",
+  eff:"no new execution can join the checkpoint set; queued-never-issued entries are classified now; progress and abort calls remain available during draining", fail:"—"},
+ {id:"P4", f:1, t:2, call:"Prepare episode processors",
+  req:"POST /ng-control/v1/episode-checkpoint/prepare {checkpoint_id, deadline_ts} per processor instance",
+  resp:"{state: preparing, running: 0, parked, active} after every tracked episode reaches a boundary",
+  eff:"each processor finishes its current protocol operation, commits an EpisodeBoundaryRecord, and blocks", fail:"a nonzero running count at the deadline fails prepare; retire restart-safe attempts and retry, or abort"},
+ {id:"P5", f:1, t:3, call:"Prepare private agent sessions",
+  req:"prepare every agent_session_id referenced by a selected processor boundary",
+  resp:"{state: prepared, sessions, restart_only_sessions}",
+  eff:"active /v1/responses calls drain to an activation boundary; private session snapshots freeze", fail:"a referenced session that cannot reach its advertised boundary blocks continuation"},
+ {id:"P6", f:1, t:4, call:"Pause blackbox egress",
+  req:"pause_egress {checkpoint_id} per blackbox runtime",
+  resp:"{state: paused, local_pending_requests}",
+  eff:"relay holds NEW harness requests locally; the harness may keep computing", fail:"re-send; idempotent"},
+ {id:"P7", f:1, t:6, call:"Close policy-model admission",
+  req:"POST /ng-control/v1/model-admission/pause {checkpoint_id, deadline_ts} after processors and agent activations are parked\nexcluded: judge and simulator instances; generation workers stay available",
+  resp:"{state: draining, workers: {acknowledged, expected}, inflight_total, waiters_total}",
+  eff:"the service coordinator publishes the closed state to every FastAPI worker; no new top-level operations enter after all workers acknowledge; accepted ones finish", fail:"a missing worker is an error; re-send is idempotent"},
+ {id:"P8", f:8, t:6, call:"Accepted generations drain",
+  req:"each finishes the generation path: stage -> coordinates -> custody row -> release",
+  resp:"(normal operation)",
+  eff:"each FastAPI worker decrements its local count after custody is durable; the service coordinator's aggregate falls toward zero", fail:"a straggler is handled by the deadline policy, never by waiting forever"},
+ {id:"P9", f:1, t:5, call:"Prepare resources state",
+  req:"POST /ng-control/v1/resources-checkpoint/prepare {checkpoint_id, deadline_ts}",
+  resp:"{state: prepared, sessions}",
+  eff:"new mutations are rejected; prepare acquires each per-session lock and exports state after the accepted mutation finishes", fail:"timeout or codec failure aborts this participant prepare; no partial resources manifest is published"},
+ {id:"P10", f:2, t:2, call:"Processors park; completions transfer",
+  req:"each processor records its latest completed protocol operation and parks; completed episodes transfer with handoff ACK",
+  resp:"(local)",
+  eff:"per-rollout state: parked | transferred_to_rl", fail:"a processor stuck mid-operation reports the blocking operation and target participant"},
+ {id:"P11", f:1, t:6, call:"Observe model drain",
+  req:"GET /ng-control/v1/model-admission/status {checkpoint_id, wait_state: paused, timeout_s}",
+  resp:"{state, inflight_total, waiters_total}; a coordinator deployment also reports worker acknowledgements",
+  eff:"the absolute deadline remains enforceable while accepted HTTP generations finish", fail:"a missing worker or deadline expiry fails prepare; it is never treated as zero in flight"},
+ {id:"P12", f:1, t:2, call:"Apply the deadline policy",
+  req:"for a restart-safe attempt: retire processor, agent-session, resources, runtime, and model state under one checkpoint fence; mark fresh_dispatch",
+  resp:"{aborted}",
+  eff:"processor tasks are cancelled; component sessions retire; resources waits for mutation locks; model roots are excluded", fail:"a non-discardable external effect or missing durable result acknowledgement aborts the global checkpoint"},
+ {id:"P13", f:1, t:4, call:"Freeze blackbox runtimes",
+  req:"checkpoint_runtime {rollout, attempt, mode: full_runtime_snapshot} once that rollout has no in-flight calls, or at the deadline with the forwarded call marked pending_reissue",
+  resp:"RuntimeSnapshotDescriptor {artifact_ref, digest, provider_fingerprint}",
+  eff:"harness memory + relay pending/cached state captured", fail:"provider without full-runtime support -> rollout marked restart"},
+ {id:"P14", f:1, t:0, call:"Prepared",
+  req:"(response to P2)",
+  resp:"{state: prepared, rollouts: {rid: parked | transferred | snapshot_ready | fresh_dispatch}, restarted_rollouts: [{rid, attempt, stuck_op, age}]}",
+  eff:"Gym is paused at restorable points; SC may seal its data plane", fail:"SC aborts -> resume everything, delete temp"}
+]);
+
+buildStepper("st-sv", "Save", ["SingleController","TransferQueue","NemoGym actor","Gym server instances","Checkpoint FS","Trainer","Gen workers"], [
+ {id:"S1", f:0, t:0, call:"Seal the rollout registry",
+  req:"write pending/inflight registry (dispatch already fenced, handoffs acknowledged)",
+  resp:"(local durable)",
+  eff:"registry cut consistent with the frozen live-execution set", fail:"re-run; nothing references it yet"},
+ {id:"S2", f:0, t:1, call:"Save TransferQueue",
+  req:"save_checkpoint to a fresh content-addressed path",
+  resp:"{digest}",
+  eff:"data-plane cut; safe because policy plane and finalizers are quiet", fail:"previous checkpoint untouched; retry or abort"},
+ {id:"S3", f:0, t:2, call:"commit_checkpoint",
+  req:"Ray: {checkpoint_id, checkpoint_dir: ckpt.tmp/gym (fresh, actor-owned)}",
+  resp:"(returns at S5)",
+  eff:"actor phase prepared -> committing", fail:"idempotent; a repeat verifies and returns the same descriptor"},
+ {id:"S4", f:2, t:3, call:"Component commit fan-out",
+  req:"POST /ng-control/v1/{episode|agent-session|resources|model}-checkpoint/commit {checkpoint_id, checkpoint_dir, deadline_ts}\neach participant publishes a namespaced manifest",
+  resp:"{manifest_path, digest, counts}",
+  eff:"each component manifest makes its payload set immutable and verifiable", fail:"write failure -> remain paused, report; SC aborts the global checkpoint"},
+ {id:"S5", f:2, t:4, call:"Write the actor manifest last",
+  req:"verify every component digest -> write live-executions.jsonl -> write gym/manifest.json -> fsync",
+  resp:"Ray return: {state: committed_paused}",
+  eff:"participant package complete and immutable; everything STAYS paused", fail:"missing/failed digest -> no manifest -> SC aborts"},
+ {id:"S6", f:5, t:5, call:"Trainer save completes",
+  req:"model + optimizer + scheduler save, running asynchronously since before prepare",
+  resp:"trainer anchor durable",
+  eff:"independent of Gym; overlapped with everything above", fail:"abort the global checkpoint; participant resumes"},
+ {id:"S7", f:0, t:6, call:"Pause or update generation workers",
+  req:"ONLY here - between commit and resume - may RL pause, refit, or restart generation workers",
+  resp:"(worker lifecycle)",
+  eff:"no accepted Gym generation can exist right now, so nothing drains against a paused worker", fail:"worker recovery retried; NemoGym.resume is NOT called yet"},
+ {id:"S8", f:0, t:4, call:"Publish",
+  req:"verify every participant -> write training_info.json last -> atomic rename -> fsync parent",
+  resp:"published global checkpoint",
+  eff:"the checkpoint exists; before this instant the previous one stands - no third state", fail:"discard the temp; abort; resume participants"},
+ {id:"S9", f:0, t:6, call:"Validate workers",
+  req:"health + policy-version checks against the published anchor",
+  resp:"ready",
+  eff:"parked processors will never release agent sessions against an incompatible policy", fail:"retry worker recovery; stay paused"},
+ {id:"S10", f:0, t:2, call:"Resume in dependency order",
+  req:"Ray: resume {checkpoint_id}",
+  resp:"{state: running}",
+  eff:"ordered reopen: resources -> policy model -> agent sessions and runtimes -> episode processors -> dispatch; SC reopens pumps + finalizers", fail:"any earlier failure took the abort path: release every control, delete temp"}
+]);
+
+buildStepper("st-rs", "Restore", ["SingleController","TransferQueue","Gen workers","NemoGym actor","Model server","Resources server","Agent server","Runtime / relay","Episode processor"], [
+ {id:"T1", f:0, t:0, call:"Select the checkpoint",
+  req:"newest published checkpoint by checkpoint id, never mtime; read training_info.json",
+  resp:"(local)",
+  eff:"deterministic selection", fail:"re-pick is deterministic"},
+ {id:"T2", f:0, t:1, call:"Restore the data plane",
+  req:"load_checkpoint by the BOUND digest; restore pending/inflight registry; reconcile staging keys by count",
+  resp:"TransferQueue repopulated",
+  eff:"staged chains available for prefix supply", fail:"re-run"},
+ {id:"T3", f:0, t:2, call:"Start generation workers",
+  req:"restored weights; capture sink reinstalled at setup; health + policy-version validation",
+  resp:"serving",
+  eff:"workers ready before any Gym activation", fail:"normal engine startup; retry"},
+ {id:"T4", f:0, t:3, call:"restore_checkpoint",
+  req:"Ray: {checkpoint_dir}; actor starts Gym servers in paused-bootstrap; verifies /ng-control/v1/capabilities per instance role",
+  resp:"(returns after T9)",
+  eff:"every server paused; capability mismatch fails restore", fail:"fail the method; SC decides"},
+ {id:"T5", f:3, t:4, call:"Restore model lineage FIRST",
+  req:"POST .../model-checkpoint/restore {checkpoint_id, subdir}",
+  resp:"{state: restored_paused, rollout_count}",
+  eff:"custody ledger + source attempts installed; the first resumed call must parent-resolve", fail:"digest/schema mismatch leaves model admission closed in observable restore_failed_paused"},
+ {id:"T6", f:3, t:5, call:"Restore resources sessions",
+  req:"POST .../resources-checkpoint/restore {checkpoint_id, subdir, attempt_mapping_ref}",
+  resp:"{state: restored_paused, session_count}",
+  eff:"a fresh process installs sessions under N+1 and remains paused; stale attempt N receives HTTP 409", fail:"a process that already served stateful traffic rejects restore"},
+ {id:"T7", f:3, t:7, call:"Restore blackbox runtimes",
+  req:"restore_runtime {rollout, source_attempt, new_attempt, artifact_ref, digest}\nrelay REWRITES attempt identity and RE-POINTS server endpoints; egress stays paused",
+  resp:"{state: restored_detached, egress: paused}",
+  eff:"harness thawed but silent", fail:"dead/incompatible artifact -> disposition falls to fresh dispatch"},
+ {id:"T8", f:3, t:3, call:"Choose and verify one recovery action per rollout",
+  req:"per execution: RL-completed beats valid continuation beats fresh dispatch;\nverify every selected chain against restored TransferQueue BEFORE dispatch; write tombstones",
+  resp:"(local)",
+  eff:"exactly one action per rollout; a chain miss demotes to fresh dispatch here, not as a serving error later", fail:"fail closed to fresh dispatch"},
+ {id:"T9", f:3, t:6, call:"Restore private agent sessions",
+  req:"POST .../agent-session restore {checkpoint_id, subdir, attempt_mapping_ref}",
+  resp:"{state: restored_paused, session_count}",
+  eff:"private continuation state, descriptors, observations, and activation receipts install under N+1", fail:"a missing session demotes the referencing processor boundary to fresh dispatch"},
+ {id:"T10", f:3, t:8, call:"Restore episode processor boundaries",
+  req:"POST .../episode restore {checkpoint_id, subdir, attempt_mapping_ref}",
+  resp:"{state: restored_paused, episode_count}",
+  eff:"next operation and cleanup obligations install only after every referenced component session exists", fail:"a mismatched handle, revision, or result digest rejects the continuation"},
+ {id:"T11", f:0, t:3, call:"Resume in dependency order",
+  req:"Ray: resume {checkpoint_id} - only after every participant and every worker is ready",
+  resp:"{state: running}",
+  eff:"resources -> model admission -> agent sessions and runtimes -> episode processors; fresh dispatches requeued by RL", fail:"stay paused; retry readiness"},
+ {id:"T12", f:6, t:4, call:"First resumed policy call",
+  req:"the continued conversation plus source capture key and verified attempt-N model-call ID; both relay headers are consumed once",
+  resp:"normal generation",
+  eff:"the parent row's complete staging coordinates are copied into N+1; later calls parent-link within N+1", fail:"a missing parent or staging row must fail reconciliation before production dispatch"}
+]);
+</script>
 <script>
 (function () {
-  var tabs = document.getElementById("tabs");
+  var tabs = document.getElementById("v1-tabs");
   var buttons = tabs.querySelectorAll("button");
   function show(id) {
     for (var i = 0; i < buttons.length; i++) {
       var on = buttons[i].dataset.tab === id;
       buttons[i].className = on ? "on" : "";
     }
-    var secs = document.querySelectorAll("section.tab");
+    var secs = document.querySelectorAll("#v1-root section.tab");
     for (var j = 0; j < secs.length; j++) {
       secs[j].className = secs[j].id === "tab-" + id ? "tab on" : "tab";
     }
-    try { history.replaceState(null, "", "#" + id); } catch (e) {}
+    try { history.replaceState(null, "", "#v1-" + id); } catch (e) {}
   }
   tabs.addEventListener("click", function (e) {
     var b = e.target.closest("button");
     if (b) show(b.dataset.tab);
   });
-  var h = (location.hash || "").slice(1);
+  var h = (location.hash || "").replace(/^#v1-/, "");
   if (h && document.getElementById("tab-" + h)) show(h);
-
-  var tg = document.getElementById("themetoggle");
-  function label() {
-    tg.textContent = document.documentElement.dataset.theme === "light" ? "◐ dark" : "◐ light";
-  }
-  tg.addEventListener("click", function () {
-    var light = document.documentElement.dataset.theme === "light";
-    if (light) { delete document.documentElement.dataset.theme; }
-    else { document.documentElement.dataset.theme = "light"; }
-    try {
-      localStorage.setItem("engineering-notes-theme",
-        document.documentElement.dataset.theme === "light" ? "light" : "dark");
-    } catch (e) {}
-    label();
-  });
-  label();
 })();
 </script>
 </body>
