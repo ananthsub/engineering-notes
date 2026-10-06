@@ -204,9 +204,9 @@ machine is doing.
 <nav class="toc" aria-label="Contents">
   <ol>
     <li><a href="#problem">The problem</a>: <a href="#problem-why">why</a>, <a href="#problem-state">which state</a>, <a href="#problem-requirements">requirements</a>, <a href="#problem-rl">NeMo RL</a></li>
-    <li><a href="#components">The v2 design</a>: <a href="#components">components</a>, <a href="#player">lifecycle</a>, <a href="#modes">wait or replay</a>, <a href="#machines">state machines</a>, <a href="#records">stored state</a>, <a href="#failures">failures</a>, <a href="#apis">control API</a>, <a href="#sandboxes">sandboxes</a></li>
+    <li><a href="#components">The v2 design</a>: <a href="#components">components</a>, <a href="#player">lifecycle</a>, <a href="#modes">wait or replay</a>, <a href="#machines">state machines</a>, <a href="#records">stored state</a>, <a href="#failures">failures</a>, <a href="#apis">control API</a>, <a href="#sandboxes">sandboxes</a>, <a href="#retire">retire</a>, <a href="#lifecycle">end of life</a>, <a href="#workers">several workers</a>, <a href="#controller">controller obligations</a></li>
     <li><a href="#v1">v1, as proposed</a></li>
-    <li><a href="#changes">From v1 to v2</a>: <a href="#changes-glance">at a glance</a>, <a href="#changes-scale">scalability and ergonomics</a>, <a href="#changes-removed">what v2 removes</a>, <a href="#changes-milestones">milestones</a>, <a href="#changes-gaps">open gaps</a></li>
+    <li><a href="#changes">From v1 to v2</a>: <a href="#changes-glance">at a glance</a>, <a href="#changes-scale">scalability and ergonomics</a>, <a href="#changes-removed">what v2 removes</a>, <a href="#changes-names">names</a>, <a href="#changes-milestones">milestones</a>, <a href="#changes-gaps">open gaps</a></li>
   </ol>
 </nav>
 
@@ -251,8 +251,8 @@ waiting for stragglers.
 </div>
 <p>
 Every rollout also has an identity that survives retries and restores: a stable rollout ID plus an attempt
-number. After a restore the rollout continues as the next attempt, and anything still arriving from an older
-attempt must be rejected.
+number. After a restore the rollout continues as the next attempt, and nothing of an older attempt may still
+be running anywhere.
 </p>
 
 <h3 id="problem-requirements">What a correct checkpoint requires</h3>
@@ -263,7 +263,10 @@ attempt must be rejected.
   controller can retire a straggler, which then restarts from its input.</li>
   <li><b>Durable before published.</b> Every component's files are complete and verified before the global
   checkpoint names them.</li>
-  <li><b>Stale work is fenced.</b> Requests from a replaced attempt are refused everywhere.</li>
+  <li><b>Retired work stops.</b> Retiring an attempt stops its work everywhere before it returns, so nothing from a
+  replaced attempt can still change state.</li>
+  <li><b>Nothing grows without an end of life.</b> Every piece of state has an owner and an event that frees it;
+  a restart does not count.</li>
   <li><b>Fail closed.</b> A server that cannot continue a rollout still takes part, so it can never silently
   produce a checkpoint that is wrong.</li>
 </ul>
@@ -271,7 +274,8 @@ attempt must be rejected.
 <h3 id="problem-rl">How it fits with NeMo RL</h3>
 <p>The training framework owns the global checkpoint transaction; Gym owns everything inside Gym.</p>
 <ol>
-  <li><b>Prepare.</b> The framework stops dispatching new rollouts and asks Gym to prepare. Gym brings every
+  <li><b>Prepare.</b> The framework stops dispatching new rollouts, pauses its trainer and trajectory assembler
+  actors until resume, and asks Gym to prepare. Gym brings every
   in-flight rollout to a safe point, in the order Gym defines, and reports any straggler it had to wait for.</li>
   <li><b>Commit.</b> Gym writes each server's state into the framework's checkpoint directory. The framework
   saves its own state (token store, rollout registry, dataloader) alongside, and waits for results of rollouts
@@ -414,10 +418,10 @@ in the required order; the training framework calls the coordination.
   <thead><tr><th>Route</th><th>Valid in phase</th><th>Effect</th></tr></thead>
   <tbody>
     <tr><td><code>POST /ng-control/v1/checkpoint/prepare</code></td><td>idle, preparing</td><td>close admission, then wait until ready or the deadline; report blockers</td></tr>
-    <tr><td><code>POST …/retire</code></td><td>preparing, prepared, restored, idle</td><td>discard named attempts and fence them</td></tr>
+    <tr><td><code>POST …/retire</code></td><td>idle, restored</td><td>stop the named attempts' work, wait for it, free their state, then reply; refused while a checkpoint is open</td></tr>
     <tr><td><code>POST …/commit</code></td><td>prepared</td><td>re-check readiness, write records then manifest; idempotent</td></tr>
     <tr><td><code>POST …/restore</code></td><td>idle, fresh process</td><td>validate everything, install under the next attempt, stay closed</td></tr>
-    <tr><td><code>POST …/resume</code></td><td>any non-idle</td><td>reopen admission and release parked work; also the abort path</td></tr>
+    <tr><td><code>POST …/resume</code></td><td>any non-idle</td><td>reopen admission and let parked work continue; also the abort path</td></tr>
     <tr><td><code>GET …/status</code></td><td>any</td><td>phase, checkpoint ID, readiness report, and checkpoint mode; a resources server also reports whether its verification may be replayed</td></tr>
     <tr><td><code>POST /ng-control/v1/generation-cut</code> (inference worker)</td><td>—</td><td>stage the prefix of each in-flight call and return a receipt</td></tr>
   </tbody>
@@ -425,10 +429,13 @@ in the required order; the training framework calls the coordination.
 </div>
 <p>
 Coordination order: <b>prepare</b> environment servers → policy model → agents → resources.
-<b>Commit</b> in any order, except that the model commit is scoped to the episodes the other
-participants exported. <b>Resume</b> resources → policy model → agents → environment servers.
+<b>Commit</b> in any order. Every commit is scoped to the episodes the controller continues: those in flight,
+and each unclaimed restored episode under its replacement attempt. <b>Resume</b> resources → policy model → agents → environment servers.
+<b>Retire</b> callers before callees: environment servers → agents → policy model and resources together,
+each replying only after the attempts' work has stopped. After a commit writes its files, each participant also
+retires the restored episodes that are neither running nor in the commit's scope.
 <b>Restore</b> is all or nothing: if any participant fails, coordination retires the replacement attempts
-everywhere, which drops their restored state, and resumes every participant. The training framework restarts
+everywhere, which frees their restored state, and resumes every participant. The training framework restarts
 those rollouts from their input as later attempts.
 </p>
 <p>
@@ -456,7 +463,7 @@ provider-specific) is up to the sandbox provider's implementation.
     <tr><td>commit</td><td><code>export_session_states(session_ids)</code></td><td><code>export_agent_sessions(session_keys)</code></td><td>Return what a restore needs to rebuild each session's sandbox as of this checkpoint.</td></tr>
     <tr><td>resume, no crash</td><td>none</td><td>none</td><td>The live sandboxes carry on.</td></tr>
     <tr><td>restore after a crash</td><td><code>restore_session_states(states)</code></td><td><code>restore_agent_sessions(sessions)</code></td><td>In a fresh process, rebuild every session's sandbox or raise; the rollouts then restart from their inputs. Stop the sandboxes the crashed process left running.</td></tr>
-    <tr><td>retire</td><td><code>retire_session_state(session_id)</code></td><td><code>retire_agent_session(session_key)</code></td><td>Stop the discarded attempt's sandbox.</td></tr>
+    <tr><td>retire</td><td><code>retire_session_state(session_id)</code></td><td><code>retire_agent_session(session_key)</code></td><td>Stop the retired attempt's sandbox.</td></tr>
   </tbody>
 </table>
 </div>
@@ -480,6 +487,166 @@ sandboxes concurrently within the commit deadline. Any implementation has to mee
   seed reply can carry it without a new call.</li>
   <li><b>A harness running inside the sandbox</b> must continue from the sandbox's filesystem after a restore:
   snapshots do not keep running processes.</li>
+</ul>
+
+<h2 id="retire">9. Retire: stop, then free</h2>
+<p>
+Retiring an attempt is how a rollout leaves Gym without finishing: a straggler the controller gives up on, a
+restored episode it will not continue, or a row whose <code>/run</code> reply never arrived. The contract is
+simple to state and is what keeps every other table in Gym bounded:
+</p>
+<div class="card">
+  <b>When retire returns, no work of the named attempts, or of earlier attempts of the same rollouts, is running
+  anywhere in Gym, and everything Gym held for them is freed.</b> Nothing Gym runs can send another request
+  for the attempt, so no participant has to remember it afterwards.
+</div>
+<table>
+  <thead><tr><th>Rule</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td><b>Callers before callees.</b> Coordination retires environment servers, then agents, then the policy
+    model and resources servers together.</td>
+    <td>When a server's retire starts, everything that could still call it for this attempt has already stopped.
+    A request the agent sent just before its own retire cannot reach the model server after the model's retire.</td></tr>
+    <tr><td><b>Each participant stops before it acknowledges.</b> It refuses new work for the attempt, cancels the
+    attempt's running work, waits for it to finish within the request deadline, frees its state, and only then
+    replies.</td>
+    <td>Cancelling without waiting leaves work running that can still write. Waiting is what lets the refusal be
+    temporary.</td></tr>
+    <tr><td><b>The refusal lasts only as long as the stop.</b> A request for an attempt that is being retired gets
+    409 <code>stale_attempt</code>. Once retire returns, the attempt is forgotten.</td>
+    <td>A lasting record of retired attempts would grow with every rollout ever retired. After the stop there is
+    nothing left that could send a request, so there is nothing to refuse.</td></tr>
+    <tr><td><b>No retire while a checkpoint is open.</b> A participant refuses retire while it is preparing,
+    prepared or committed. It accepts retire when idle, and after a restore, where nothing is running yet.</td>
+    <td>Otherwise retire can deadlock: the environment server's retire waits for the episode's final cleanup, that
+    cleanup's <code>/close_session</code> waits for resume, and resume waits for the controller, which is waiting
+    for the retire.</td></tr>
+    <tr><td><b>Retire does not interrupt final cleanup.</b> Once an episode has started its final cleanup, retire
+    waits for it instead of cancelling it.</td>
+    <td>A retire can reach an episode that is already finishing, for example when the controller retires a row
+    whose reply was lost. Cancelling the cleanup would leak the agent and resources sessions it was closing. A
+    shielded cleanup is not enough: a direct task cancellation still interrupts it.</td></tr>
+  </tbody>
+</table>
+<p>What each participant stops and frees:</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Participant</th><th>Stops</th><th>Frees</th></tr></thead>
+  <tbody>
+    <tr><td>Environment server</td><td>The episode's task, then waits for it, including its final cleanup</td>
+    <td>The episode's steps and task digest; the cleanup closes the agent and resources sessions</td></tr>
+    <tr><td>Agent server</td><td>The session's running activation, and waits for it; a restart-only agent's
+    <code>/run</code></td><td>The session, through its retire hook, which is also where an agent stops a sandbox it
+    owns</td></tr>
+    <tr><td>Policy model server</td><td>The attempt's calls, and waits for them</td><td>Restored cuts, and the
+    capture ledgers of attempts 0 through N in one batch</td></tr>
+    <tr><td>Resources server</td><td>Nothing to cancel: it waits for the attempt's in-flight requests to
+    drain</td><td>The session, through the server's retire hook</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="warn">
+A straggler is handled by aborting, not by retiring into an open checkpoint: the controller resumes, retires
+the straggler, and prepares again. The rollout restarts from its input as its next attempt.
+</p>
+
+<h2 id="lifecycle">10. Every resource has an end of life</h2>
+<p>
+Long training runs make unbounded growth a correctness bug, not a tuning issue: a table that grows with every
+rollout, checkpoint or session ever seen eventually exhausts memory or disk, and a restart does not count as freeing
+it. Every piece of state Gym holds therefore has an owner and an event in the episode's normal life
+that frees it.
+</p>
+<ul>
+  <li><b>Memory is bounded by live work:</b> episodes in flight, plus unclaimed restored episodes.</li>
+  <li><b>Disk is bounded by what has a named owner:</b> checkpoints the controller retains, and capture data the
+  training framework has not consumed yet. Each is freed by an explicit call, retire or delete, never by an age-based sweep.</li>
+  <li><b>The episode's owner frees what it created before it replies,</b> on every path: success, failure,
+  timeout, cancellation, retire, and an open checkpoint.</li>
+  <li><b>The host is left clean:</b> a clean exit leaves no files, sockets, processes or sandboxes behind.</li>
+</ul>
+<div class="scroll">
+<table>
+  <thead><tr><th>Resource</th><th>Owner</th><th>Freed by</th></tr></thead>
+  <tbody>
+    <tr><td>Admission slot, cleanup obligations, session handles</td><td>Environment server</td>
+    <td>The episode's own exit path, before it replies</td></tr>
+    <tr><td>Episode steps and task digest</td><td>Environment server</td><td>The end of the episode, or retire</td></tr>
+    <tr><td>Agent session</td><td>Agent server</td><td>Close from the environment server's cleanup; closing also
+    stops a running activation</td></tr>
+    <tr><td>Resources session, and the server's own per-session state</td><td>Resources server</td>
+    <td><code>/close_session</code> from the environment server's cleanup, or retire. Close is never refused: during
+    an open checkpoint it waits for resume</td></tr>
+    <tr><td>Gate ticket, held response, generation cut</td><td>Policy model server</td><td>The end of the call,
+    or resume</td></tr>
+    <tr><td>Restored records, sessions and cuts</td><td>Each participant</td><td>The replacement attempt that
+    claims them, or the next commit whose scope leaves them out</td></tr>
+    <tr><td>Capture ledger and complete-record captures</td><td>Training framework</td><td>Retire once a rollout
+    is consumed or abandoned; delete once nothing can still write</td></tr>
+    <tr><td>Retired checkpoint IDs</td><td>Each participant</td><td>Only the most recent ones are kept, enough to
+    refuse a delayed call from a stale controller</td></tr>
+    <tr><td>Checkpoint directories</td><td>Training framework</td><td>The framework's own retention</td></tr>
+  </tbody>
+</table>
+</div>
+<p>
+<b>The commit scope is the controller's statement of what it continues.</b> Restored state waits for its
+replacement attempt. If the controller never re-dispatches an episode, nothing would ever claim it, and every
+later checkpoint would export it again. So after a commit writes its files, each participant retires the
+restored episodes that are neither running nor in the commit's scope. A controller that will continue a
+restored episode must name its replacement attempt in every commit until it re-dispatches it.
+</p>
+<p>
+<b>Restore cleans up after the dead execution.</b> It runs only in fresh processes: a policy model server that
+has served calls refuses it. It deletes capture files the dead execution left for the target attempt and later
+ones, so restoring the same checkpoint twice works. And it retires the ledgers of the attempts it continues,
+so the source attempt's files do not outlive the restore.
+</p>
+
+<h2 id="workers">11. Several workers per server</h2>
+<p>
+Production servers run several uvicorn workers. Workers share one listening socket, so a request reaches
+whichever worker accepts it, while session state lives in the worker that created it. Two problems follow,
+one without checkpointing and one with it.
+</p>
+<ul>
+  <li><b>Session routing.</b> Each new session is stamped with its worker's ID, inside the signed session cookie
+  and inside the MCP session token a cookieless harness uses for tool calls. Each worker also serves the app on a
+  private Unix socket, and a request for a session another worker owns is forwarded there unchanged. If the
+  owner is gone, the request gets 410 instead of running against empty state. There is no central session
+  table, so nothing grows with the sessions a server has served.</li>
+  <li><b>One participant per server.</b> A control call reaches one arbitrary worker, so every server kind runs
+  one participant across its workers: a coordinator in the main process and a worker link in each worker. Prepare is
+  ready only when every worker is; commit gathers every worker's records into one file; an unregistered or lost
+  worker blocks the checkpoint, and a worker that loses the coordinator stops itself.</li>
+  <li><b>Whole-episode state stays with the coordinator</b> after a restore, and the worker that receives the
+  replacement <code>/run</code> claims it; exactly one claim succeeds. With several workers, a claim that
+  arrives while a checkpoint is open is refused like a new episode, and the caller retries.</li>
+  <li><b>The worker count is a deployment choice that may change between checkpoint and restore:</b> from one
+  worker to several, from several to one, or between different counts. Restored sessions are installed on live
+  workers. Every router gets the <b>alias table</b>, from each old owner ID to its new worker, and the
+  <b>placement table</b>, from session ID to worker, for sessions checkpointed with one worker, whose cookies
+  name no owner. The placement table is replaced at each restore, so it is bounded by the sessions that restore
+  installed.</li>
+</ul>
+
+<h2 id="controller">12. What the controller must do</h2>
+<p>Gym's guarantees hold only if the training framework keeps its side of the contract:</p>
+<ul>
+  <li><b>Pause everything from prepare until resume:</b> rollout dispatch, the trainer actors and the trajectory
+  assembler actors. Nothing may retire, dispatch or consume rollouts while Gym is prepared or committed. That
+  includes reading capture manifests and calling capture retire or delete, which a policy model server refuses
+  with 409 while a checkpoint is open.</li>
+  <li><b>Abort, then retire.</b> To retire a straggler, resume first, then retire, then prepare again.</li>
+  <li><b>After <code>retire(N)</code>, dispatch attempt N+1 or nothing.</b> Gym keeps no record that would refuse
+  an older attempt.</li>
+  <li><b>Name every continued episode in each commit scope</b> until its replacement is re-dispatched.</li>
+  <li><b>Retire a capture once it has been consumed or abandoned, and delete it once nothing can still write.</b>
+  Without these calls, capture files are never deleted.</li>
+  <li><b>Before its barrier, wait for replies to outstanding <code>/run</code> calls</b> whose episodes no
+  participant exported.</li>
+  <li><b>Retire only rows whose <code>/run</code> got no reply.</b> A reply, even a failure, means the environment
+  server already freed the episode's state.</li>
 </ul>
 
 
@@ -539,7 +706,7 @@ sandboxes concurrently within the commit deadline. Any implementation has to mee
 <div class="inv"><b>Only policy model servers pause in the first milestone.</b><p>Token-capture checkpointing first closes admission only on policy model-server instances backed by NeMo-RL generation workers. Stateless resources servers and verifiers retain no checkpoint state and do not need an admission API. Stateful-resources support later closes admission on those resources-server instances as well. Judge and simulator model-server instances remain open so accepted tools and verifiers can finish. Startup validation rejects environment traffic that targets a policy instance.</p></div>
 <div class="inv"><b>A model-server pause must cover every FastAPI worker process.</b><p>A pause request routed to one Uvicorn worker cannot close admission for the other workers that share the service port. The PR stack implements and tests a service-level coordinator protocol over a Unix-domain socket. Workers apply coordinator state and report acknowledgements plus local in-flight counts. The coordinator reports <code>paused</code> only after every expected worker has acknowledged the checkpoint ID and the summed count is zero. Production startup and control-URL routing are not wired yet, so a configured multi-worker server reports <code>unmanaged</code> and NeMo-RL must refuse checkpointing through it. Single-worker servers are the supported first integration.</p></div>
 <div class="inv"><b>Prepare parks episode processors before it closes their dependencies.</b><p><code>POST /ng-control/v1/episode-checkpoint/prepare</code> changes active episodes to <code>park_requested</code>. Each processor finishes its current protocol operation, records an <code>EpisodeBoundaryRecord</code>, and blocks on an in-memory event. The boundary identifies the next protocol operation and every still-open agent and resources session. NeMo-RL prepares those component sessions and closes policy-model admission only after the processor has stopped issuing new calls. Judge and simulator model instances remain open while an accepted operation finishes.</p></div>
-<div class="inv"><b>Resources mutations finish before state export.</b><p>The resources middleware serializes mutations for each rollout attempt with an <code>asyncio.Lock</code>. Resources prepare closes admission, acquires each live session's lock, and exports that session after any accepted mutation releases the lock. New mutations receive <code>409 resources_admission_closed</code>. The first integration does not propagate admission leases or expose separate resources-admission routes.</p></div>
+<div class="inv"><b>Resources mutations finish before state export.</b><p>The resources middleware serializes mutations for each rollout attempt with an <code>asyncio.Lock</code>. Resources prepare closes admission, acquires each live session's lock, and exports that session after any accepted mutation releases the lock. New mutations receive <code>409 admission_closed</code>. The first integration does not propagate admission leases or expose separate resources-admission routes.</p></div>
 <div class="inv"><b>The controller decides what happens to unfinished rollouts.</b><p>The Gym routes expose blockers and provide attempt-specific model abort, agent retirement, and resources retirement. Resources retirement is checkpoint-fenced and waits for that execution's mutation lock before it removes adapter state and the prepared snapshot. A future controller must decide whether all participant state for a straggler can be discarded. If an external effect cannot be rolled back or acknowledged, the controller must abort the global checkpoint rather than publish an incomplete cut.</p></div>
 
 <h3>Ordering</h3>
@@ -688,7 +855,7 @@ sandboxes concurrently within the commit deadline. Any implementation has to mee
 </svg>
 </figure>
 <p>The control fence is per server process and per checkpoint ID. It prevents a stale or concurrent controller from committing, restoring, or resuming the wrong transaction. Repeating the same successful operation returns its recorded result. Most failed operations return to their entry phase. Model restore is deliberately different: a failure leaves both the limiter and the control fence in <code>restore_failed_paused</code>, so status remains observable and the same restore can be retried or explicitly resumed without admitting traffic by accident.</p>
-<p>Admission is a separate state machine. The policy model server changes from <code>accepting</code> to <code>draining</code> when prepare closes its gate. A request is prepare-safe only after durable completed custody, a durable failure, a validated active-prefix receipt, a no-generation exit, or complete pre-cut response egress. Response lifetime remains separate: a response that has not started is fenced until checkpoint resolution, while a stream that already started drains completely instead of entering a prefix cut. Missing workers, duplicate worker IDs, swallowed cancellation, and incomplete receipts fail closed. New requests receive <code>409 checkpoint_parked</code>. Resume reopens admission and releases fenced response egress after commit or restore.</p>
+<p>Admission is a separate state machine. The policy model server changes from <code>accepting</code> to <code>draining</code> when prepare closes its gate. A request is prepare-safe only after durable completed custody, a durable failure, a validated active-prefix receipt, a no-generation exit, or complete pre-cut response egress. Response lifetime remains separate: a response that has not started is fenced until checkpoint resolution, while a stream that already started drains completely instead of entering a prefix cut. Missing workers, duplicate worker IDs, swallowed cancellation, and incomplete receipts fail closed. New requests receive <code>409 admission_closed</code>. Resume reopens admission and releases fenced response egress after commit or restore.</p>
 
 <div class="card"><h3>What the current Gym draft guarantees</h3>
 <p>The model, agent-session, resources, and episode-processor participants preserve separate parts of one attempt-N cut and install them for attempt N+1 while traffic remains paused. Their manifests are separated by participant instance inside one controller-supplied directory. Active generation receipts bind immutable worker, model-call, frozen-buffer, inventory, and backend-snapshot identities. The production guarantee depends on a controller that checks every manifest and the matching <code>TransferQueue</code> snapshot before publishing one global checkpoint.</p></div>
@@ -981,7 +1148,7 @@ StagedPrefix:
 <div class="tbl"><table>
 <tr><th>API / mechanism</th><th>Contract</th><th>Status</th></tr>
 <tr><td><code>GET /ng-control/v1/capabilities</code></td><td>component kind, admission states, checkpoint mode, schema version, concurrency contract, multi-process mode, active checkpoint ID, and current phase</td><td><span class="pill pr">PR #2940</span></td></tr>
-<tr><td><code>AdmissionLimiter</code></td><td>changes atomically between accepting, draining, and paused; rejects new policy requests with <code>409 checkpoint_parked</code>; tracks response lifetime separately from durable generation readiness; fences pre-cut response egress, cancellation, and stale attempts</td><td><span class="pill pr">PR #2940</span></td></tr>
+<tr><td><code>AdmissionLimiter</code></td><td>changes atomically between accepting, draining, and paused; rejects new policy requests with <code>409 admission_closed</code>; tracks response lifetime separately from durable generation readiness; fences pre-cut response egress, cancellation, and stale attempts</td><td><span class="pill pr">PR #2940</span></td></tr>
 <tr><td>control fencing</td><td>every mutating control route carries <code>checkpoint_id</code> and an absolute deadline; successful calls are idempotent by operation; stale and concurrent checkpoint IDs are rejected; bearer-authenticated routes remain reachable while data admission is paused</td><td><span class="pill pr">PR #2940</span></td></tr>
 <tr><td>multi-process aggregation</td><td>the coordinator protocol and real two-worker test exist; production startup does not yet launch or route the coordinator, so <code>num_workers &gt; 1</code> reports <code>unmanaged</code></td><td><span class="pill pr">protocol</span> <span class="pill new">launcher wiring</span></td></tr>
 <tr><td>checkpoint writer</td><td>writes payloads through temporary names, <code>fsync</code>, and rename, then publishes a digest-bearing manifest last; the prototype uses per-rollout files</td><td><span class="pill pr">PRs #2941, #2942, #2945</span></td></tr>
@@ -1050,7 +1217,7 @@ StagedPrefix:
 <tr><th>Mechanism</th><th>Contract</th><th>Status</th></tr>
 <tr><td>unconditional identity propagation</td><td>carries <code>rollout_id</code> and <code>_ng_attempt_index</code> on model and resources calls independent of observability flags; uses the <code>-aN</code> path only as a transport key</td><td><span class="pill pr">PR #2939</span></td></tr>
 <tr><td>plane header</td><td><code>x-ng-plane</code> identifies policy admission traffic; the first implementation does not define or propagate nested admission leases</td><td><span class="pill pr">PR #2940</span></td></tr>
-<tr><td><code>checkpoint_parked</code></td><td>the model admission middleware returns HTTP 409 to requests racing a closed gate; whitebox checkpoint ordering parks agents before model admission closes, so this is a safety rejection rather than normal loop control</td><td><span class="pill pr">PR #2940</span></td></tr>
+<tr><td><code>admission_closed</code></td><td>the model admission middleware returns HTTP 409 to requests racing a closed gate; whitebox checkpoint ordering parks agents before model admission closes, so this is a safety rejection rather than normal loop control</td><td><span class="pill pr">PR #2940</span></td></tr>
 <tr><td>one-shot restored parent relay</td><td>the first replacement-attempt policy request receives the attempt-N source capture key and verified parent model-call ID. The context consumes those headers once; subsequent policy requests resolve their parent in N+1.</td><td><span class="pill pr">PR #2941</span></td></tr>
 <tr><td>spinup validation</td><td>instance-role classification (policy vs auxiliary model instances); reject an environment-plane <code>ModelServerRef</code> targeting a policy instance when checkpointing is enabled; enumerate every instance; negotiate capabilities or fail setup</td><td><span class="pill new">new</span></td></tr>
 </table></div>
@@ -1273,7 +1440,7 @@ consistent cut without after-the-fact reconciliation.
     <tr><td>Control API</td><td>Per-kind routes, capability discovery, instance roles</td><td>One route set per server and a <code>status</code> probe; a model participates only with an explicit policy opt-in</td></tr>
     <tr><td>Storage</td><td>One file per rollout, with archive shards planned</td><td>One records file and one manifest per participant</td></tr>
     <tr><td>Servers without checkpoint support</td><td>Declared through capabilities; undeclared servers could be missed</td><td>Every server participates. Unsupported ones are restart-only and block until their rollouts are retired</td></tr>
-    <tr><td>Multi-worker servers</td><td>A worker-coordinator protocol, not yet wired into startup</td><td>Policy model servers run several uvicorn workers as one participant: a coordinator in the main process and a gate in each worker, over a Unix socket. Agents, resources servers, and environment servers keep one worker, because their sessions live in one process</td></tr>
+    <tr><td>Multi-worker servers</td><td>A worker-coordinator protocol, not yet wired into startup</td><td>Policy model servers run several uvicorn workers as one participant: a coordinator in the main process and, in each worker, an admission gate and a worker link, over a Unix socket. Every other server kind does the same, with session routing: a session's requests reach the worker that holds it, and the worker count may change between a checkpoint and a restore</td></tr>
     <tr><td>Controller loss</td><td>The actor's mutex and deadlines</td><td>Also a lease: each participant resumes on its own if the controller stops calling</td></tr>
   </tbody>
 </table>
@@ -1297,7 +1464,7 @@ rollouts grow in number and length:
     <tr><td>The controller sequenced every participant and parsed a different reply shape for each kind</td><td>Gym's coordination functions own the order; every participant has the same routes and replies</td></tr>
     <tr><td>One file per rollout</td><td>One records file per participant; restore writes are batched and kept off the request path</td></tr>
     <tr><td>Servers that declared nothing could be missed</td><td>Every server takes part; undeclared servers are restart-only</td></tr>
-    <tr><td>Multi-worker model servers needed a coordinator that was never wired into startup</td><td>A multi-worker policy server is one participant: a coordinator in its main process and a gate in each worker</td></tr>
+    <tr><td>Multi-worker model servers needed a coordinator that was never wired into startup</td><td>A multi-worker policy model server is one participant: a coordinator in its main process and, in each worker, an admission gate and a worker link</td></tr>
     <tr><td>Control calls shared connections with long-running rollout calls</td><td>Control calls use their own connection pool</td></tr>
   </tbody>
 </table>
@@ -1305,7 +1472,7 @@ rollouts grow in number and length:
 <p>
 A process-level test suite checkpoints real Gym servers mid-episode, kills them, restores, and checks the
 exact model calls that follow. It covers native and legacy episodes, stateful environments, token lineage,
-generation cuts, a second crash before a replacement starts, multi-worker policy servers, and a scale
+generation cuts, a second crash before a replacement starts, multi-worker policy model servers, and a scale
 scenario with thousands of concurrent rollouts.
 </p>
 
@@ -1329,13 +1496,59 @@ scenario with thousands of concurrent rollouts.
 
 <h3 id="changes-kept">What stays the same</h3>
 <ul>
-  <li>Identity: <code>_ng_rollout_id</code> and <code>_ng_attempt_index</code>, and the capture key <code>r</code> or <code>r-aN</code>. A request from a replaced attempt gets 409 <code>stale_attempt</code>.</li>
+  <li>Identity: <code>_ng_rollout_id</code> and <code>_ng_attempt_index</code>, and the capture key <code>r</code> or <code>r-aN</code>. v1 refused a replaced attempt's requests forever; v2 refuses them only while a retire stops the attempt, because afterwards nothing of it is running.</li>
   <li>Every control call carries a checkpoint ID and an absolute deadline; repeating a completed call returns the recorded result; a stale checkpoint ID cannot reopen traffic.</li>
   <li>Manifests are written last, and a committed participant directory never changes.</li>
   <li>Restore installs attempt N's state as attempt N+1, in fresh processes, and stays closed until an explicit resume.</li>
   <li>Durable token storage and global publication stay with the training framework. Gym stores token-free coordinates.</li>
   <li>Failure handling is fail-closed.</li>
 </ul>
+
+<h3 id="changes-names">Names</h3>
+<p>One name per concept, the same in code, status reports, PR descriptions and this page. Earlier names, from v1
+or from earlier drafts of v2, map as follows:</p>
+<div class="scroll">
+<table>
+  <thead><tr><th>Concept</th><th>Earlier name</th><th>Name now</th></tr></thead>
+  <tbody>
+    <tr><td>Removing an attempt from Gym</td><td>retire and fence; a lasting per-rollout minimum attempt</td>
+    <td><b>retire</b>: stop, then free. <code>RetiringAttempts</code> holds an attempt only while its retire is stopping
+    it, and the status report counts them as <code>retiring</code></td></tr>
+    <tr><td>Refusing work while admission is closed</td><td><code>checkpoint_parked</code> (policy model, agents,
+    environment servers), <code>resources_admission_closed</code> (resources servers)</td>
+    <td><code>admission_closed</code> on every server</td></tr>
+    <tr><td>The per-server object that runs the phase machine</td><td>controller, <code>ParticipantController</code></td>
+    <td><b>control plane</b>, <code>ParticipantControlPlane</code>. "Controller" means only whoever calls coordination:
+    NeMo RL, or rollout collection</td></tr>
+    <tr><td>Checkpoint IDs a resume has closed</td><td>retired checkpoint IDs</td><td><b>resumed</b> checkpoint IDs, of
+    which the last 64 are remembered</td></tr>
+    <tr><td>Restored state no replacement attempt has claimed</td><td>pending, unused, not yet re-dispatched</td>
+    <td><b>unclaimed</b>; <code>restored_pending</code> in code</td></tr>
+    <tr><td>What a commit does with unclaimed restored state its scope leaves out</td><td>release, drop</td>
+    <td><b>retire</b></td></tr>
+    <tr><td>What a participant does with an attempt's state once its work stopped</td><td>release, discard</td>
+    <td><b>free</b></td></tr>
+    <tr><td>The commit scope</td><td>the model commit scope: episodes the other participants exported</td>
+    <td><b>commit scope</b>: every episode the controller continues, for every participant</td></tr>
+    <tr><td>The marker that refuses a retired capture's late writes</td><td>tombstone (complete-record store), fence
+    (capture ledger)</td><td><b>fence</b> in both; <b>delete</b> removes the data and the fence</td></tr>
+    <tr><td>The attempt in generation-cut wire models</td><td><code>attempt_index</code></td><td><code>attempt</code>, as in
+    <code>EpisodeId</code></td></tr>
+    <tr><td>The cut prefix a re-issued call continues</td><td><code>generation_token_count</code>, <code>digest</code></td>
+    <td><code>prefix_token_count</code>, <code>prefix_digest</code>, as in the worker's acknowledgement</td></tr>
+    <tr><td>Worker identity</td><td>worker ID, for two different values</td><td><b>owner</b>: the worker a session
+    belongs to; <b>routing ID</b>: a worker's own ID in cookies and MCP session tokens; <b>worker index</b>: the
+    coordinator's number for a registered worker</td></tr>
+    <tr><td>Per-worker checkpoint pieces</td><td>gate, link</td><td><b>worker link</b> for control; <b>admission gate</b>
+    only for the policy model's admission</td></tr>
+    <tr><td>Session routing tables after a restore</td><td>a table, a second table</td><td><b>alias table</b> (old
+    owner to new worker) and <b>placement table</b> (session ID to worker, for sessions whose cookies name no
+    owner)</td></tr>
+    <tr><td>The token a cookieless harness sends with tool calls</td><td>signed token, tool-call token, MCP
+    token</td><td><b>MCP session token</b></td></tr>
+  </tbody>
+</table>
+</div>
 
 <h3 id="changes-milestones">v1 milestones in v2</h3>
 <div class="scroll">
@@ -1373,10 +1586,10 @@ scenario with thousands of concurrent rollouts.
 The 23 open review threads on #2939–#2946 fall into these groups:
 </p>
 <ul>
-  <li><b>Races between control operations</b> (resume during prepare, delayed messages, wakeups crossing checkpoints): one lock serializes every transition, prepare re-checks its checkpoint after waiting, and retired checkpoint IDs are fenced.</li>
+  <li><b>Races between control operations</b> (resume during prepare, delayed messages, wakeups crossing checkpoints): one lock serializes every transition, prepare re-checks its checkpoint after waiting, and resumed checkpoint IDs are remembered and refused.</li>
   <li><b>Parent and identity propagation</b> (agent middleware, the parent relay, headers versus URL prefixes): only the URL prefix remains, and the parent relay is gone.</li>
   <li><b>Unfinished model calls saved too early</b>: undelivered calls and their ledger rows are always left out.</li>
-  <li><b>Restore with live state, and stale attempts</b>: every participant refuses restore with live state, and fencing is a per-rollout minimum attempt.</li>
+  <li><b>Restore with live state, and stale attempts</b>: every participant refuses restore with live state. Retire stops an attempt's work and frees its state before it replies, so no participant keeps a lasting fence.</li>
   <li><b>Restored state that no replacement has claimed yet, lost by a second checkpoint</b>: this concern still applied to v2 and is being fixed (gap 1 below).</li>
   <li><b>Terminal sessions not reported to the checkpoint layer</b>: resources servers get explicit session-start and session-end hooks for protocols that create sessions outside <code>/seed_session</code>.</li>
 </ul>
@@ -1388,7 +1601,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
   <tbody>
     <tr><td>Gym #3349, turn-level recovery</td><td>Receipts, acknowledgements, parent relay, revisions, and archive formats are superseded. Its stateless and replay declarations for math, code, judge, and GenRM servers, and its re-checkpoint-before-restart test, carry forward</td></tr>
     <tr><td>Gym #3412, prefix recovery</td><td>The widened cut contract carried over. Worker staging helpers and restarting constrained-decoding requests carry forward</td></tr>
-    <tr><td>Gym #3563, multi-worker policy server</td><td>Supported with the same shape (a main-process coordinator, a Unix socket, restored cuts with a single owner), without proof or evidence files: workers report in memory and the coordinator is the one controller</td></tr>
+    <tr><td>Gym #3563, multi-worker policy server</td><td>Supported with the same shape (a main-process coordinator, a Unix socket, restored cuts with a single owner), without proof or evidence files: workers report in memory and the coordinator holds the one control plane</td></tr>
     <tr><td>Gym #3755, scale optimizations</td><td>Acknowledgement batching is moot; concurrent commits and blocker caps are built in. A reserved connection pool for control traffic carries forward</td></tr>
     <tr><td>Gym #3756, union of sharded cuts</td><td>Not needed while each episode stays on its shard: each shard commits and restores its own episodes</td></tr>
     <tr><td>Gym #3548 and #3634, environment adapters</td><td>Port directly onto the new resources and agent hooks</td></tr>
@@ -1399,14 +1612,22 @@ The 23 open review threads on #2939–#2946 fall into these groups:
 
 <h3 id="changes-gaps">Open gaps</h3>
 <ol>
-  <li><s>Restored state that no replacement has claimed must survive a second checkpoint.</s> <i>Fixed: every participant exports it again, and a double-crash scenario covers it.</i></li>
+  <li><s>Unclaimed restored state must survive a second checkpoint.</s> <i>Fixed: every participant exports it again, and a double-crash scenario covers it.</i></li>
   <li><s>The worker-side staging helpers that generation cuts need are not in Gym.</s> <i>Ported, and the fake worker in the process-level suite now continues cuts through them.</i></li>
   <li>Most resources servers have not declared a checkpoint mode, so they are restart-only. <i>The five most used training verifiers (code generation, competitive coding, LLM-judge equivalence, math with judge, and GenRM comparison) now declare themselves stateless with replayable verification; others follow as they are audited.</i></li>
   <li><s>A replay-mode seed or verification that reaches a closed resources server fails instead of continuing.</s> <i>Fixed: replay-safe requests are admitted while closed and are not part of that checkpoint.</i></li>
-  <li>Control traffic shares a connection pool with long-running <code>/run</code> calls.</li>
+  <li><s>Control traffic shares a connection pool with long-running <code>/run</code> calls.</s> <i>Fixed: control calls use their own pool.</i></li>
   <li><s>Environment servers and restart-only agents do not refuse more than one worker.</s> <i>Fixed.</i></li>
   <li>Constrained-decoding requests should restart instead of continuing a cut prefix.</li>
   <li>The framework needs a public list of the token-store keys a checkpoint retains.</li>
+  <li><s>Agents, resources servers, and environment servers need one worker.</s> <i>Supported, with session routing; the worker count may change between checkpoint and restore.</i></li>
+  <li><s>Lasting tables of retired attempts, retired sessions and checkpoint IDs.</s> <i>Fixed: retire stops, then frees, and only the most recent checkpoint IDs are kept.</i></li>
+  <li><s>Restored state the controller never re-dispatches is kept forever.</s> <i>Fixed: a commit retires restored state outside its scope.</i> An agent session orphaned when only the environment server crashed is still not freed.</li>
+  <li>A duplicate <code>/run</code> for a running attempt can end the live episode. Idempotent <code>/run</code> is the fix.</li>
+  <li>A harness that Gym does not manage can keep calling after its attempt is retired. Rejecting it needs a small, bounded list.</li>
+  <li>Nothing tells a server when a checkpoint is pruned, so nothing frees the sandbox snapshots that exported state names. The controller should pass the retained checkpoint IDs.</li>
+  <li>Host hygiene after a crash: coordinator socket files, session socket directories and temporary write files left by a killed process should be removed at the next start.</li>
+  <li>Some inference backends serve the generation-cut route on a different root than their OpenAI API. They need a per-backend control URL, which must fail closed, not fall back, when a backend has none or the endpoint changes.</li>
   <li><s>Multi-worker policy servers.</s> <i>Supported.</i> Sharded policy servers across Gym deployments, Megatron inline prefixes, and opaque runtimes remain future work.</li>
 </ol>
 
@@ -1436,23 +1657,23 @@ The 23 open review threads on #2939–#2946 fall into these groups:
   // ---------- components ----------
   const COMPONENTS = {
     RL: { name: "Training framework", sub: "controller + Gym actor", group: "rl",
-      owns: "When to checkpoint, the token store (TransferQueue), replay and dataloader state, global publication, and every rollout's fate: continue, restart from input, or drop.",
+      owns: "When to checkpoint, the token store (TransferQueue), replay and dataloader state, global publication, and every rollout's fate: continue, restart from input, or retire. It pauses dispatch, its trainer and its trajectory assembler from prepare to resume, and retires and deletes capture data it has consumed.",
       stores: "Its own checkpoint, plus the published marker that names every Gym manifest and the token-store snapshot they reference.",
       never: "Sequence Gym participants or read any environment's or agent's private state." },
     ORC: { name: "Gym checkpoint coordination", sub: "prepare · commit · restore · resume", group: "gym",
-      owns: "The order in which Gym participants are prepared, committed, restored, and resumed, the model commit scope, fanning out retires, and all-or-nothing restore. The training framework calls it.",
+      owns: "The order in which Gym participants are prepared, committed, restored, resumed, and retired (callers before callees), the commit scope, and all-or-nothing restore. The training framework calls it.",
       stores: "Nothing. It is a set of stateless functions over the participants' control routes.",
       never: "Decide a rollout's fate or touch the token store." },
     ENV: { name: "Environment server", sub: "episode protocol", group: "gym",
-      owns: "One episode's protocol: seed resources, seed agent, invoke the agent, close, verify, clean up. It records a boundary after every completed step and decides, per step, whether a checkpoint waits for an in-flight step or replays it later.",
+      owns: "One episode's protocol: seed resources, seed agent, invoke the agent, close, verify, clean up. It records a boundary after every completed step and decides, per step, whether a checkpoint waits for an in-flight step or replays it later. It closes every session it opened before it replies, on every path, and a retire waits for that cleanup instead of interrupting it.",
       stores: "For each episode: its latest boundary (the next step and the results that step needs), the open resources and agent session IDs and cookies it would reuse, and the cleanup it still owes.",
       never: "The agent's turn loop or environment state. Verification may run inside the environment server or in a resources server. Legacy relays are transparent and store nothing." },
     AGT: { name: "Agent server", sub: "sessions · turn loop", group: "gym",
-      owns: "Its sessions and the turn loop inside one activation. It records a boundary before each model call and after each tool round, and parks there when a checkpoint asks.",
+      owns: "Its sessions and the turn loop inside one activation. It records a boundary before each model call and after each tool round, and parks there when a checkpoint asks. Closing or retiring a session stops its running activation and waits for it.",
       stores: "Per session: the agent's own session data and the latest boundary. For a legacy /run, the episode is keyed by its logical rollout.",
       never: "Where the episode is in its protocol (native path) or environment state." },
     POL: { name: "Policy model server", sub: "admission · token-free ledger", group: "gym",
-      owns: "Admission of policy generations, holding responses the agent has not received, the token-free capture ledger, and asking workers to cut in-flight generations. With several uvicorn workers it is still one participant: a coordinator in the main process owns the controller, fences, restored cuts, and ledger export, and each worker runs the admission gate for its own calls and forwards control calls to the coordinator.",
+      owns: "Admission of policy generations, holding responses the agent has not received, the token-free capture ledger, and asking workers to cut in-flight generations. With several uvicorn workers it is still one participant: a coordinator in the main process owns the control plane, restored cuts, and ledger export, and each worker runs the admission gate for its own calls and forwards control calls to the coordinator. It refuses capture retire and delete while a checkpoint is open, and refuses restore once it has served calls.",
       stores: "Ledger rows of each continued episode up to the cut, and the generation cut of an undelivered call.",
       never: "Token arrays. Judge and simulator model servers do not participate and keep serving." },
     WRK: { name: "Inference worker", sub: "vLLM worker", group: "rl",
@@ -1464,7 +1685,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
       stores: "Snapshotted by the training framework at its own barrier, after Gym commits.",
       never: "Decide which rows are live: Gym's restored ledger names the rows a continuation uses; others are orphaned and masked." },
     RES: { name: "Resources server", sub: "tools · environment state", group: "gym",
-      owns: "Environment state per session, keyed by the session cookie. It declares a checkpoint mode (stateless, exported, or restart-only) and whether its verification may be replayed.",
+      owns: "Environment state per session, keyed by the session cookie or, for cookieless harnesses, the MCP session token. It declares a checkpoint mode (stateless, exported, or restart-only) and whether its verification may be replayed. Tool calls and /close_session that arrive during a checkpoint wait for resume instead of being refused; retire waits for the session's in-flight requests to drain.",
       stores: "Exported mode: typed state per live session. Stateless: nothing. Restart-only: nothing, and a live session blocks prepare until retired.",
       never: "Where the agent or episode is. Accepted tool calls finish before its state is exported." },
   };
@@ -1526,7 +1747,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
   const MACHINES = {
     phase: {
       title: "Participant control phase",
-      text: "Every participant (environment, agent, policy model, resources) runs this machine. Transitions are serialized by one lock; prepare waits for readiness outside the lock so retire and resume can interrupt it. A prepare that misses its deadline stays closed and reports blockers; a prepare that raises reopens admission. Resume is also the abort path, and it retires the checkpoint ID so a stale controller cannot reopen anything. If the controller stops renewing its lease, the participant resumes on its own.",
+      text: "Every participant (environment, agent, policy model, resources) runs this machine. Transitions are serialized by one lock; prepare waits for readiness outside the lock so resume can interrupt it. Retire is accepted only in idle and restored: it stops the named attempts' work and frees their state before it replies. A prepare that misses its deadline stays closed and reports blockers; a prepare that raises reopens admission. Resume is also the abort path, and it retires the checkpoint ID so a stale controller cannot reopen anything. If the controller stops renewing its lease, the participant resumes on its own.",
       nodes: { idle: [20, 150], preparing: [250, 70], prepared: [490, 70], committed: [770, 70], restored: [390, 235] },
       edges: [
         ["idle", "preparing", "prepare"], ["preparing", "prepared", "ready"], ["prepared", "committed", "commit"],
@@ -1542,7 +1763,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
       edges: [
         ["idle", "running", "activation"], ["running", "park_requested", "prepare"], ["park_requested", "at_boundary", "next boundary"],
         ["running", "at_boundary", "awaiting held call"], ["at_boundary", "running", "resume"], ["running", "idle", "done"],
-        ["running", "retired", "retire"],
+        ["running", "retired", "close · retire: stop, then free"],
       ],
       bad: ["running->retired"],
     },
@@ -1570,10 +1791,10 @@ The 23 open review threads on #2939–#2946 fall into these groups:
     },
     resources: {
       title: "Resources session",
-      text: "A resources session starts when /seed_session succeeds (Gymnasium: /reset) and ends at /close_session, /verify, or a terminal step. The server's checkpoint mode decides what a live session means for a checkpoint.",
-      nodes: { unbound: [20, 130], live: [300, 130], ended: [650, 130], fenced: [300, 245] },
-      edges: [["unbound", "live", "seed"], ["live", "ended", "close · verify · end"], ["live", "fenced", "retire"]],
-      bad: ["live->fenced"],
+      text: "A resources session starts when /seed_session succeeds (Gymnasium: /reset) and ends at /close_session, /verify, or a terminal step. The server's checkpoint mode decides what a live session means for a checkpoint. A close during a checkpoint waits for resume. Retire waits for the session's in-flight requests, then frees it; afterwards nothing of the session remains.",
+      nodes: { unbound: [20, 130], live: [300, 130], ended: [650, 130], retired: [300, 245] },
+      edges: [["unbound", "live", "seed"], ["live", "ended", "close · verify · end"], ["live", "retired", "retire: drain, then free"]],
+      bad: ["live->retired"],
     },
   };
 
@@ -1730,7 +1951,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
           [m("ORC", "ENV", "POST …/checkpoint/prepare", "control"), m("ENV", "ORC", "ready", "reply")],
           { ENV: "prepared · r in agent activation" }, { phase: "prepared", episode: "agent_activation" }),
         S("2. The policy model closes admission and holds c2",
-          "New policy calls are refused with 409 <code>checkpoint_parked</code>. Call c2 has not started responding, so it is undelivered: it keeps decoding, but its response will be held until resume and its ledger row will be left out of the cut. Prepare does not wait for it to finish.",
+          "New policy calls are refused with 409 <code>admission_closed</code>. Call c2 has not started responding, so it is undelivered: it keeps decoding, but its response will be held until resume and its ledger row will be left out of the cut. Prepare does not wait for it to finish.",
           [m("ORC", "POL", "POST …/checkpoint/prepare", "control"), m("POL", "POL", "c2 undelivered → held", "local")],
           { POL: "closed · c2 held" }, { phase: "preparing", call: "held" }),
         S("2b. Generation cut: stage c2's prefix",
@@ -1746,7 +1967,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
           [m("ORC", "RES", "POST …/checkpoint/prepare", "control"), m("RES", "ORC", "ready (0 in flight)", "reply")],
           { RES: "prepared" }, { phase: "prepared" }),
         S("Commit: every participant writes its records",
-          "Each participant re-checks readiness, writes one records file, then its manifest. The model commit is scoped to the episodes the others exported, and it excludes undelivered c2 but keeps its cut.",
+          "Each participant re-checks readiness, writes one records file, then its manifest. Every commit is scoped to the episodes the framework continues. The policy model's excludes undelivered c2 but keeps its cut.",
           [m("ORC", "ENV", "commit", "control"), m("ORC", "AGT", "commit", "control"), m("ORC", "RES", "commit", "control"), m("ORC", "POL", "commit {episode_ids: [r]}", "control"), m("ORC", "RL", "manifests", "reply")],
           { ENV: "committed", AGT: "committed", RES: "committed", POL: "committed · rows c1 + cut of c2" }, { phase: "committed" }),
         S("The framework saves tokens and publishes",
@@ -1755,7 +1976,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
           { RL: "checkpoint k published", TQ: "snapshot k" }),
         S("Resume in reverse dependency order",
           "Resources reopen, then the policy model (c2's held response is delivered), then agents, then environment servers. The episode continues exactly as if nothing happened. The framework reopens dispatch.",
-          [m("RL", "ORC", "resume(k)", "control"), m("ORC", "RES", "resume", "control"), m("ORC", "POL", "resume", "control"), m("POL", "AGT", "c2 response released", "reply"), m("ORC", "AGT", "resume", "control"), m("ORC", "ENV", "resume", "control")],
+          [m("RL", "ORC", "resume(k)", "control"), m("ORC", "RES", "resume", "control"), m("ORC", "POL", "resume", "control"), m("POL", "AGT", "c2 response delivered", "reply"), m("ORC", "AGT", "resume", "control"), m("ORC", "ENV", "resume", "control")],
           { RL: "dispatching", POL: "accepting", AGT: "session running", ENV: "episode r: in agent activation", RES: "accepting" }, { phase: "idle", call: "delivered", session: "running" }),
       ],
     },
@@ -1767,7 +1988,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
           [m("RL", "RL", "restore own state + token store", "local")],
           { ORC: "—", ENV: "gone", AGT: "gone", POL: "gone", RES: "gone", RL: "restoring k" }, { phase: "idle" }),
         S("Fresh Gym processes are restored, all paused",
-          "The framework starts fresh Gym servers and calls restore with the episodes it will continue. Each participant validates every file and digest before installing anything, installs state under the next attempt (r·a1), and fences attempt 0. All stay closed.",
+          "The framework starts fresh Gym servers and calls restore with the episodes it will continue. Each participant validates every file and digest before installing anything, installs state under the next attempt (r·a1), and stays closed. Nothing of attempt 0 is running: these are fresh processes. The policy model deletes capture files the dead execution left for attempt 1 or later, so the same checkpoint can be restored twice, and retires the source attempts' ledgers.",
           [m("RL", "ORC", "restore(k, episode_ids: [r])", "control"), m("ORC", "POL", "restore", "control"), m("ORC", "RES", "restore", "control"), m("ORC", "AGT", "restore", "control"), m("ORC", "ENV", "restore", "control")],
           { POL: "restored · ledger r-a1 = c1 · cut of c2", RES: "restored · session state", AGT: "restored · session at B2 (r·a1)", ENV: "restored · record for r·a1" }, { phase: "restored" }),
         S("If any restore fails, nothing continues",
@@ -1775,7 +1996,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
           [m("ORC", "RL", "restored (or: failed → retire replacements, resume all)", "reply")],
           {}, {}),
         S("Resume, then re-dispatch attempt 1",
-          "After resume, the framework re-dispatches episode r as attempt 1. The environment server finds the restored record, skips seeding, and reuses the recorded sessions. A delayed request from attempt 0 would get 409 <code>stale_attempt</code>.",
+          "After resume, the framework re-dispatches episode r as attempt 1. The environment server finds the restored record, skips seeding, and reuses the recorded sessions. The commit scope of every later checkpoint names r·a1, so its restored state is kept until it is claimed; restored episodes the framework stops naming are retired.",
           [m("RL", "ORC", "resume(k)", "control"), m("RL", "ENV", "POST /run {episode_id: r·a1}"), m("ENV", "ENV", "restored record: reuse sessions", "local")],
           { ENV: "episode r·a1: continuing from its boundary", RL: "episode r·a1 in flight" }, { phase: "idle", episode: "restored" }),
         S("The agent resumes at boundary B2 and re-issues c2",
@@ -1849,8 +2070,8 @@ The 23 open review threads on #2939–#2946 fall into these groups:
           [m("RL", "ENV", "POST /run {episode_id: r·a1}"), m("ENV", "RES", "POST /close_session"), m("ENV", "RL", "recorded result", "reply")],
           { ENV: "episode r·a1: done", RL: "result received" }, { episode: "done", phase: "idle" }),
         S("If verification outlasts the deadline",
-          "Prepare returns with blocker r. The framework either aborts the checkpoint or retires r, which then restarts from input. Declaring a verifier replayable is how an environment avoids this loss.",
-          [m("ENV", "ORC", "not ready: blockers [r]", "problem"), m("RL", "ORC", "retire [r·a0] or abort", "control")],
+          "Prepare returns with blocker r. The framework aborts the checkpoint with resume, and either lets r finish or retires it and prepares again; a retired r restarts from input. Declaring a verifier replayable is how an environment avoids this loss.",
+          [m("ENV", "ORC", "not ready: blockers [r]", "problem"), m("RL", "ORC", "resume (abort), then retire [r·a0]", "control")],
           { ENV: "⚠ preparing · blocker r" }, { phase: "preparing", episode: "wait_step" }),
       ],
     },
@@ -1865,16 +2086,16 @@ The 23 open review threads on #2939–#2946 fall into these groups:
           "Prepare returns with the phase still <i>preparing</i> and the blocker named. Admission stays closed, so nothing new starts while the framework decides.",
           [m("ORC", "AGT", "prepare", "control"), m("AGT", "ORC", "not ready: blockers [s]", "problem")],
           { AGT: "⚠ preparing · blocker s" }, { phase: "preparing", session: "park_requested" }),
-        S("The framework chooses to retire s",
-          "Only the framework decides a rollout's fate. It asks Gym to retire attempt s·a0 everywhere: the environment server cancels the episode, the agent cancels the activation, the model cancels its calls, and the resources server drops or fences the session. Attempt s·a0 is fenced in every participant.",
-          [m("RL", "ORC", "retire [s·a0]", "control"), m("ORC", "ENV", "retire", "problem"), m("ORC", "AGT", "retire", "problem"), m("ORC", "POL", "retire", "problem"), m("ORC", "RES", "retire", "problem")],
-          { ENV: "s cancelled", AGT: "s retired", RES: "s fenced" }, { session: "retired", resources: "fenced" }),
+        S("The framework aborts, then retires s",
+          "Only the framework decides a rollout's fate. Retire is refused while a checkpoint is open, because stopping an episode waits for its cleanup, whose calls wait for resume. So the framework resumes first, which aborts this checkpoint, then retires s·a0. Coordination retires callers before callees: the environment server stops the episode and waits for its cleanup to close the sessions, then the agent stops the activation, then the model and resources servers stop the attempt's calls and drain its requests. Each replies only after the attempt's work has stopped and its state is freed.",
+          [m("RL", "ORC", "resume (abort), then retire [s·a0]", "control"), m("ORC", "ENV", "retire", "problem"), m("ORC", "AGT", "retire", "problem"), m("ORC", "POL", "retire", "problem"), m("ORC", "RES", "retire", "problem")],
+          { ENV: "s stopped, sessions closed", AGT: "s stopped and freed", POL: "s calls stopped, ledgers retired", RES: "s drained and freed" }, { phase: "idle", session: "retired", resources: "retired" }),
         S("Prepare again succeeds; s restarts later",
-          "With the blocker gone, prepare becomes ready and the checkpoint proceeds without s. The framework later re-dispatches s from its input as a fresh attempt; no state from s·a0 is used.",
-          [m("ORC", "AGT", "prepare", "control"), m("AGT", "ORC", "ready", "reply")],
+          "The framework prepares again; with s gone, prepare becomes ready and the checkpoint proceeds without it. The framework later re-dispatches s from its input as attempt 1. Nothing of s·a0 remains in Gym, so no participant keeps a record to refuse it.",
+          [m("RL", "ORC", "prepare(ckpt k+1)", "control"), m("ORC", "AGT", "prepare", "control"), m("AGT", "ORC", "ready", "reply")],
           { AGT: "prepared" }, { phase: "prepared" }),
         S("If the framework disappears instead",
-          "Every control call renews a lease. If the framework stops calling before commit or resume, each participant resumes on its own when the lease expires, which is the same as an abort. Held responses are released and parked work continues.",
+          "Every control call renews a lease. If the framework stops calling before commit or resume, each participant resumes on its own when the lease expires, which is the same as an abort. Held responses are delivered and parked work continues.",
           [m("POL", "POL", "lease expired → resume", "local"), m("AGT", "AGT", "lease expired → resume", "local")],
           { POL: "accepting (lease)", AGT: "accepting (lease)" }, { phase: "idle" }),
       ],
@@ -2019,7 +2240,9 @@ The 23 open review threads on #2939–#2946 fall into these groups:
 
   // ---------- failures ----------
   const FAILURES = [
-    ["A participant misses the prepare deadline", "Prepare returns its blockers and stays closed; nothing new starts.", "The framework retires the blocking attempts (they restart from input) or aborts with resume."],
+    ["A participant misses the prepare deadline", "Prepare returns its blockers and stays closed; nothing new starts.", "The framework aborts with resume, retires the blocking attempts (they restart from input), and prepares again."],
+    ["Retire arrives while a checkpoint is open", "Refused: stopping an episode waits for its final cleanup, and that cleanup's calls wait for resume, so the retire would deadlock.", "Resume first, then retire."],
+    ["Retire reaches an episode that is already in its final cleanup", "The cleanup is not interrupted; retire waits for it, so the agent and resources sessions are still closed.", "—"],
     ["Prepare raises (for example, a hook fails)", "The participant reopens admission and returns to idle, so phase and admission never disagree.", "The framework retries or aborts."],
     ["A participant became unready after prepare (out-of-order controller)", "Commit re-checks readiness and refuses; no manifest is written.", "Abort; Gym's checkpoint coordination owns the order so this is a backstop."],
     ["Commit is retried after a lost reply", "The existing manifest is returned unchanged; a different commit into the same directory is refused.", "—"],
@@ -2027,7 +2250,15 @@ The 23 open review threads on #2939–#2946 fall into these groups:
     ["Restore finds a missing or corrupt file", "Digest and schema checks fail before anything is installed.", "Coordination retires the replacement attempts everywhere and resumes; the framework restarts those rollouts from input as later attempts."],
     ["Agent work arrives without a rollout ID while checkpointing is on", "400 <code>rollout_id_required</code>: a checkpoint could neither record nor retire it.", "Send <code>_ng_rollout_id</code> or the rollout path prefix on every call."],
     ["A delayed prepare arrives for a checkpoint that was already aborted", "A resume that reached a participant the prepare never touched fenced that checkpoint ID, so the late prepare gets <code>stale_checkpoint</code>.", "—"],
-    ["A request from a replaced attempt arrives", "409 <code>stale_attempt</code> from every participant; only the lowest live attempt per rollout is kept.", "Route all work through the new attempt."],
+    ["A request arrives for an attempt that is being retired", "409 <code>stale_attempt</code> while the retire is stopping it. Once retire returns, nothing Gym runs can send one, and the attempt is forgotten.", "Route all work through the next attempt."],
+    ["A late request names a session that retire or close already freed", "The server's own unknown-session error. No participant keeps a table of retired attempts or sessions.", "—"],
+    ["A duplicate <code>/run</code> arrives for an attempt that is still running", "Not yet handled: the duplicate must not end the live episode. Idempotent <code>/run</code> is the fix.", "—"],
+    ["<code>/close_session</code> or a tool call arrives while a checkpoint is open", "It waits for resume instead of being refused. A refusal would leak the session, or show an error to the model through a third-party harness.", "—"],
+    ["The framework never re-dispatches a restored episode", "The next commit whose scope leaves it out retires its restored state in every participant.", "Name every episode it will continue in each commit scope."],
+    ["The same checkpoint is restored twice", "Restore deletes capture files the dead execution wrote for the target attempt and later ones. A policy model server that has served calls refuses restore: restore needs fresh processes.", "Start fresh servers and restore again."],
+    ["Capture retire or delete arrives while a checkpoint is open", "409 from the policy model server: a commit may still read any live episode's ledger.", "Retry after resume."],
+    ["A session's owning worker is gone", "410, instead of running against empty state.", "The rollout fails like any lost session and restarts from input."],
+    ["The worker count changed between checkpoint and restore", "Restored sessions are spread over the live workers, and every worker routes old owner IDs to their new worker.", "—"],
     ["The worker cannot cut a generation", "The call is treated as undelivered without a prefix; after restore it is regenerated.", "Nothing; correctness never depends on a cut."],
     ["A slow step (for example, verification or seeding) is in flight", "Replay mode: the checkpoint does not wait; the result is held and the step is re-run only after a crash. Wait mode: prepare waits, and the step's result is recorded at the boundary after it.", "Past the deadline in wait mode, the framework retires the rollout or aborts."],
     ["A response was already streaming when admission closed", "It must finish sending; prepare waits for it.", "—"],
