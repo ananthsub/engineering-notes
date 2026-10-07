@@ -204,7 +204,7 @@ machine is doing.
 <nav class="toc" aria-label="Contents">
   <ol>
     <li><a href="#problem">The problem</a>: <a href="#problem-why">why</a>, <a href="#problem-state">which state</a>, <a href="#problem-requirements">requirements</a>, <a href="#problem-rl">NeMo RL</a></li>
-    <li><a href="#components">The v2 design</a>: <a href="#components">components</a>, <a href="#player">lifecycle</a>, <a href="#modes">wait or replay</a>, <a href="#machines">state machines</a>, <a href="#records">stored state</a>, <a href="#failures">failures</a>, <a href="#apis">control API</a>, <a href="#sandboxes">sandboxes</a>, <a href="#retire">retire</a>, <a href="#lifecycle">end of life</a>, <a href="#workers">several workers</a>, <a href="#controller">controller obligations</a></li>
+    <li><a href="#components">The v2 design</a>: <a href="#components">components</a>, <a href="#player">lifecycle</a>, <a href="#modes">wait or replay</a>, <a href="#machines">state machines</a>, <a href="#records">stored state</a>, <a href="#failures">failures</a>, <a href="#apis">control API</a>, <a href="#sandboxes">sandboxes</a>, <a href="#retire">retire</a>, <a href="#lifecycle">end of life</a>, <a href="#workers">several workers</a>, <a href="#controller">controller obligations</a>, <a href="#testing">how it is tested</a></li>
     <li><a href="#v1">v1, as proposed</a></li>
     <li><a href="#changes">From v1 to v2</a>: <a href="#changes-glance">at a glance</a>, <a href="#changes-scale">scalability and ergonomics</a>, <a href="#changes-removed">what v2 removes</a>, <a href="#changes-names">names</a>, <a href="#changes-milestones">milestones</a>, <a href="#changes-gaps">open gaps</a></li>
   </ol>
@@ -382,10 +382,29 @@ highlights its current state with a thick solid border.
 <h2 id="records">5. What a checkpoint stores</h2>
 <p>
 Each participant writes one records file and then a manifest carrying the file's digest, under
-<code>&lt;checkpoint_dir&gt;/gym/&lt;kind&gt;/&lt;server&gt;/</code>. A directory with a manifest never
-changes. The training framework saves its token store next to it and publishes the whole
-checkpoint last.
+<code>&lt;checkpoint_dir&gt;/gym/&lt;kind&gt;/&lt;server&gt;/</code>. The training framework saves its token store
+next to it and publishes the whole checkpoint last.
 </p>
+<ul>
+  <li><b>A directory with a manifest never changes.</b> The records file is named after its digest
+  (<code>records-&lt;sha256&gt;.jsonl</code>), so it never changes once named, and the manifest is only ever created,
+  never replaced. Of two writers racing on one directory, exactly one publishes, so a records file and a manifest
+  can never come from different writes.</li>
+  <li><b>One export per checkpoint.</b> A participant exports its state once per checkpoint and keeps that export
+  until resume. The writer runs in a thread that a deadline cannot stop, so a commit that runs out of time leaves
+  it running: a retried commit awaits the same write, and one retried after storing failed stores the same records
+  again. A checkpoint therefore never mixes one participant's first cut with another's later one.</li>
+  <li><b>Resume stops an unfinished write.</b> The writer checks before each record, and its last check, the rename
+  of its records file and the creation of the manifest run under one lock that resume takes. Once resume has
+  returned, no manifest appears for that checkpoint.</li>
+  <li><b>What a record may hold.</b> Opaque server state is accepted only if JSON carries it back unchanged: string
+  keys, and integers beyond 64 bits are fine. A value the writer cannot write, such as a <code>datetime</code>,
+  fails the commit with an error naming the episode.</li>
+  <li><b>Typed errors.</b> A missing or corrupt manifest or records file, a record that fails validation, or a
+  directory that cannot hold state is an <code>invalid_checkpoint_state</code> error naming what is wrong, never
+  a server error. Restore reads, verifies and validates in one streaming pass in a thread, keeping only the
+  records in its scope.</li>
+</ul>
 <div class="scroll">
 <table>
   <thead><tr><th>Participant</th><th>One record per</th><th>Record contents</th><th>Never stored</th></tr></thead>
@@ -393,7 +412,7 @@ checkpoint last.
     <tr><td>Environment server</td><td>episode at a step boundary</td><td>episode ID, task digest, the next step and the results it needs (for example, the final agent response and observations before verification, or the verification result after it), and open session handles (resources and agent session IDs and cookies)</td><td>anything the agent or resources server owns</td></tr>
     <tr><td>Agent server</td><td>agent session</td><td>episode ID, agent-owned session data (tool access, cookies), and the latest turn-loop boundary</td><td>the episode's protocol position, environment state, token arrays</td></tr>
     <tr><td>Policy model server</td><td>continued episode</td><td>token-free capture-ledger rows up to the checkpoint, minus undelivered calls, plus the generation cut of an undelivered call</td><td>token IDs, logprobs, masks (the token store owns these)</td></tr>
-    <tr><td>Resources server</td><td>live session (exported mode only)</td><td>episode ID and the environment's typed session state</td><td>sessions of stateless or restart-only servers</td></tr>
+    <tr><td>Resources server</td><td>live session (exported and stateless modes)</td><td>episode ID, the worker its cookie names, and, in exported mode, the environment's typed session state; a stateless session is recorded without state, so a restore keeps routing its cookie and frees it like any other session</td><td>sessions of restart-only servers</td></tr>
     <tr><td>Training framework</td><td>—</td><td>token store snapshot, replay and dataloader state, and the published marker naming every Gym manifest</td><td>—</td></tr>
   </tbody>
 </table>
@@ -420,9 +439,9 @@ in the required order; the training framework calls the coordination.
     <tr><td><code>POST /ng-control/v1/checkpoint/prepare</code></td><td>idle, preparing</td><td>close admission, then wait until ready or the deadline; report blockers</td></tr>
     <tr><td><code>POST …/retire</code></td><td>idle, restored</td><td>mark the named attempts' rollouts, stop their work, wait for it, free their state, then reply; refused while a checkpoint is open</td></tr>
     <tr><td><code>POST …/forget</code></td><td>idle, restored</td><td>stop refusing these rollouts' retired attempts, once the controller is done with them for good</td></tr>
-    <tr><td><code>POST …/commit</code></td><td>prepared</td><td>re-check readiness, write records then manifest; idempotent</td></tr>
-    <tr><td><code>POST …/restore</code></td><td>idle, fresh process</td><td>validate everything, install under the next attempt, stay closed</td></tr>
-    <tr><td><code>POST …/resume</code></td><td>any non-idle</td><td>reopen admission and let parked work continue; also the abort path</td></tr>
+    <tr><td><code>POST …/commit</code></td><td>prepared</td><td>re-check readiness, export once, write records then manifest; a retry awaits the same write, or stores the same export again if storing failed; idempotent</td></tr>
+    <tr><td><code>POST …/restore</code></td><td>idle, fresh process</td><td>read and validate the records in scope in one streaming pass, install them under the next attempt, stay closed; a retire waits for an install that outlived its deadline</td></tr>
+    <tr><td><code>POST …/resume</code></td><td>any non-idle</td><td>stop an unfinished write, so no manifest appears after it returns; reopen admission and let parked work continue; also the abort path</td></tr>
     <tr><td><code>GET …/status</code></td><td>any</td><td>phase, checkpoint ID, readiness report, and checkpoint mode; a resources server also reports whether its verification may be replayed</td></tr>
     <tr><td><code>POST /ng-control/v1/generation-cut</code> (inference worker)</td><td>—</td><td>stage the prefix of each in-flight call and return a receipt</td></tr>
   </tbody>
@@ -512,7 +531,8 @@ simple to state and is what keeps every other table in Gym bounded:
     cannot keep it from arriving late.</td></tr>
     <tr><td><b>Each participant marks, then stops, before it acknowledges.</b> It marks the rollout as retired up to
     the attempt, cancels the attempt's running work once, waits for it to finish within the request deadline, frees
-    its state, and only then replies. Work it could not stop in time stays tracked for a retry.</td>
+    its state, and only then replies. Work or state it could not stop or free in time stays tracked for a retry, and
+    meanwhile blocks the next checkpoint and is never exported.</td>
     <td>Cancelling without waiting leaves work running that can still write. Cancelling twice would interrupt the
     cleanup the first cancellation started.</td></tr>
     <tr><td><b>The refusal lasts until <code>forget</code>.</b> A request for a retired attempt gets 409
@@ -542,11 +562,12 @@ simple to state and is what keeps every other table in Gym bounded:
     <td>The episode's steps and task digest; the cleanup closes the agent and resources sessions</td></tr>
     <tr><td>Agent server</td><td>The session's running activation, and waits for it; a restart-only agent's
     <code>/run</code></td><td>The session, through its retire hook, which is also where an agent stops a sandbox it
-    owns</td></tr>
+    owns; the session is dropped only after the hook finishes</td></tr>
     <tr><td>Policy model server</td><td>The attempt's calls, and waits for them</td><td>Restored cuts, and the
     capture ledgers of attempts 0 through N in one batch</td></tr>
     <tr><td>Resources server</td><td>Nothing to cancel: it waits for the attempt's in-flight requests to
-    drain</td><td>The session, through the server's retire hook</td></tr>
+    drain</td><td>The session, through the server's retire hook, which may run again for the same session after a
+    retire was cut short; the session is dropped only after the hook finishes</td></tr>
   </tbody>
 </table>
 </div>
@@ -592,6 +613,11 @@ that frees it.
     <td>Each participant</td><td>The controller's <code>forget</code>, once the rollout is done for good</td></tr>
     <tr><td>Retired checkpoint IDs</td><td>Each participant</td><td>Only the most recent ones are kept, enough to
     refuse a delayed call from a stale controller</td></tr>
+    <tr><td>A checkpoint's export, its write, and a restore's install</td><td>Each participant</td><td>Resume or the
+    next checkpoint; a write that resume stopped never publishes, and a retire waits for an install still running</td></tr>
+    <tr><td>Session owners carried for routing, with several workers</td><td>Coordinator</td><td>Each checkpoint
+    carries only the owners its continued sessions name, so the list never outgrows the sessions, however many
+    restores a run goes through</td></tr>
     <tr><td>Checkpoint directories</td><td>Training framework</td><td>The framework's own retention</td></tr>
   </tbody>
 </table>
@@ -625,7 +651,10 @@ one without checkpointing and one with it.
   <li><b>One participant per server.</b> A control call reaches one arbitrary worker, so every server kind runs
   one participant across its workers: a coordinator in the main process and a worker link in each worker. Prepare is
   ready only when every worker is; commit gathers every worker's records into one file; an unregistered or lost
-  worker blocks the checkpoint, and a worker that loses the coordinator stops itself.</li>
+  worker blocks the checkpoint, and a worker that loses the coordinator stops itself. A worker's export rechecks
+  its own readiness, since the coordinator knows only what the worker last reported, and a worker's typed error
+  keeps its code through the coordinator. Messages between them use the checkpoint writer's encoder, so NaN,
+  infinities and integers beyond 64 bits arrive unchanged.</li>
   <li><b>Whole-episode state stays with the coordinator</b> after a restore, and the worker that receives the
   replacement <code>/run</code> claims it; exactly one claim succeeds. With several workers, a claim that
   arrives while a checkpoint is open is refused like a new episode, and the caller retries.</li>
@@ -634,7 +663,10 @@ one without checkpointing and one with it.
   workers. Every router gets the <b>alias table</b>, from each old owner ID to its new worker, and the
   <b>placement table</b>, from session ID to worker, for sessions checkpointed with one worker, whose cookies
   name no owner. The placement table is replaced at each restore, so it is bounded by the sessions that restore
-  installed.</li>
+  installed. Each checkpoint lists only the owners its continued sessions name, including stateless resources
+  sessions, which are recorded without state for this, so the alias table never outgrows the sessions either.
+  Reopening sends every worker the current tables, so a worker that joined during a restore does not keep stale
+  ones.</li>
 </ul>
 
 <h2 id="controller">12. What the controller must do</h2>
@@ -657,6 +689,28 @@ one without checkpointing and one with it.
   server already freed the episode's state.</li>
 </ul>
 
+
+<h2 id="testing">13. How it is tested</h2>
+<p>
+Example tests check what each operation does on its own. Most bugs found in review only appeared when operations
+overlapped or failed part way, so two kinds of tests cover that instead:
+</p>
+<ul>
+  <li><b>Contract tests over many inputs,</b> wherever two pieces of code must agree: every payload the record check
+  accepts is restored unchanged or fails the commit by name; every capture key built from a run request decodes back
+  to the same rollout and attempt; every control route refuses an invalid request with a typed client error; every
+  kind of corrupt manifest is a typed error.</li>
+  <li><b>Random sequences of operations</b> against one participant in one process, and against a coordinator with
+  several workers over its real socket. Each seed interleaves episode steps with prepare, commit, resume, retire,
+  forget and restore at short or long deadlines, while writes are held or fail, cleanup is slow, a worker's close
+  fails, workers join, and checkpoints restore onto a different number of workers. After every step: admission is
+  open everywhere when idle; every worker refuses the same retired attempts as its coordinator; every manifest
+  verifies and stores the checkpoint's first export; no manifest appears after resume; no commit includes a retired
+  attempt; and every committed checkpoint restores. Run against earlier versions of the stack, these fail on the
+  bugs review found there.</li>
+  <li><b>An adversarial review pass before each push,</b> reading the change for overlapping operations, partial
+  failures, mismatched contracts, untyped errors and unbounded state.</li>
+</ul>
 
 <section class="part" id="part-v1">
 <p class="eyebrow">Part 3</p>
@@ -2255,19 +2309,28 @@ The 23 open review threads on #2939–#2946 fall into these groups:
     ["Prepare raises (for example, a hook fails)", "The participant reopens admission and returns to idle, so phase and admission never disagree.", "The framework retries or aborts."],
     ["A participant became unready after prepare (out-of-order controller)", "Commit re-checks readiness and refuses; no manifest is written.", "Abort; Gym's checkpoint coordination owns the order so this is a backstop."],
     ["Commit is retried after a lost reply", "The existing manifest is returned unchanged; a different commit into the same directory is refused.", "—"],
+    ["A commit's write outlives the commit's deadline", "The writer keeps running in its thread. A retried commit awaits that same write instead of exporting again, and a retry for another directory or scope is refused.", "Retry the commit, or resume to abort."],
+    ["Storing a commit fails (for example, the disk is full)", "A typed error. A retried commit stores the same export again, so the cut stays the one taken at the first commit.", "Retry the commit, or resume to abort."],
+    ["Resume arrives while a write is publishing its manifest", "Resume waits for the publication already under way, then stops the write. Once resume returns, no manifest appears for that checkpoint.", "—"],
+    ["Admission fails to close part way (for example, on one of several workers)", "Prepare and restore both reopen admission everywhere before they fail, so no worker is left closed.", "Retry, or restart the server."],
     ["The framework dies mid-checkpoint", "Each participant's lease expires and it resumes on its own, releasing held responses.", "A restarted framework starts a new checkpoint."],
-    ["Restore finds a missing or corrupt file", "Digest and schema checks fail before anything is installed.", "Coordination retires the replacement attempts everywhere and resumes; the framework restarts those rollouts from input as later attempts."],
+    ["Restore finds a missing or corrupt file", "A typed <code>invalid_checkpoint_state</code> error before anything is installed: a manifest that is not valid JSON or names a records file outside its directory, a digest mismatch, or a record that fails validation, named by its episode.", "Coordination retires the replacement attempts everywhere and resumes; the framework restarts those rollouts from input as later attempts."],
+    ["A restore's install outlives the restore's deadline (for example, a ledger import thread)", "The participant keeps the install. A retire, such as the cleanup of the failed restore, and the next restore wait for it, so nothing is installed after the state is freed.", "—"],
     ["Agent work arrives without a rollout ID while checkpointing is on", "400 <code>rollout_id_required</code>: a checkpoint could neither record nor retire it.", "Send <code>_ng_rollout_id</code> or the rollout path prefix on every call."],
     ["A delayed prepare arrives for a checkpoint that was already aborted", "A resume that reached a participant the prepare never touched fenced that checkpoint ID, so the late prepare gets <code>stale_checkpoint</code>.", "—"],
     ["A request arrives for a retired attempt, including after its retire finished", "409 <code>stale_attempt</code> until the controller forgets the rollout. A resources server also refuses a tool call over MCP for a retired session, since the call names only its session.", "Route all work through the next attempt; forget the rollout once it is done for good."],
-    ["A retire fails or misses its deadline", "The attempts stay refused, and work still running stays tracked, so a retry waits for it again without cancelling it a second time.", "Retry the retire."],
-    ["A duplicate <code>/run</code> arrives for an attempt that is still running", "Not yet handled: the duplicate must not end the live episode. Idempotent <code>/run</code> is the fix.", "—"],
+    ["A retire fails or misses its deadline", "The attempts stay refused, and work or state still being stopped stays tracked, so a retry waits for it again without cancelling it a second time. Until then it blocks the next prepare and is never exported.", "Resume if a checkpoint is open, then retry the retire."],
+    ["A duplicate <code>/run</code> arrives for an attempt that is still running", "Not yet handled, with one worker or several: the duplicate must not end or repeat the live episode. Idempotent <code>/run</code> requests, separate work, are the fix.", "—"],
     ["<code>/close_session</code> or a tool call arrives while a checkpoint is open", "It waits for resume instead of being refused. A refusal would leak the session, or show an error to the model through a third-party harness.", "—"],
     ["The framework never re-dispatches a restored episode", "The next commit whose scope leaves it out retires its restored state in every participant.", "Name every episode it will continue in each commit scope."],
     ["The same checkpoint is restored twice", "Restore deletes capture files the dead execution wrote for the target attempt and later ones. A policy model server that has served calls refuses restore: restore needs fresh processes.", "Start fresh servers and restore again."],
     ["Capture retire or delete arrives while a checkpoint is open", "409 from the policy model server: a commit may still read any live episode's ledger.", "Retry after resume."],
     ["A session's owning worker is gone", "410, instead of running against empty state.", "The rollout fails like any lost session and restarts from input."],
     ["The worker count changed between checkpoint and restore", "Restored sessions are spread over the live workers, and every worker routes old owner IDs to their new worker.", "—"],
+    ["A worker joins while a restore is installing", "It receives the routing tables from before the restore, and reopening sends every worker the current ones.", "—"],
+    ["A worker's readiness regressed after its last report", "Its export refuses with <code>invalid_phase</code>, which keeps its code through the coordinator, and the commit fails.", "Resume and prepare again."],
+    ["A server accepts the discovery connection but never replies, or reports an unknown participant kind", "Discovery reports it as that server's failure instead of waiting forever or crashing.", "Fix or remove the server."],
+    ["Opaque state holds a value JSON cannot carry back unchanged", "Non-string keys and unsupported types are refused when the record is built. A value the fast check accepts but the writer cannot write, such as a <code>datetime</code>, fails the commit with an error naming the episode.", "Fix the server's exported state."],
     ["The worker cannot cut a generation", "The call is treated as undelivered without a prefix; after restore it is regenerated.", "Nothing; correctness never depends on a cut."],
     ["A slow step (for example, verification or seeding) is in flight", "Replay mode: the checkpoint does not wait; the result is held and the step is re-run only after a crash. Wait mode: prepare waits, and the step's result is recorded at the boundary after it.", "Past the deadline in wait mode, the framework retires the rollout or aborts."],
     ["A response was already streaming when admission closed", "It must finish sending; prepare waits for it.", "—"],
