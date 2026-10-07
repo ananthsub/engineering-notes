@@ -418,7 +418,8 @@ in the required order; the training framework calls the coordination.
   <thead><tr><th>Route</th><th>Valid in phase</th><th>Effect</th></tr></thead>
   <tbody>
     <tr><td><code>POST /ng-control/v1/checkpoint/prepare</code></td><td>idle, preparing</td><td>close admission, then wait until ready or the deadline; report blockers</td></tr>
-    <tr><td><code>POST …/retire</code></td><td>idle, restored</td><td>stop the named attempts' work, wait for it, free their state, then reply; refused while a checkpoint is open</td></tr>
+    <tr><td><code>POST …/retire</code></td><td>idle, restored</td><td>mark the named attempts' rollouts, stop their work, wait for it, free their state, then reply; refused while a checkpoint is open</td></tr>
+    <tr><td><code>POST …/forget</code></td><td>idle, restored</td><td>stop refusing these rollouts' retired attempts, once the controller is done with them for good</td></tr>
     <tr><td><code>POST …/commit</code></td><td>prepared</td><td>re-check readiness, write records then manifest; idempotent</td></tr>
     <tr><td><code>POST …/restore</code></td><td>idle, fresh process</td><td>validate everything, install under the next attempt, stay closed</td></tr>
     <tr><td><code>POST …/resume</code></td><td>any non-idle</td><td>reopen admission and let parked work continue; also the abort path</td></tr>
@@ -497,25 +498,29 @@ simple to state and is what keeps every other table in Gym bounded:
 </p>
 <div class="card">
   <b>When retire returns, no work of the named attempts, or of earlier attempts of the same rollouts, is running
-  anywhere in Gym, and everything Gym held for them is freed.</b> Nothing Gym runs can send another request
-  for the attempt, so no participant has to remember it afterwards.
+  anywhere in Gym, and everything Gym held for them is freed, except one entry per rollout that refuses the retired
+  attempts until the controller forgets the rollout.</b> The refusal must outlast the retire: a request a caller
+  sent just before its own retire can still be on its way.
 </div>
 <table>
   <thead><tr><th>Rule</th><th>Why</th></tr></thead>
   <tbody>
     <tr><td><b>Callers before callees.</b> Coordination retires environment servers, then agents, then the policy
     model and resources servers together.</td>
-    <td>When a server's retire starts, everything that could still call it for this attempt has already stopped.
-    A request the agent sent just before its own retire cannot reach the model server after the model's retire.</td></tr>
-    <tr><td><b>Each participant stops before it acknowledges.</b> It refuses new work for the attempt, cancels the
-    attempt's running work, waits for it to finish within the request deadline, frees its state, and only then
-    replies.</td>
-    <td>Cancelling without waiting leaves work running that can still write. Waiting is what lets the refusal be
-    temporary.</td></tr>
-    <tr><td><b>The refusal lasts only as long as the stop.</b> A request for an attempt that is being retired gets
-    409 <code>stale_attempt</code>. Once retire returns, the attempt is forgotten.</td>
-    <td>A lasting record of retired attempts would grow with every rollout ever retired. After the stop there is
-    nothing left that could send a request, so there is nothing to refuse.</td></tr>
+    <td>When a server's retire starts, everything that could still call it for this attempt has already stopped,
+    so nothing new is sent. A request already sent travels on another connection than the retire, so the order alone
+    cannot keep it from arriving late.</td></tr>
+    <tr><td><b>Each participant marks, then stops, before it acknowledges.</b> It marks the rollout as retired up to
+    the attempt, cancels the attempt's running work once, waits for it to finish within the request deadline, frees
+    its state, and only then replies. Work it could not stop in time stays tracked for a retry.</td>
+    <td>Cancelling without waiting leaves work running that can still write. Cancelling twice would interrupt the
+    cleanup the first cancellation started.</td></tr>
+    <tr><td><b>The refusal lasts until <code>forget</code>.</b> A request for a retired attempt gets 409
+    <code>stale_attempt</code>, also after retire returned and also if the retire failed. The mark only goes up.
+    The controller calls <code>forget</code> for a rollout once it is done for good, in the same caller-first
+    order.</td>
+    <td>A late request from a caller would otherwise be accepted, and on a resources server could create state
+    nothing frees. One entry per rollout, released by an explicit call, keeps it bounded.</td></tr>
     <tr><td><b>No retire while a checkpoint is open.</b> A participant refuses retire while it is preparing,
     prepared or committed. It accepts retire when idle, and after a restore, where nothing is running yet.</td>
     <td>Otherwise retire can deadlock: the environment server's retire waits for the episode's final cleanup, that
@@ -583,6 +588,8 @@ that frees it.
     claims them, or the next commit whose scope leaves them out</td></tr>
     <tr><td>Capture ledger and complete-record captures</td><td>Training framework</td><td>Retire once a rollout
     is consumed or abandoned; delete once nothing can still write</td></tr>
+    <tr><td>Refusal of retired attempts: one entry per rollout, and a resources server's retired sessions</td>
+    <td>Each participant</td><td>The controller's <code>forget</code>, once the rollout is done for good</td></tr>
     <tr><td>Retired checkpoint IDs</td><td>Each participant</td><td>Only the most recent ones are kept, enough to
     refuse a delayed call from a stale controller</td></tr>
     <tr><td>Checkpoint directories</td><td>Training framework</td><td>The framework's own retention</td></tr>
@@ -638,8 +645,9 @@ one without checkpointing and one with it.
   includes reading capture manifests and calling capture retire or delete, which a policy model server refuses
   with 409 while a checkpoint is open.</li>
   <li><b>Abort, then retire.</b> To retire a straggler, resume first, then retire, then prepare again.</li>
-  <li><b>After <code>retire(N)</code>, dispatch attempt N+1 or nothing.</b> Gym keeps no record that would refuse
-  an older attempt.</li>
+  <li><b>After <code>retire(N)</code>, dispatch attempt N+1 or nothing,</b> and <b>call <code>forget</code> once
+  the rollout is done for good:</b> nothing of any of its attempts can still run, and it will not be dispatched
+  again. Until then every participant keeps one entry for it.</li>
   <li><b>Name every continued episode in each commit scope</b> until its replacement is re-dispatched.</li>
   <li><b>Retire a capture once it has been consumed or abandoned, and delete it once nothing can still write.</b>
   Without these calls, capture files are never deleted.</li>
@@ -1496,7 +1504,7 @@ scenario with thousands of concurrent rollouts.
 
 <h3 id="changes-kept">What stays the same</h3>
 <ul>
-  <li>Identity: <code>_ng_rollout_id</code> and <code>_ng_attempt_index</code>, and the capture key <code>r</code> or <code>r-aN</code>. v1 refused a replaced attempt's requests forever; v2 refuses them only while a retire stops the attempt, because afterwards nothing of it is running.</li>
+  <li>Identity: <code>_ng_rollout_id</code> and <code>_ng_attempt_index</code>, and the capture key <code>r</code> or <code>r-aN</code>. v1 refused a replaced attempt's requests forever; v2 refuses a retired attempt's requests until the controller forgets its rollout.</li>
   <li>Every control call carries a checkpoint ID and an absolute deadline; repeating a completed call returns the recorded result; a stale checkpoint ID cannot reopen traffic.</li>
   <li>Manifests are written last, and a committed participant directory never changes.</li>
   <li>Restore installs attempt N's state as attempt N+1, in fresh processes, and stays closed until an explicit resume.</li>
@@ -1511,9 +1519,10 @@ or from earlier drafts of v2, map as follows:</p>
 <table>
   <thead><tr><th>Concept</th><th>Earlier name</th><th>Name now</th></tr></thead>
   <tbody>
-    <tr><td>Removing an attempt from Gym</td><td>retire and fence; a lasting per-rollout minimum attempt</td>
-    <td><b>retire</b>: stop, then free. <code>RetiringAttempts</code> holds an attempt only while its retire is stopping
-    it, and the status report counts them as <code>retiring</code></td></tr>
+    <tr><td>Removing an attempt from Gym</td><td>retire and fence: a per-rollout minimum attempt kept forever</td>
+    <td><b>retire</b>: mark, stop, then free; <b>forget</b> ends the mark. <code>RetiredAttempts</code> refuses a
+    rollout's retired attempts until <code>forget</code>, and the status report counts them as
+    <code>retired_rollouts</code></td></tr>
     <tr><td>Refusing work while admission is closed</td><td><code>checkpoint_parked</code> (policy model, agents,
     environment servers), <code>resources_admission_closed</code> (resources servers)</td>
     <td><code>admission_closed</code> on every server</td></tr>
@@ -1589,7 +1598,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
   <li><b>Races between control operations</b> (resume during prepare, delayed messages, wakeups crossing checkpoints): one lock serializes every transition, prepare re-checks its checkpoint after waiting, and resumed checkpoint IDs are remembered and refused.</li>
   <li><b>Parent and identity propagation</b> (agent middleware, the parent relay, headers versus URL prefixes): only the URL prefix remains, and the parent relay is gone.</li>
   <li><b>Unfinished model calls saved too early</b>: undelivered calls and their ledger rows are always left out.</li>
-  <li><b>Restore with live state, and stale attempts</b>: every participant refuses restore with live state. Retire stops an attempt's work and frees its state before it replies, so no participant keeps a lasting fence.</li>
+  <li><b>Restore with live state, and stale attempts</b>: every participant refuses restore with live state. Retire stops an attempt's work and frees its state before it replies, and the refusal of the attempt lasts until the controller forgets the rollout.</li>
   <li><b>Restored state that no replacement has claimed yet, lost by a second checkpoint</b>: this concern still applied to v2 and is being fixed (gap 1 below).</li>
   <li><b>Terminal sessions not reported to the checkpoint layer</b>: resources servers get explicit session-start and session-end hooks for protocols that create sessions outside <code>/seed_session</code>.</li>
 </ul>
@@ -2091,7 +2100,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
           [m("RL", "ORC", "resume (abort), then retire [s·a0]", "control"), m("ORC", "ENV", "retire", "problem"), m("ORC", "AGT", "retire", "problem"), m("ORC", "POL", "retire", "problem"), m("ORC", "RES", "retire", "problem")],
           { ENV: "s stopped, sessions closed", AGT: "s stopped and freed", POL: "s calls stopped, ledgers retired", RES: "s drained and freed" }, { phase: "idle", session: "retired", resources: "retired" }),
         S("Prepare again succeeds; s restarts later",
-          "The framework prepares again; with s gone, prepare becomes ready and the checkpoint proceeds without it. The framework later re-dispatches s from its input as attempt 1. Nothing of s·a0 remains in Gym, so no participant keeps a record to refuse it.",
+          "The framework prepares again; with s gone, prepare becomes ready and the checkpoint proceeds without it. The framework later re-dispatches s from its input as attempt 1. Nothing of s·a0 remains in Gym but one entry per server refusing it, until the framework forgets s once it is done for good.",
           [m("RL", "ORC", "prepare(ckpt k+1)", "control"), m("ORC", "AGT", "prepare", "control"), m("AGT", "ORC", "ready", "reply")],
           { AGT: "prepared" }, { phase: "prepared" }),
         S("If the framework disappears instead",
@@ -2250,8 +2259,8 @@ The 23 open review threads on #2939–#2946 fall into these groups:
     ["Restore finds a missing or corrupt file", "Digest and schema checks fail before anything is installed.", "Coordination retires the replacement attempts everywhere and resumes; the framework restarts those rollouts from input as later attempts."],
     ["Agent work arrives without a rollout ID while checkpointing is on", "400 <code>rollout_id_required</code>: a checkpoint could neither record nor retire it.", "Send <code>_ng_rollout_id</code> or the rollout path prefix on every call."],
     ["A delayed prepare arrives for a checkpoint that was already aborted", "A resume that reached a participant the prepare never touched fenced that checkpoint ID, so the late prepare gets <code>stale_checkpoint</code>.", "—"],
-    ["A request arrives for an attempt that is being retired", "409 <code>stale_attempt</code> while the retire is stopping it. Once retire returns, nothing Gym runs can send one, and the attempt is forgotten.", "Route all work through the next attempt."],
-    ["A late request names a session that retire or close already freed", "The server's own unknown-session error. No participant keeps a table of retired attempts or sessions.", "—"],
+    ["A request arrives for a retired attempt, including after its retire finished", "409 <code>stale_attempt</code> until the controller forgets the rollout. A resources server also refuses a tool call over MCP for a retired session, since the call names only its session.", "Route all work through the next attempt; forget the rollout once it is done for good."],
+    ["A retire fails or misses its deadline", "The attempts stay refused, and work still running stays tracked, so a retry waits for it again without cancelling it a second time.", "Retry the retire."],
     ["A duplicate <code>/run</code> arrives for an attempt that is still running", "Not yet handled: the duplicate must not end the live episode. Idempotent <code>/run</code> is the fix.", "—"],
     ["<code>/close_session</code> or a tool call arrives while a checkpoint is open", "It waits for resume instead of being refused. A refusal would leak the session, or show an error to the model through a third-party harness.", "—"],
     ["The framework never re-dispatches a restored episode", "The next commit whose scope leaves it out retires its restored state in every participant.", "Name every episode it will continue in each commit scope."],
