@@ -453,7 +453,12 @@ Coordination order: <b>prepare</b> environment servers → policy model → agen
 and each unclaimed restored episode under its replacement attempt. <b>Resume</b> resources → policy model → agents → environment servers.
 <b>Retire</b> callers before callees: environment servers → agents → policy model and resources together,
 each replying only after the attempts' work has stopped. After a commit writes its files, each participant also
-retires the restored episodes that are neither running nor in the commit's scope.
+deletes the restored episodes that are neither running nor in the commit's scope. It does not retire them:
+the controller may still start those rollouts over as the same attempt, so nothing may refuse that attempt later,
+such as a capture-ledger fence. A replacement attempt that has started is never deleted this way.
+A restore gives each participant every episode it continues, including ones the participant holds no record of,
+so a participant that keeps files per episode clears what a dead execution left. A restore that misses its deadline
+reopens admission only once its install has finished.
 <b>Restore</b> is all or nothing: if any participant fails, coordination retires the replacement attempts
 everywhere, which frees their restored state, and resumes every participant. The training framework restarts
 those rollouts from their input as later attempts.
@@ -503,7 +508,7 @@ sandboxes concurrently within the commit deadline. Any implementation has to mee
   <li><b>Clean up what checkpoints keep.</b> Snapshots or paused sandboxes must be deleted once no checkpoint the
   controller may restore refers to them, including after a crash, when the process that tracked them is gone.</li>
   <li><b>Agents attached to a resources server's sandbox</b> through its seed reply need the rebuilt sandbox's
-  descriptor after a restore. Seeds are idempotent and admitted during a checkpoint, so the restored session's
+  descriptor after a restore. Seeds are idempotent, so the restored session's
   seed reply can carry it without a new call.</li>
   <li><b>A harness running inside the sandbox</b> must continue from the sandbox's filesystem after a restore:
   snapshots do not keep running processes.</li>
@@ -1588,7 +1593,7 @@ or from earlier drafts of v2, map as follows:</p>
     <tr><td>Restored state no replacement attempt has claimed</td><td>pending, unused, not yet re-dispatched</td>
     <td><b>unclaimed</b>; <code>restored_pending</code> in code</td></tr>
     <tr><td>What a commit does with unclaimed restored state its scope leaves out</td><td>release, drop</td>
-    <td><b>retire</b></td></tr>
+    <td><b>delete</b>; <code>delete_restored</code> in code, which defaults to retire where a retire refuses nothing later</td></tr>
     <tr><td>What a participant does with an attempt's state once its work stopped</td><td>release, discard</td>
     <td><b>free</b></td></tr>
     <tr><td>The commit scope</td><td>the model commit scope: episodes the other participants exported</td>
@@ -1678,7 +1683,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
   <li><s>Unclaimed restored state must survive a second checkpoint.</s> <i>Fixed: every participant exports it again, and a double-crash scenario covers it.</i></li>
   <li><s>The worker-side staging helpers that generation cuts need are not in Gym.</s> <i>Ported, and the fake worker in the process-level suite now continues cuts through them.</i></li>
   <li>Most resources servers have not declared a checkpoint mode, so they are restart-only. <i>The five most used training verifiers (code generation, competitive coding, LLM-judge equivalence, math with judge, and GenRM comparison) now declare themselves stateless with replayable verification; others follow as they are audited.</i></li>
-  <li><s>A replay-mode seed or verification that reaches a closed resources server fails instead of continuing.</s> <i>Fixed: replay-safe requests are admitted while closed and are not part of that checkpoint.</i></li>
+  <li><s>A replay-mode seed or verification that reaches a closed resources server fails instead of continuing.</s> <i>Fixed: a replay-mode verification is admitted while closed and is not part of that checkpoint. A seed waits for resume instead, and a seed already in flight holds up prepare, because the environment server's replay step can record its next boundary while the checkpoint is open.</i></li>
   <li><s>Control traffic shares a connection pool with long-running <code>/run</code> calls.</s> <i>Fixed: control calls use their own pool.</i></li>
   <li><s>Environment servers and restart-only agents do not refuse more than one worker.</s> <i>Fixed.</i></li>
   <li>Constrained-decoding requests should restart instead of continuing a cut prefix.</li>
@@ -1854,7 +1859,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
     },
     resources: {
       title: "Resources session",
-      text: "A resources session starts when /seed_session succeeds (Gymnasium: /reset) and ends at /close_session, /verify, or a terminal step. The server's checkpoint mode decides what a live session means for a checkpoint. A close during a checkpoint waits for resume. Retire waits for the session's in-flight requests, then frees it; afterwards nothing of the session remains.",
+      text: "A resources session starts when /seed_session succeeds (Gymnasium: /reset) and ends at /close_session, /verify, or a terminal step. The server's checkpoint mode decides what a live session means for a checkpoint. A seed or a close during a checkpoint waits for resume. Retire waits for the session's in-flight requests, then frees it; afterwards nothing of the session remains.",
       nodes: { unbound: [20, 130], live: [300, 130], ended: [650, 130], retired: [300, 245] },
       edges: [["unbound", "live", "seed"], ["live", "ended", "close · verify · end"], ["live", "retired", "retire: drain, then free"]],
       bad: ["live->retired"],
@@ -2321,7 +2326,7 @@ The 23 open review threads on #2939–#2946 fall into these groups:
     ["A request arrives for a retired attempt, including after its retire finished", "409 <code>stale_attempt</code> until the controller forgets the rollout. A resources server also refuses a tool call over MCP for a retired session, since the call names only its session.", "Route all work through the next attempt; forget the rollout once it is done for good."],
     ["A retire fails or misses its deadline", "The attempts stay refused, and work or state still being stopped stays tracked, so a retry waits for it again without cancelling it a second time. Until then it blocks the next prepare and is never exported.", "Resume if a checkpoint is open, then retry the retire."],
     ["A duplicate <code>/run</code> arrives for an attempt that is still running", "Not yet handled, with one worker or several: the duplicate must not end or repeat the live episode. Idempotent <code>/run</code> requests, separate work, are the fix.", "—"],
-    ["<code>/close_session</code> or a tool call arrives while a checkpoint is open", "It waits for resume instead of being refused. A refusal would leak the session, or show an error to the model through a third-party harness.", "—"],
+    ["<code>/close_session</code>, a tool call, or a session seed arrives while a checkpoint is open", "It waits for resume instead of being refused. A refusal would leak the session, or show an error to the model through a third-party harness. A seed already in flight when admission closes holds up prepare, and the commit exports its session, so a session an environment server's replay step created is never missing from the checkpoint.", "—"],
     ["The framework never re-dispatches a restored episode", "The next commit whose scope leaves it out retires its restored state in every participant.", "Name every episode it will continue in each commit scope."],
     ["The same checkpoint is restored twice", "Restore deletes capture files the dead execution wrote for the target attempt and later ones. A policy model server that has served calls refuses restore: restore needs fresh processes.", "Start fresh servers and restore again."],
     ["Capture retire or delete arrives while a checkpoint is open", "409 from the policy model server: a commit may still read any live episode's ledger.", "Retry after resume."],
