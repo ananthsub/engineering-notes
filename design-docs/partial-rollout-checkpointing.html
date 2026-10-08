@@ -410,7 +410,7 @@ next to it and publishes the whole checkpoint last.
   <thead><tr><th>Participant</th><th>One record per</th><th>Record contents</th><th>Never stored</th></tr></thead>
   <tbody>
     <tr><td>Environment server</td><td>episode at a step boundary</td><td>episode ID, task digest, the next step and the results it needs (for example, the final agent response and observations before verification, or the verification result after it), and open session handles (resources and agent session IDs and cookies)</td><td>anything the agent or resources server owns</td></tr>
-    <tr><td>Agent server</td><td>agent session</td><td>episode ID, agent-owned session data (tool access, cookies), and the latest turn-loop boundary</td><td>the episode's protocol position, environment state, token arrays</td></tr>
+    <tr><td>Agent server</td><td>agent session</td><td>episode ID, agent-owned session data (tool access, cookies, observations, and how many activations the session has started), and the latest turn-loop boundary. Each activation reports observations under its own invocation ID, so a restored session's next activation takes the next ID, and an activation continued from its boundary keeps its own.</td><td>the episode's protocol position, environment state, token arrays</td></tr>
     <tr><td>Policy model server</td><td>continued episode</td><td>token-free capture-ledger rows up to the checkpoint, minus undelivered calls, plus the generation cut of an undelivered call</td><td>token IDs, logprobs, masks (the token store owns these)</td></tr>
     <tr><td>Resources server</td><td>live session (exported and stateless modes)</td><td>episode ID, the worker its cookie names, and, in exported mode, the environment's typed session state; a stateless session is recorded without state, so a restore keeps routing its cookie and frees it like any other session</td><td>sessions of restart-only servers</td></tr>
     <tr><td>Training framework</td><td>—</td><td>token store snapshot, replay and dataloader state, and the published marker naming every Gym manifest</td><td>—</td></tr>
@@ -663,6 +663,12 @@ one without checkpointing and one with it.
   <li><b>Whole-episode state stays with the coordinator</b> after a restore, and the worker that receives the
   replacement <code>/run</code> claims it; exactly one claim succeeds. With several workers, a claim that
   arrives while a checkpoint is open is refused like a new episode, and the caller retries.</li>
+  <li><b>Restored policy attempts are tracked across workers.</b> The policy model's coordinator holds the
+  attempts a restore continues; each worker drops one from its own set at its first call for it. A commit asks
+  every worker and treats as unstarted only the attempts that no worker has started, so it never deletes a running
+  replacement's ledger. Only the first reopen after a restore hands the coordinator's set to the workers, so a
+  checkpoint resumed without a commit cannot make a started attempt unstarted again. Once any worker has left,
+  what it started is unknown: no attempt counts as unstarted, and restore is refused until the server restarts.</li>
   <li><b>The worker count is a deployment choice that may change between checkpoint and restore:</b> from one
   worker to several, from several to one, or between different counts. Restored sessions are installed on live
   workers. Every router gets the <b>alias table</b>, from each old owner ID to its new worker, and the
