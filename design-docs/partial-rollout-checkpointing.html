@@ -754,7 +754,6 @@ overlapped or failed part way, so two kinds of tests cover that instead:
 <div class="item"><h3>A restored cut can be lost with several workers <span class="tag ok">compute only</span></h3>
 <p>A worker takes a restored cut when it claims it, so if the claim times out the call is generated again, which costs compute but is still correct.</p></div>
 
-<div class="callout bad"><p>This stack has not yet been run against a real model, a real inference worker serving generation cuts, or a deployment across several hosts. The process-level tests use a fake inference backend.</p></div>
 </section>
 
 <section id="v2-contract">
