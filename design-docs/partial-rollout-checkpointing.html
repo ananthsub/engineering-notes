@@ -801,6 +801,7 @@ highlights its current state with a thick solid border.
 <div style="max-width:760px">
 <h3>Calls that have not been delivered are left out</h3>
 <p>When admission closes, the model holds every response that has not started streaming, and the checkpoint leaves out those calls together with their rows in the capture ledger. After a crash the agent simply makes the call again. Only a response that is already streaming has to finish before prepare is ready.</p>
+<p>A response starts streaming with its first chunk of answer data, not with its headers. A streaming response sends its headers before it reads its body, and the model server sends keep-alive comments while the backend is still generating. If either counted as the start, prepare would wait for a call that has produced nothing instead of cutting it, and a call whose last token write the checkpoint is holding could never finish, so prepare would stall. So headers, empty chunks and keep-alive comments leave the call cuttable, its first answer chunk is held while admission is closed, and an answer that already started still drains before prepare completes.</p>
 <h3>A waiting call of a retired attempt stays refused</h3>
 <p>A call that waits at closed admission has not been admitted, so a retire marks it directly. Once its attempt is marked retired, the call is refused for good: it stays refused after the controller forgets the rollout, and even if the retire was cut short by its deadline. The retire returns only after every such waiting call has left, so a forget that follows cannot let one in.</p>
 <h3>Generation cuts save compute but are never required</h3>
@@ -1208,7 +1209,7 @@ block a checkpoint.
 <div class="table-wrap"><table>
   <thead><tr><th>Pull request</th><th>Branch</th><th>What it adds</th></tr></thead>
   <tbody>
-    <tr><td>#3882</td><td><code>partial-ckpt-core</code></td><td>The control plane, episode steps, coordination, storage and restarts, and the rule that a <code>/run</code> is never sent twice with checkpointing on.</td></tr>
+    <tr><td>#3882</td><td><code>partial-ckpt-core</code></td><td>The control plane, episode steps, coordination, storage and restarts, and the rule that a <code>/run</code> is never sent twice with checkpointing on. Merged.</td></tr>
     <tr><td>#3883</td><td><code>partial-ckpt-policy-model</code></td><td>The policy model participant, generation cuts, lineage restore, several policy workers, per-backend cut addresses from #3971, new calls that wait for resume, and each server's runtime directory for its sockets.</td></tr>
     <tr><td>#3884</td><td><code>partial-ckpt-model-worker-cuts</code></td><td>Helpers inference workers use to save cuts, with checks against the exact parent tokens.</td></tr>
     <tr><td>#3885</td><td><code>partial-ckpt-environment</code></td><td>The environment participant and the stages of <code>single_agent_turn</code>, including restart episodes.</td></tr>
