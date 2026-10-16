@@ -1237,7 +1237,7 @@ block a checkpoint.
     <tr><td>#3893</td><td><code>partial-ckpt-rollout-collection</code></td><td>Rollout collection as the controller for evaluation runs, with the dispatch log and repeated retires.</td></tr>
     <tr><td>#3903</td><td><code>partial-ckpt-telemetry</code></td><td>Spans and metrics for every checkpoint call.</td></tr>
     <tr><td>#3909</td><td><code>partial-ckpt-multi-worker</code></td><td>Several workers for resources, agent and environment servers.</td></tr>
-    <tr><td>#4197</td><td><code>partial-ckpt-fault-tests</code></td><td>Random sequences of checkpoint calls and injected faults, checking the guarantees after every step.</td></tr>
+    <tr><td>#4197</td><td><code>partial-ckpt-fault-tests</code></td><td>Random sequences of checkpoint calls and injected faults, checking the guarantees after every step, and deterministic tests of control calls racing background work.</td></tr>
   </tbody>
 </table></div>
 <p style="max-width:760px">#3905 is separate and targets main; it routes each session's requests to the worker that holds the session, and keeps its worker sockets in the same runtime directory, which it adds as an identical file so either pull request can merge first. Five server ports sit on #3889: Workplace Assistant (#3894), Gymnasium (#3895), Blackjack (#3896), indirect prompt injection (#3897) and proof refinement (#3898).</p>
